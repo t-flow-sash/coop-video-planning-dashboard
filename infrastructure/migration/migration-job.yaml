@@ -6,6 +6,7 @@ metadata:
     app.kubernetes.io/name: coop-migration
     app.kubernetes.io/part-of: coop-video-planning
     app.kubernetes.io/component: migration
+    coop.example.com/postgres-client: "true"
 spec:
   backoffLimit: 2
   activeDeadlineSeconds: 600

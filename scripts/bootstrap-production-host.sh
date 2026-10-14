@@ -157,13 +157,16 @@ print("running" if (container.get("State") or {}).get("Running") is True else "s
 }
 
 install -d -o root -g root -m 0700 "$REGISTRY_DATA"
-if registry_inspect="$(docker container inspect coop-registry 2>/dev/null)"; then
-  registry_state="$(validate_registry_container <<<"$registry_inspect")" || \
+registry_inspect_file="$(mktemp)"
+registry_inspect_error="$(mktemp)"
+trap 'rm -f "$registry_inspect_file" "$registry_inspect_error"' EXIT INT TERM
+if docker container inspect coop-registry >"$registry_inspect_file" 2>"$registry_inspect_error"; then
+  registry_state="$(validate_registry_container <"$registry_inspect_file")" || \
     fail 'existing coop-registry configuration differs; refusing replacement'
   if [[ "$registry_state" == stopped ]]; then
     docker start coop-registry >/dev/null
   fi
-else
+elif grep -Eq '^(Error response from daemon: |Error: )?No such (object|container): coop-registry$' "$registry_inspect_error"; then
   docker pull "$REGISTRY_IMAGE"
   docker run -d --name coop-registry --restart unless-stopped \
     -p 127.0.0.1:5000:5000 \
@@ -172,7 +175,12 @@ else
     -v "$REGISTRY_DATA:/var/lib/registry" \
     --entrypoint /entrypoint.sh \
     "$REGISTRY_IMAGE" /etc/distribution/config.yml >/dev/null
+else
+  registry_inspect_message="$(<"$registry_inspect_error")"
+  fail "could not inspect coop-registry: ${registry_inspect_message:-unknown Docker error}"
 fi
+rm -f "$registry_inspect_file" "$registry_inspect_error"
+trap - EXIT INT TERM
 curl -fsS http://127.0.0.1:5000/v2/ >/dev/null || fail 'registry health probe failed'
 
 systemctl is-enabled --quiet docker || fail 'Docker is not enabled'

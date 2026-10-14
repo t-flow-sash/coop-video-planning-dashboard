@@ -4,15 +4,17 @@ set -Eeuo pipefail
 NAMESPACE="${NAMESPACE:-coop-prod}"
 DUMP="${1:-}"
 CONFIRM="${2:-}"
+RECONCILE_ATTEMPTS="${RECONCILE_ATTEMPTS:-120}"
+RECONCILE_POLL_SECONDS="${RECONCILE_POLL_SECONDS:-5}"
+LOCK_NAME="coop-postgres-restore-lock"
 [[ "$DUMP" =~ ^(daily|weekly|pre-restore)-[0-9]{8}T[0-9]{6}Z\.dump$ ]] || {
   echo "Usage: $0 <daily|weekly|pre-restore>-YYYYMMDDTHHMMSSZ.dump --yes" >&2
   exit 2
 }
 [[ "$CONFIRM" == "--yes" ]] || { echo "Restore is destructive; pass --yes." >&2; exit 2; }
 command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 127; }
+command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 127; }
 
-pod="coop-restore-$(date -u +%s)"
-replicas="$(kubectl -n "$NAMESPACE" get deployment coop-api -o jsonpath='{.spec.replicas}')"
 readonly suspend_order=(
   kustomization/coop-root
   gitrepository/coop-video-planning
@@ -32,15 +34,11 @@ readonly resume_order=(
   kustomization/coop-root
 )
 declare -A was_suspended=()
-for resource in "${suspend_order[@]}"; do
-  kind="${resource%%/*}"
-  name="${resource#*/}"
-  was_suspended["$resource"]="$(kubectl -n flux-system get "$kind" "$name" -o jsonpath='{.spec.suspend}')"
-done
-backup_cron_was_suspended="$(kubectl -n "$NAMESPACE" get cronjob postgres-backup -o jsonpath='{.spec.suspend}')"
-
+pod=""
+lock_acquired=false
 restore_succeeded=false
 maintenance_started=false
+
 suspend_resource() {
   local resource="$1" kind name
   kind="${resource%%/*}"
@@ -62,16 +60,41 @@ fail_closed() {
 cleanup() {
   local status=$?
   trap - EXIT
-  kubectl -n "$NAMESPACE" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  if [[ -n "$pod" ]]; then
+    kubectl -n "$NAMESPACE" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  fi
   if [[ "$maintenance_started" == true && "$restore_succeeded" != true ]]; then
     fail_closed
     echo "Restore failed: Flux root, source, workload Kustomizations, and coop-api remain suspended/stopped." >&2
+  fi
+  if [[ "$lock_acquired" == true ]]; then
+    kubectl -n "$NAMESPACE" delete configmap "$LOCK_NAME" --ignore-not-found >/dev/null 2>&1 || true
   fi
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+lock_holder="$(date -u +%Y%m%dT%H%M%S)-$$-${RANDOM}"
+if ! kubectl -n "$NAMESPACE" create configmap "$LOCK_NAME" \
+  --from-literal="holder=${lock_holder}" >/dev/null; then
+  echo "Could not acquire cluster-wide PostgreSQL restore lock; another restore may be running." >&2
+  exit 8
+fi
+lock_acquired=true
+
+replicas="$(kubectl -n "$NAMESPACE" get deployment coop-api -o jsonpath='{.spec.replicas}')"
+for resource in "${suspend_order[@]}"; do
+  kind="${resource%%/*}"
+  name="${resource#*/}"
+  was_suspended["$resource"]="$(kubectl -n flux-system get "$kind" "$name" -o jsonpath='{.spec.suspend}')"
+  if [[ "${was_suspended[$resource]}" == true ]]; then
+    echo "Refusing restore because dependency ${resource} was already suspended." >&2
+    exit 9
+  fi
+done
+backup_cron_was_suspended="$(kubectl -n "$NAMESPACE" get cronjob postgres-backup -o jsonpath='{.spec.suspend}')"
 
 # Enter maintenance before querying any active workload. If any operation below
 # fails, the EXIT trap retries the complete fail-closed boundary.
@@ -95,14 +118,29 @@ done
 }
 
 assert_no_active_writers() {
-  local active_jobs
-  if ! active_jobs="$(kubectl -n "$NAMESPACE" get jobs -l coop.example.com/postgres-client=true \
-    -o jsonpath='{range .items[?(@.status.active==1)]}{.metadata.name}{"\n"}{end}')"; then
+  local jobs_json dangerous_jobs
+  if ! jobs_json="$(kubectl -n "$NAMESPACE" get jobs \
+    -l coop.example.com/postgres-client=true -o json)"; then
     echo "Could not determine active PostgreSQL writer Jobs; refusing restore." >&2
     return 6
   fi
-  if [[ -n "$active_jobs" ]]; then
-    echo "Refusing restore while an active PostgreSQL writer Job exists." >&2
+  if ! dangerous_jobs="$(python3 -c '
+import json, sys
+jobs = json.load(sys.stdin).get("items", [])
+for job in jobs:
+    conditions = job.get("status", {}).get("conditions") or []
+    terminal = any(
+        condition.get("type") in {"Complete", "Failed"} and condition.get("status") == "True"
+        for condition in conditions
+    )
+    if not terminal:
+        print(job.get("metadata", {}).get("name", "<unnamed-job>"))
+' <<<"$jobs_json")"; then
+    echo "Could not parse PostgreSQL writer Job status; refusing restore." >&2
+    return 6
+  fi
+  if [[ -n "$dangerous_jobs" ]]; then
+    echo "Refusing restore while an active or pending PostgreSQL writer Job exists: ${dangerous_jobs//$'\n'/, }." >&2
     return 4
   fi
 }
@@ -110,19 +148,19 @@ assert_no_active_writers() {
 assert_no_active_writers
 kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas=0
 kubectl -n "$NAMESPACE" rollout status deployment/coop-api --timeout=180s
-# Close the boundary against a Job which became active while an already-running
-# Flux reconciliation was winding down after suspension.
+# Close the boundary against a Job which appeared while an already-running
+# reconciliation was winding down after suspension.
 assert_no_active_writers
 [[ "$(kubectl -n "$NAMESPACE" get deployment coop-api -o jsonpath='{.spec.replicas}')" == 0 ]] || {
   echo "coop-api did not remain scaled to zero; refusing restore." >&2
   exit 7
 }
 
-kubectl -n "$NAMESPACE" apply -f - <<YAML
+pod="$(kubectl -n "$NAMESPACE" create -f - -o jsonpath='{.metadata.name}' <<'YAML'
 apiVersion: v1
 kind: Pod
 metadata:
-  name: ${pod}
+  generateName: coop-restore-
   labels:
     app.kubernetes.io/name: coop-restore
     coop.example.com/postgres-client: "true"
@@ -166,6 +204,7 @@ spec:
     - name: tmp
       emptyDir: {}
 YAML
+)"
 kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/${pod}" --timeout=180s
 
 # The single-quoted script is intentionally evaluated inside the restore pod.
@@ -182,21 +221,46 @@ kubectl -n "$NAMESPACE" exec "$pod" -- sh -ec '
   pg_restore --list "$tmp" >/dev/null
   mv "$tmp" "/backups/pre-restore-${stamp}.dump"
   trap - EXIT INT TERM
-  psql --dbname="$PGDATABASE" --set=ON_ERROR_STOP=1 --command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();" || true
+  psql --dbname="$PGDATABASE" --set=ON_ERROR_STOP=1 --command="SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid();"
   pg_restore --clean --if-exists --no-owner --no-acl --exit-on-error --single-transaction --dbname="$PGDATABASE" "$dump"
 ' sh "$DUMP"
 
+fresh_reconcile_observed() {
+  local resource_json="$1" expected_generation="$2" requested_at="$3"
+  python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+status = obj.get("status") or {}
+conditions = status.get("conditions") or []
+ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions)
+try:
+    observed = int(status.get("observedGeneration", 0))
+    expected = int(sys.argv[1])
+except (TypeError, ValueError):
+    raise SystemExit(1)
+valid = observed >= expected and status.get("lastHandledReconcileAt") == sys.argv[2] and ready
+raise SystemExit(0 if valid else 1)
+' "$expected_generation" "$requested_at" <<<"$resource_json"
+}
+
 resume_and_reconcile() {
-  local resource="$1" kind name requested_at
-  [[ "${was_suspended[$resource]}" != true ]] || return 0
+  local resource="$1" kind name requested_at expected_generation resource_json attempt
   kind="${resource%%/*}"
   name="${resource#*/}"
-  requested_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  kubectl -n flux-system patch "$kind" "$name" --type=merge \
-    -p '{"spec":{"suspend":false}}' >/dev/null
+  expected_generation="$(kubectl -n flux-system patch "$kind" "$name" --type=merge \
+    -p '{"spec":{"suspend":false}}' -o jsonpath='{.metadata.generation}')"
+  requested_at="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
   kubectl -n flux-system annotate --overwrite "$resource" \
     "reconcile.fluxcd.io/requestedAt=${requested_at}" >/dev/null
-  kubectl -n flux-system wait --for=condition=Ready "$resource" --timeout=10m >/dev/null
+  for ((attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt++)); do
+    resource_json="$(kubectl -n flux-system get "$kind" "$name" -o json)"
+    if fresh_reconcile_observed "$resource_json" "$expected_generation" "$requested_at"; then
+      return 0
+    fi
+    sleep "$RECONCILE_POLL_SECONDS"
+  done
+  echo "Timed out waiting for fresh reconciliation of ${resource}." >&2
+  return 10
 }
 
 for resource in "${resume_order[@]}"; do

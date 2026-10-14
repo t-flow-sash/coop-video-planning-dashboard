@@ -5,6 +5,7 @@ metadata:
   labels:
     app.kubernetes.io/name: postgres-backup
     app.kubernetes.io/part-of: coop-video-planning
+    coop.example.com/postgres-client: "true"
 spec:
   schedule: "17 2 * * *"
   timeZone: Europe/Berlin
@@ -13,6 +14,9 @@ spec:
   failedJobsHistoryLimit: 3
   startingDeadlineSeconds: 3600
   jobTemplate:
+    metadata:
+      labels:
+        coop.example.com/postgres-client: "true"
     spec:
       backoffLimit: 2
       activeDeadlineSeconds: 3600

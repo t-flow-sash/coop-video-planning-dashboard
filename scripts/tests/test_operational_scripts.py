@@ -32,21 +32,31 @@ class RestoreScriptTests(unittest.TestCase):
         self,
         *,
         active_writer: bool = False,
+        pending_writer: bool = False,
         fail_exec: bool = False,
         fail_active_check: bool = False,
+        lock_collision: bool = False,
+        stale_reconcile: bool = False,
+        stale_observed_generation: bool = False,
+        initially_suspended: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], list[list[str]], dict[str, Any]]:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             state_file = temp / "state.json"
             log_file = temp / "kubectl.jsonl"
+            suspended = {
+                **{item: item == initially_suspended for item in self.flux_objects},
+                "cronjob/postgres-backup": False,
+            }
             state_file.write_text(
                 json.dumps(
                     {
-                        "suspended": {
-                            **{item: False for item in self.flux_objects},
-                            "cronjob/postgres-backup": False,
-                        },
+                        "suspended": suspended,
                         "replicas": 2,
+                        "generation": {item: 1 for item in self.flux_objects},
+                        "observed_generation": {item: 1 for item in self.flux_objects},
+                        "last_handled": {item: "old-request" for item in self.flux_objects},
+                        "ready": {item: True for item in self.flux_objects},
                     }
                 ),
                 encoding="utf-8",
@@ -69,7 +79,6 @@ class RestoreScriptTests(unittest.TestCase):
                     def save():
                         state_path.write_text(json.dumps(state))
 
-                    words = [word for word in args if not word.startswith("-")]
                     if "get" in args and "deployment" in args and "coop-api" in args:
                         print(state["replicas"], end="")
                     elif "get" in args and ("kustomization" in args or "gitrepository" in args or "cronjob" in args):
@@ -80,7 +89,18 @@ class RestoreScriptTests(unittest.TestCase):
                         else:
                             kind = "cronjob"
                         name = args[args.index(kind) + 1]
-                        print(str(state["suspended"][f"{kind}/{name}"]).lower(), end="")
+                        resource = f"{kind}/{name}"
+                        if "-o" in args and args[args.index("-o") + 1] == "json":
+                            print(json.dumps({
+                                "metadata": {"generation": state["generation"][resource]},
+                                "status": {
+                                    "observedGeneration": state["observed_generation"][resource],
+                                    "lastHandledReconcileAt": state["last_handled"][resource],
+                                    "conditions": [{"type": "Ready", "status": "True" if state["ready"][resource] else "False"}],
+                                },
+                            }))
+                        else:
+                            print(str(state["suspended"][resource]).lower(), end="")
                     elif "patch" in args and ("kustomization" in args or "gitrepository" in args or "cronjob" in args):
                         if "kustomization" in args:
                             kind = "kustomization"
@@ -89,25 +109,49 @@ class RestoreScriptTests(unittest.TestCase):
                         else:
                             kind = "cronjob"
                         name = args[args.index(kind) + 1]
+                        resource = f"{kind}/{name}"
                         payload = args[args.index("-p") + 1]
-                        state["suspended"][f"{kind}/{name}"] = json.loads(payload)["spec"]["suspend"]
+                        new_suspend = json.loads(payload)["spec"]["suspend"]
+                        if kind != "cronjob" and state["suspended"][resource] != new_suspend:
+                            state["generation"][resource] += 1
+                        state["suspended"][resource] = new_suspend
                         save()
+                        if "-o" in args:
+                            print(state["generation"][resource], end="")
                     elif "get" in args and "jobs" in args:
                         if not all(state["suspended"].values()):
                             print("ACTIVE_CHECK_BEFORE_SUSPEND", file=sys.stderr)
                             sys.exit(90)
                         if os.environ.get("MOCK_FAIL_ACTIVE_CHECK") == "1":
                             sys.exit(52)
+                        jobs = []
                         if os.environ.get("MOCK_ACTIVE_WRITER") == "1":
-                            print("writer-job")
+                            jobs.append({"metadata": {"name": "writer-job"}, "status": {"active": 1}})
+                        if os.environ.get("MOCK_PENDING_WRITER") == "1":
+                            jobs.append({"metadata": {"name": "pending-writer"}, "status": {}})
+                        print(json.dumps({"items": jobs}))
+                    elif "create" in args and "configmap" in args:
+                        if os.environ.get("MOCK_LOCK_COLLISION") == "1":
+                            print("Error from server (AlreadyExists)", file=sys.stderr)
+                            sys.exit(1)
+                    elif "create" in args and "-f" in args and "-" in args:
+                        sys.stdin.read()
+                        print("coop-restore-generated", end="")
+                    elif "annotate" in args:
+                        resource = next(word for word in args if "/" in word and not word.startswith("reconcile."))
+                        requested = next(word for word in args if word.startswith("reconcile.fluxcd.io/requestedAt=")).split("=", 1)[1]
+                        if os.environ.get("MOCK_STALE_RECONCILE") != "1":
+                            state["last_handled"][resource] = requested
+                            if os.environ.get("MOCK_STALE_OBSERVED_GENERATION") != "1":
+                                state["observed_generation"][resource] = state["generation"][resource]
+                            state["ready"][resource] = True
+                            save()
                     elif "scale" in args:
                         replica_arg = next(item for item in args if item.startswith("--replicas="))
                         state["replicas"] = int(replica_arg.split("=", 1)[1])
                         save()
                     elif "exec" in args and os.environ.get("MOCK_FAIL_EXEC") == "1":
                         sys.exit(41)
-                    elif "apply" in args and "-f" in args and "-" in args:
-                        sys.stdin.read()
                     sys.exit(0)
                     """
                 ),
@@ -121,8 +165,14 @@ class RestoreScriptTests(unittest.TestCase):
                     "MOCK_STATE": str(state_file),
                     "MOCK_LOG": str(log_file),
                     "MOCK_ACTIVE_WRITER": "1" if active_writer else "0",
+                    "MOCK_PENDING_WRITER": "1" if pending_writer else "0",
                     "MOCK_FAIL_EXEC": "1" if fail_exec else "0",
                     "MOCK_FAIL_ACTIVE_CHECK": "1" if fail_active_check else "0",
+                    "MOCK_LOCK_COLLISION": "1" if lock_collision else "0",
+                    "MOCK_STALE_RECONCILE": "1" if stale_reconcile else "0",
+                    "MOCK_STALE_OBSERVED_GENERATION": "1" if stale_observed_generation else "0",
+                    "RECONCILE_ATTEMPTS": "2",
+                    "RECONCILE_POLL_SECONDS": "0",
                 }
             )
             result = subprocess.run(
@@ -178,11 +228,43 @@ class RestoreScriptTests(unittest.TestCase):
         result, calls, state = self.run_restore(active_writer=True)
         rendered = [self.operation(call) for call in calls]
         self.assertEqual(result.returncode, 4)
-        self.assertIn("active PostgreSQL writer Job", result.stderr)
+        self.assertIn("active or pending PostgreSQL writer Job", result.stderr)
         self.assertFalse(any(" apply -f -" in f" {call} " for call in rendered))
         self.assertFalse(any(" exec " in f" {call} " for call in rendered))
         self.assertTrue(all(state["suspended"].values()))
         self.assertEqual(state["replicas"], 0)
+
+    def test_pending_writer_is_dangerous_and_aborts_before_restore(self) -> None:
+        result, calls, state = self.run_restore(pending_writer=True)
+        rendered = [self.operation(call) for call in calls]
+        self.assertEqual(result.returncode, 4)
+        self.assertIn("pending-writer", result.stderr)
+        self.assertFalse(any(" create -f -" in f" {call} " for call in rendered))
+        self.assertFalse(any(" exec " in f" {call} " for call in rendered))
+        self.assertTrue(all(state["suspended"].values()))
+        self.assertEqual(state["replicas"], 0)
+
+    def test_atomic_lock_collision_aborts_without_mutating_cluster(self) -> None:
+        result, calls, state = self.run_restore(lock_collision=True)
+        rendered = [self.operation(call) for call in calls]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("restore lock", result.stderr)
+        self.assertFalse(any(" patch " in f" {call} " for call in rendered))
+        self.assertFalse(any(" scale " in f" {call} " for call in rendered))
+        self.assertFalse(any(" create -f -" in f" {call} " for call in rendered))
+        self.assertFalse(any("delete configmap coop-postgres-restore-lock" in call for call in rendered))
+        self.assertEqual(state["replicas"], 2)
+
+    def test_pre_suspended_dependency_aborts_before_restore_or_api_scale_up(self) -> None:
+        result, calls, state = self.run_restore(initially_suspended="kustomization/coop-migration")
+        rendered = [self.operation(call) for call in calls]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already suspended", result.stderr)
+        self.assertFalse(any(" create -f -" in f" {call} " for call in rendered))
+        self.assertFalse(any(" exec " in f" {call} " for call in rendered))
+        self.assertFalse(any("--replicas=2" in call for call in rendered))
+        self.assertNotIn("Restore completed", result.stdout)
+        self.assertEqual(state["replicas"], 2)
 
     def test_active_check_failure_aborts_fail_closed(self) -> None:
         result, calls, state = self.run_restore(fail_active_check=True)
@@ -228,15 +310,47 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertEqual(resume_indexes, sorted(resume_indexes))
         for resource, resume_index in zip(expected, resume_indexes, strict=True):
             kind, name = resource.split("/", 1)
+            annotate_index = next(
+                index
+                for index, call in enumerate(rendered)
+                if index > resume_index and "annotate" in call and f"{kind}/{name}" in call
+            )
             self.assertTrue(
                 any(
-                    index > resume_index and "annotate" in call and f"{kind}/{name}" in call
+                    index > annotate_index and f"get {kind} {name} -o json" in call
                     for index, call in enumerate(rendered)
                 ),
                 resource,
             )
+        self.assertTrue(any("create -f - -o jsonpath={.metadata.name}" in call for call in rendered))
+        self.assertTrue(any("delete pod coop-restore-generated" in call for call in rendered))
+        self.assertTrue(any("delete configmap coop-postgres-restore-lock" in call for call in rendered))
         self.assertFalse(any(state["suspended"].values()))
         self.assertEqual(state["replicas"], 2)
+
+    def test_stale_ready_and_last_handled_reconcile_do_not_resume_api(self) -> None:
+        result, calls, state = self.run_restore(stale_reconcile=True)
+        rendered = [self.operation(call) for call in calls]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fresh reconciliation", result.stderr)
+        self.assertFalse(any("--replicas=2" in call for call in rendered))
+        self.assertNotIn("Restore completed", result.stdout)
+        self.assertTrue(all(state["suspended"].values()))
+        self.assertEqual(state["replicas"], 0)
+
+    def test_matching_last_handled_with_stale_observed_generation_does_not_resume_api(self) -> None:
+        result, calls, state = self.run_restore(stale_observed_generation=True)
+        rendered = [self.operation(call) for call in calls]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fresh reconciliation", result.stderr)
+        self.assertFalse(any("--replicas=2" in call for call in rendered))
+        self.assertTrue(all(state["suspended"].values()))
+        self.assertEqual(state["replicas"], 0)
+
+    def test_restore_requires_backend_termination_to_succeed(self) -> None:
+        script = RESTORE.read_text(encoding="utf-8")
+        terminate = next(line for line in script.splitlines() if "pg_terminate_backend" in line)
+        self.assertNotIn("|| true", terminate)
 
 
 class RegistryBootstrapTests(unittest.TestCase):
@@ -278,6 +392,7 @@ class RegistryBootstrapTests(unittest.TestCase):
         arguments: tuple[str, ...] = (),
         github_host_key: str | None = None,
         firewall_status: str | None = None,
+        inspect_mode: str = "existing",
     ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
@@ -353,6 +468,13 @@ class RegistryBootstrapTests(unittest.TestCase):
                     if args[:1] == ["version"]:
                         print("29.9.1")
                     elif args[:2] == ["container", "inspect"]:
+                        mode = os.environ["MOCK_INSPECT_MODE"]
+                        if mode == "missing":
+                            print("Error: No such object: coop-registry", file=sys.stderr)
+                            sys.exit(1)
+                        if mode == "error":
+                            print("Cannot connect to the Docker daemon", file=sys.stderr)
+                            sys.exit(1)
                         print(open(os.environ["MOCK_INSPECT"]).read())
                     elif args[:1] == ["inspect"]:
                         print(open(os.environ["MOCK_INSPECT"]).read())
@@ -369,6 +491,8 @@ class RegistryBootstrapTests(unittest.TestCase):
                 "age": common_logger
                 + "\nif sys.argv[1:] == ['--version']: print('v1.3.2')\nsys.exit(0)\n",
                 "curl": common_logger + "\nsys.exit(0)\n",
+                "install": common_logger
+                + "\nfrom pathlib import Path\nPath(sys.argv[-1]).mkdir(parents=True, exist_ok=True)\nsys.exit(0)\n",
                 "ssh-keyscan": common_logger + "\nsys.exit(0)\n",
                 "systemctl": common_logger + "\nsys.exit(0)\n",
                 "ufw": common_logger
@@ -385,6 +509,7 @@ class RegistryBootstrapTests(unittest.TestCase):
                     "PATH": f"{temp}:{env['PATH']}",
                     "MOCK_LOG": str(log_file),
                     "MOCK_INSPECT": str(inspect_file),
+                    "MOCK_INSPECT_MODE": inspect_mode,
                     "REGISTRY_DATA": str(registry_data),
                     "K3S_CONFIG_FILE": str(k3s_config),
                     "K3S_REGISTRIES_FILE": str(registries),
@@ -439,6 +564,20 @@ class RegistryBootstrapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         docker_calls = [call[1:] for call in calls if call[0] == "docker"]
         self.assertFalse(any(call and call[0] in {"rm", "run", "start", "restart"} for call in docker_calls))
+
+    def test_missing_registry_is_created(self) -> None:
+        result, calls = self.run_bootstrap(running=False, inspect_mode="missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        docker_calls = [call[1:] for call in calls if call[0] == "docker"]
+        self.assertTrue(any(call and call[0] == "pull" for call in docker_calls))
+        self.assertTrue(any(call and call[0] == "run" for call in docker_calls))
+
+    def test_registry_inspect_error_aborts_without_create_or_start(self) -> None:
+        result, calls = self.run_bootstrap(running=False, inspect_mode="error")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("inspect", result.stderr)
+        docker_calls = [call[1:] for call in calls if call[0] == "docker"]
+        self.assertFalse(any(call and call[0] in {"pull", "run", "start"} for call in docker_calls))
 
     def test_untrusted_github_host_key_aborts_before_cluster_mutation(self) -> None:
         result, calls = self.run_bootstrap(

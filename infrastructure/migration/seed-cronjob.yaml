@@ -5,12 +5,16 @@ metadata:
   labels:
     app.kubernetes.io/name: coop-seed
     app.kubernetes.io/part-of: coop-video-planning
+    coop.example.com/postgres-client: "true"
 spec:
   # Absichtlich suspendiert; Seed nur als expliziter One-off-Job (Runbook).
   suspend: true
   schedule: "0 0 1 1 *"
   concurrencyPolicy: Forbid
   jobTemplate:
+    metadata:
+      labels:
+        coop.example.com/postgres-client: "true"
     spec:
       backoffLimit: 1
       ttlSecondsAfterFinished: 86400

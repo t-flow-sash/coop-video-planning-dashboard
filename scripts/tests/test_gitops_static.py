@@ -229,6 +229,19 @@ class RenderedSecurityContractTests(unittest.TestCase):
             for item in rendered_documents(root)
         }
 
+    def test_rendered_postgres_client_jobs_are_selectable_by_restore_guard(self) -> None:
+        selector = "coop.example.com/postgres-client"
+        migration = self.by_kind_name("infrastructure/migration")
+        backup = self.by_kind_name("infrastructure/backup")
+        migration_job = migration[("Job", "coop-migration-a4b4d9f030ee")]
+        seed = migration[("CronJob", "coop-seed")]
+        backup_cron = backup[("CronJob", "postgres-backup")]
+
+        self.assertEqual(migration_job["metadata"]["labels"][selector], "true")
+        for cronjob in (seed, backup_cron):
+            self.assertEqual(cronjob["metadata"]["labels"][selector], "true")
+            self.assertEqual(cronjob["spec"]["jobTemplate"]["metadata"]["labels"][selector], "true")
+
     def test_ingress_has_only_exact_public_health_and_expected_auth_contracts(self) -> None:
         objects = self.by_kind_name("infrastructure/ingress")
         ingress = objects[("IngressRoute", "coop-https")]
