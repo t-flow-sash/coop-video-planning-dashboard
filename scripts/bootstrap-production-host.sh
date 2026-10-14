@@ -202,10 +202,10 @@ elif [[ "$MODE" == '--bootstrap-coop-root' ]]; then
   kubectl -n flux-system create secret generic sops-age \
     --from-file=age.agekey="$CONFIG_DIR/sops-age.key" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  flux create secret git coop-git-readonly --namespace=flux-system \
-    --url=ssh://git@github.com/t-flow-sash/coop-video-planning-dashboard.git \
-    --private-key-file="$CONFIG_DIR/flux-github-readonly" \
-    --known-hosts-file="$GITHUB_KNOWN_HOSTS_FILE" --export | kubectl apply -f - >/dev/null
+  kubectl -n flux-system create secret generic coop-git-readonly \
+    --from-file=identity="$CONFIG_DIR/flux-github-readonly" \
+    --from-file=known_hosts="$GITHUB_KNOWN_HOSTS_FILE" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl apply -f clusters/production/source.yaml >/dev/null
   kubectl wait -n flux-system --for=condition=Ready \
     gitrepository/coop-video-planning --timeout=5m >/dev/null
