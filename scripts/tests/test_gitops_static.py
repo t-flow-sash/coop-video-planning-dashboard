@@ -402,6 +402,27 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("ausstehendes B2-Deployment-Gate", runbook)
         self.assertIn("SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU", runbook)
 
+    def test_retained_pv_namespace_loss_runbook_is_fail_closed_and_identity_checked(self) -> None:
+        runbook = (ROOT / "docs/gitops-m2.md").read_text(encoding="utf-8")
+        required_guards = (
+            "Namespaceverlust",
+            "Released",
+            "claimRef",
+            "hostPath",
+            "nodeAffinity",
+            "read-only",
+            "volumeName",
+            "UID",
+            "leere neue Volumes",
+            "niemals vertauscht",
+            "Backup-First",
+            "Abbruch",
+        )
+        for guard in required_guards:
+            self.assertIn(guard, runbook)
+        for boundary in ("coop-root", "coop-database", "coop-apps", "coop-migration", "coop-backup"):
+            self.assertIn(boundary, runbook)
+
 
 class DurableStorageTests(unittest.TestCase):
     def test_local_path_storage_class_is_retained_and_waits_for_consumer(self) -> None:

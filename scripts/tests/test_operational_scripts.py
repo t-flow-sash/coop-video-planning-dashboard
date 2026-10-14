@@ -47,6 +47,9 @@ class RestoreScriptTests(unittest.TestCase):
             suspended = {
                 **{item: item == initially_suspended for item in self.flux_objects},
                 "cronjob/postgres-backup": False,
+                # Model the dangerous live drift from the declarative
+                # suspend:true contract: restore must close this boundary.
+                "cronjob/coop-seed": False,
             }
             state_file.write_text(
                 json.dumps(
@@ -224,6 +227,40 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("ACTIVE_CHECK_BEFORE_SUSPEND", result.stderr)
 
+    def test_unsuspended_seed_is_suspended_and_verified_before_first_writer_check(self) -> None:
+        result, calls, state = self.run_restore(active_writer=True)
+        rendered = [self.operation(call) for call in calls]
+        writer_check = next(index for index, call in enumerate(rendered) if " get jobs " in f" {call} ")
+        suspend = next(
+            index
+            for index, call in enumerate(rendered)
+            if "patch cronjob coop-seed" in call and '"suspend":true' in call
+        )
+        verify = next(
+            index
+            for index, call in enumerate(rendered)
+            if index > suspend and "get cronjob coop-seed" in call
+        )
+        self.assertLess(suspend, verify)
+        self.assertLess(verify, writer_check)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(state["suspended"]["cronjob/coop-seed"])
+
+    def test_seed_remains_suspended_after_success_while_backup_is_restored(self) -> None:
+        result, calls, state = self.run_restore()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = [self.operation(call) for call in calls]
+        self.assertFalse(
+            any("patch cronjob coop-seed" in call and '"suspend":false' in call for call in rendered)
+        )
+        self.assertTrue(state["suspended"]["cronjob/coop-seed"])
+        self.assertFalse(state["suspended"]["cronjob/postgres-backup"])
+
+    def test_seed_remains_suspended_on_restore_failure(self) -> None:
+        result, _, state = self.run_restore(fail_exec=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(state["suspended"]["cronjob/coop-seed"])
+
     def test_active_writer_aborts_before_restore_and_leaves_everything_suspended(self) -> None:
         result, calls, state = self.run_restore(active_writer=True)
         rendered = [self.operation(call) for call in calls]
@@ -325,6 +362,7 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertTrue(any("create -f - -o jsonpath={.metadata.name}" in call for call in rendered))
         self.assertTrue(any("delete pod coop-restore-generated" in call for call in rendered))
         self.assertTrue(any("delete configmap coop-postgres-restore-lock" in call for call in rendered))
+        self.assertTrue(state["suspended"].pop("cronjob/coop-seed"))
         self.assertFalse(any(state["suspended"].values()))
         self.assertEqual(state["replicas"], 2)
 

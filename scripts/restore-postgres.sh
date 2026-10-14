@@ -54,6 +54,8 @@ fail_closed() {
   done
   kubectl -n "$NAMESPACE" patch cronjob postgres-backup --type=merge \
     -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
+  kubectl -n "$NAMESPACE" patch cronjob coop-seed --type=merge \
+    -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
   kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas=0 >/dev/null 2>&1 || true
 }
 
@@ -102,8 +104,6 @@ maintenance_started=true
 for resource in "${suspend_order[@]}"; do
   suspend_resource "$resource"
 done
-kubectl -n "$NAMESPACE" patch cronjob postgres-backup --type=merge \
-  -p '{"spec":{"suspend":true}}' >/dev/null
 for resource in "${suspend_order[@]}"; do
   kind="${resource%%/*}"
   name="${resource#*/}"
@@ -112,10 +112,17 @@ for resource in "${suspend_order[@]}"; do
     exit 5
   }
 done
-[[ "$(kubectl -n "$NAMESPACE" get cronjob postgres-backup -o jsonpath='{.spec.suspend}')" == true ]] || {
-  echo "Failed to verify suspension of cronjob/postgres-backup." >&2
-  exit 5
-}
+# CronJobs remain live objects after their owning Flux Kustomization is
+# suspended. Close both schedule races explicitly before the first writer
+# query; coop-seed is declaratively suspended and is never resumed here.
+for cronjob in postgres-backup coop-seed; do
+  kubectl -n "$NAMESPACE" patch cronjob "$cronjob" --type=merge \
+    -p '{"spec":{"suspend":true}}' >/dev/null
+  [[ "$(kubectl -n "$NAMESPACE" get cronjob "$cronjob" -o jsonpath='{.spec.suspend}')" == true ]] || {
+    echo "Failed to verify suspension of cronjob/${cronjob}." >&2
+    exit 5
+  }
+done
 
 assert_no_active_writers() {
   local jobs_json dangerous_jobs

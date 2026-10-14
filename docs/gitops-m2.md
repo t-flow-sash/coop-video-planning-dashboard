@@ -10,15 +10,15 @@ Ein reines k3s-API-Binding auf `127.0.0.1` wurde verworfen: dadurch war das Kube
 
 ## Tatsächliche B1-Hostbasis
 
-| Komponente | Gepinnte Version |
-|---|---|
-| Docker Engine | 29.9.1 (`docker-ce` 5:29.9.1-1~ubuntu.26.04~resolute) |
-| containerd.io (Docker) | 2.4.2-2 |
-| k3s / Kubernetes | v1.36.5+k3s1 / v1.36.5 |
-| Flux CLI / Controller-Export | v2.9.6 |
-| SOPS | v3.13.3 |
-| age | v1.3.2 |
-| Distribution Registry | v3.1.2, Multiarch-Index `sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8` |
+| Komponente                   | Gepinnte Version                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------- |
+| Docker Engine                | 29.9.1 (`docker-ce` 5:29.9.1-1~ubuntu.26.04~resolute)                                             |
+| containerd.io (Docker)       | 2.4.2-2                                                                                           |
+| k3s / Kubernetes             | v1.36.5+k3s1 / v1.36.5                                                                            |
+| Flux CLI / Controller-Export | v2.9.6                                                                                            |
+| SOPS                         | v3.13.3                                                                                           |
+| age                          | v1.3.2                                                                                            |
+| Distribution Registry        | v3.1.2, Multiarch-Index `sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8` |
 
 Private Bootstrap-Dateien liegen root-only unter `/root/.config/coop-dashboard/`; Zugangsdaten stehen in `/root/.config/coop-dashboard/credentials.env` (Benutzer `sascha`). Private Schlüssel oder Passwörter dürfen niemals in Tickets, Logs oder Git kopiert werden. Die öffentliche lokale CA liegt zusätzlich unter `docs/certificates/coop-local-ca.crt` und kann auf Clients in den jeweiligen System-Truststore importiert werden. Danach Browser vollständig neu starten und die Kette gegen `https://192.168.2.94/` prüfen.
 
@@ -139,8 +139,8 @@ Ein PVC ist kein Offsite-Backup. Produktiv ist zusätzlich ein verschlüsselter,
 Restore ist destruktiv und benötigt ein Wartungsfenster.
 
 1. Gewünschten Dump anhand Job-Logs/Bestandsliste identifizieren; nur Dateinamen der Form `daily-*`, `weekly-*` oder `pre-restore-*` akzeptieren.
-2. Aktuelle Git-/Image-/Migrationsrevision und Replica-Zahl dokumentieren. Das Skript suspendiert fail-closed zuerst `coop-root`, die Git-Source, `coop-database`, `coop-migration`, `coop-apps`, `coop-ingress`, `coop-backup` sowie den Backup-CronJob und verifiziert jede Sperre, bevor es aktive PostgreSQL-Writer prüft.
-3. Bei einem aktiven Writer-Job oder einer nicht verifizierbaren Abfrage bricht das Skript ab; Flux und Backup-CronJob bleiben suspendiert und die API wird auf null gehalten.
+2. Aktuelle Git-/Image-/Migrationsrevision und Replica-Zahl dokumentieren. Das Skript suspendiert fail-closed zuerst `coop-root`, die Git-Source sowie `coop-database`, `coop-migration`, `coop-apps`, `coop-ingress` und `coop-backup` und verifiziert diese Sperren. Danach suspendiert und verifiziert es die weiterhin eigenständig aktiven CronJobs `postgres-backup` und `coop-seed`, bevor es zum ersten Mal aktive oder pending PostgreSQL-Writer prüft.
+3. Bei einem aktiven Writer-Job oder einer nicht verifizierbaren Abfrage bricht das Skript ab; Flux, Backup- und Seed-CronJob bleiben suspendiert und die API wird auf null gehalten. Auch nach Erfolg bleibt `coop-seed` gemäß deklarativem Sollwert suspendiert; nur der Backup-CronJob wird kontrolliert auf seinen vorherigen Zustand gesetzt.
 4. Ausführen:
    ```bash
    scripts/restore-postgres.sh daily-20260101T011700Z.dump --yes
@@ -152,7 +152,19 @@ Restore ist destruktiv und benötigt ein Wartungsfenster.
    kubectl -n coop-prod exec statefulset/postgres -- pg_isready
    curl https://192.168.2.94/api/v1/health/ready
    ```
-7. Bei Fehlern bleiben API auf null, Root/Source/Kinder und der Backup-CronJob suspendiert. Logs und den automatisch erzeugten Pre-Restore-Dump sichern, Ursache beheben und erst danach Flux bewusst in Abhängigkeitsreihenfolge fortsetzen; nicht blind erneut migrieren.
+7. Bei Fehlern bleiben API auf null, Root/Source/Kinder sowie Backup- und Seed-CronJob suspendiert. Logs und den automatisch erzeugten Pre-Restore-Dump sichern, Ursache beheben und erst danach Flux bewusst in Abhängigkeitsreihenfolge fortsetzen; nicht blind erneut migrieren.
+
+## Retained-PV-Recovery nach Namespaceverlust
+
+Dieses Runbook gilt für den tatsächlichen Verlust von `coop-prod`, wenn die local-path-PVs wegen `Retain` noch existieren. Ein normaler Reconcile ist jetzt gefährlich: fehlende PVCs können automatisch **leere neue Volumes** erhalten. Recovery ist deshalb fail-closed, Backup-First und wird bei jeder unklaren Identität abgebrochen.
+
+1. **Sofort sperren:** `coop-root`, `coop-database`, `coop-apps`, `coop-migration` und `coop-backup` suspendieren und jede Sperre read-back-verifizieren. Alle verbliebenen App-, Migration-, Seed-, Backup- und PostgreSQL-Workloads bleiben aus. Bei API-Fehler, nicht bestätigter Sperre oder noch laufendem Writer: **Abbruch**. Keinen normalen Reconcile starten.
+2. **Istzustand sichern:** PV-, PVC-, Namespace-, Node- und StorageClass-Metadaten sowie Events exportieren. Vor jeder Metadatenänderung ein geprüftes, externes Backup oder einen read-only Snapshot der beiden Hostpfade erstellen. Wenn weder Datenbank noch Backup-Pfad konsistent lesbar gesichert werden kann: **Abbruch** statt Reparaturversuch.
+3. **Released-PVs identifizieren, noch nichts lösen:** Kandidaten nur gemeinsam anhand der alten `claimRef`-Felder (Namespace, Name und UID), Kapazität, `storageClassName: coop-local-path`, `spec.local.path`/hostPath und `nodeAffinity` zum erwarteten Node zuordnen. Den tatsächlichen Pfad auf dem gebundenen Node ausschließlich read-only prüfen: Typ, Besitzer/Rechte, Belegung und erwartete PostgreSQL- beziehungsweise Dump-Struktur protokollieren. Zwei unabhängige Prüfer bestätigen die Zuordnung `postgres-data` ↔ Datenpfad und `postgres-backups` ↔ Backuppfad; die Claims dürfen **niemals vertauscht** werden.
+4. **Automatische Provisionierung blockieren:** Solange die Recovery läuft, bleiben die Flux-Grenzen suspendiert und es wird kein ungebundener deklarativer PVC angewendet. Für jeden Claim ein separates temporäres Recoverymanifest vorbereiten, das unveränderliche Identitätswerte dokumentiert und mit `spec.volumeName` exakt den bestätigten alten PV benennt. Keine Platzhalter direkt aus einer Anleitung ausführen; vor Apply müssen erwarteter Claimname, alte Claim-UID, PV-Name, Kapazität, StorageClass, Node und Pfad in einem Vier-Augen-Check übereinstimmen.
+5. **Claim kontrolliert freigeben und binden:** Erst nach bestätigtem Backup und eindeutiger Einzelzuordnung die alte `claimRef` des genau einen PV kontrolliert lösen. Unmittelbar danach nur den dazugehörigen PVC aus dem geprüften Recoverymanifest erzeugen. Warten, bis exakt dieser Claim an exakt diesen `volumeName` `Bound` ist; neue PVC-UID, PV-`claimRef.uid`, Kapazität, StorageClass, NodeAffinity und Hostpfad gegeneinander prüfen. Erst dann den zweiten PV in derselben Reihenfolge bearbeiten. Bei dynamisch erzeugtem Ersatz-PV, anderem Pfad, falscher UID oder `Pending`: **Abbruch**, Workloads bleiben aus.
+6. **Daten vor Start validieren:** Beide Bound-Zuordnungen erneut exportieren. Daten- und Backup-Pfad read-only gegen die in Schritt 3 protokollierten Identitäten prüfen. Zuerst den Backup-PVC mit einem eingeschränkten read-only Prüfpod und danach PostgreSQL ohne App-/Migration-/Seed-Writer kontrolliert validieren. Vor Schreibzugriff muss ein wiederherstellbarer Dump außerhalb der beiden local-path-PVs liegen. Jede Inkonsistenz ist ein Abbruchpunkt.
+7. **GitOps kontrolliert fortsetzen:** Temporäre Recoverymanifeste archivieren, aber nicht in den normalen Kustomize-Pfad übernehmen. Erst nach Bound+UID+Pfad-Nachweis `coop-database` frisch reconciliieren und PostgreSQL prüfen; danach `coop-migration`, `coop-apps`, `coop-backup` und zuletzt `coop-root` einzeln mit frischem Readiness-Nachweis fortsetzen. `coop-seed` bleibt suspendiert. Bei jedem Fehler wieder alle Grenzen suspendieren und keine nächste Stufe aktivieren.
 
 ## Rollback
 
@@ -163,27 +175,27 @@ Restore ist destruktiv und benötigt ein Wartungsfenster.
 
 ## Akzeptanzmatrix
 
-| Anforderung | Umsetzung / Nachweis |
-|---|---|
-| Namespace | `infrastructure/database/namespace.yaml`: `coop-prod`, restricted PSS |
-| PostgreSQL 17, ClusterIP, 10 Gi retained | StatefulSet/Service; expliziter `postgres-data`-PVC; `coop-local-path` mit PV-Reclaim `Retain` |
-| API/Web Deploy+Svc | `infrastructure/apps/{api,web}.yaml`, je 2 Replicas, ClusterIP |
-| HTTPS, Redirect, Routing | Traefik IngressRoutes: `websecure`, `/api/v1` vor `/`, `web`→HTTPS |
-| BasicAuth + Authorization | API `removeHeader: false`, Web `removeHeader: true`; nur Exact-Health-Routen öffentlich |
-| TLS Secret | `tls.secretName: coop-tls`; leeres Secret-Template ohne Werte |
-| Hardening | Resources, drei Probe-Typen, non-root, seccomp, drop ALL, read-only FS |
-| Netzwerk | Default-deny; DNS; Traefik→Apps; markierte Clients→PostgreSQL; eingeschränkter Flux-Egress |
-| Migration vor Apps | releasebezogener SHA-Job; Flux `dependsOn` und `wait` |
-| Seed bewusst aus | suspendierter CronJob; ausschließlich manueller One-off-Start |
-| Flux-Reihenfolge | Storage→DB→Migration→Apps→Ingress→Backup in `clusters/production` |
-| Backup | täglich; eigener 10-Gi-PVC; validiert + atomic rename; 7 daily/4 weekly |
-| Restore | `scripts/restore-postgres.sh` plus Wartungs-/Verifikationsrunbook |
-| SOPS Age | `.sops.yaml`, Flux-Decryption, keine echten oder Fake-Secrets im Repo |
-| Read-only Git SSH | GitRepository mit SecretRef; private Key nur clusterseitig |
-| Immutable Images | App-SHA-Tag plus verifizierter Digest; Third-party-, Flux- und Dockerfile-Basen per live geprüftem Multiarch-Index; kein `latest` |
-| Fresh Bootstrap | Zwei explizite Stufen; CRD-/Controller-Waits; selbstverwalteter `coop-root` ohne zyklisches `dependsOn` |
-| Storage-Schutz | `Retain`/`WaitForFirstConsumer`; beide PVCs und Namespace gegen Flux-Prune geschützt |
-| Keine Cluster-Push-Automation | Build-Skript endet nach Manifestupdate/Rendercheck |
+| Anforderung                              | Umsetzung / Nachweis                                                                                                              |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Namespace                                | `infrastructure/database/namespace.yaml`: `coop-prod`, restricted PSS                                                             |
+| PostgreSQL 17, ClusterIP, 10 Gi retained | StatefulSet/Service; expliziter `postgres-data`-PVC; `coop-local-path` mit PV-Reclaim `Retain`                                    |
+| API/Web Deploy+Svc                       | `infrastructure/apps/{api,web}.yaml`, je 2 Replicas, ClusterIP                                                                    |
+| HTTPS, Redirect, Routing                 | Traefik IngressRoutes: `websecure`, `/api/v1` vor `/`, `web`→HTTPS                                                                |
+| BasicAuth + Authorization                | API `removeHeader: false`, Web `removeHeader: true`; nur Exact-Health-Routen öffentlich                                           |
+| TLS Secret                               | `tls.secretName: coop-tls`; leeres Secret-Template ohne Werte                                                                     |
+| Hardening                                | Resources, drei Probe-Typen, non-root, seccomp, drop ALL, read-only FS                                                            |
+| Netzwerk                                 | Default-deny; DNS; Traefik→Apps; markierte Clients→PostgreSQL; eingeschränkter Flux-Egress                                        |
+| Migration vor Apps                       | releasebezogener SHA-Job; Flux `dependsOn` und `wait`                                                                             |
+| Seed bewusst aus                         | suspendierter CronJob; ausschließlich manueller One-off-Start                                                                     |
+| Flux-Reihenfolge                         | Storage→DB→Migration→Apps→Ingress→Backup in `clusters/production`                                                                 |
+| Backup                                   | täglich; eigener 10-Gi-PVC; validiert + atomic rename; 7 daily/4 weekly                                                           |
+| Restore                                  | `scripts/restore-postgres.sh` plus Wartungs-/Verifikationsrunbook                                                                 |
+| SOPS Age                                 | `.sops.yaml`, Flux-Decryption, keine echten oder Fake-Secrets im Repo                                                             |
+| Read-only Git SSH                        | GitRepository mit SecretRef; private Key nur clusterseitig                                                                        |
+| Immutable Images                         | App-SHA-Tag plus verifizierter Digest; Third-party-, Flux- und Dockerfile-Basen per live geprüftem Multiarch-Index; kein `latest` |
+| Fresh Bootstrap                          | Zwei explizite Stufen; CRD-/Controller-Waits; selbstverwalteter `coop-root` ohne zyklisches `dependsOn`                           |
+| Storage-Schutz                           | `Retain`/`WaitForFirstConsumer`; beide PVCs und Namespace gegen Flux-Prune geschützt                                              |
+| Keine Cluster-Push-Automation            | Build-Skript endet nach Manifestupdate/Rendercheck                                                                                |
 
 ## Lokale Validierung
 
