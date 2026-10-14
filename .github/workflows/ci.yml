@@ -1,0 +1,50 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: coop_test
+          POSTGRES_USER: coop
+          POSTGRES_PASSWORD: coop
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U coop -d coop_test"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test
+      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000/api/v1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { enable-cache: true }
+      - uses: pnpm/action-setup@v4
+        with: { version: 12.11.2 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: uv sync --project apps/api --all-groups --frozen
+      - run: uv run --project apps/api alembic upgrade head
+      - run: uv run --project apps/api python -m app.seed
+      - run: cd apps/api && uv run ruff format --check app tests alembic
+      - run: cd apps/api && uv run ruff check app tests alembic
+      - run: cd apps/api && uv run mypy app
+      - run: uv run --project apps/api pytest
+      - run: uv run --project apps/api alembic check
+      - run: pnpm format:check
+      - run: pnpm --filter web lint
+      - run: pnpm --filter web typecheck
+      - run: pnpm --filter web test
+      - run: pnpm --filter web build
+      - run: pnpm exec playwright install --with-deps chrome
+      - run: |
+          uv run --project apps/api uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+          pnpm --filter web start --hostname 127.0.0.1 --port 3000 &
+          for i in {1..30}; do curl -fsS http://127.0.0.1:8000/api/v1/health/ready && curl -fsS http://127.0.0.1:3000/coops && break; sleep 2; done
+          pnpm exec playwright test

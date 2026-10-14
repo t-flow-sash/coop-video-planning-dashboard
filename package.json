@@ -1,0 +1,17 @@
+{
+  "name": "coop-video-planning-dashboard",
+  "private": true,
+  "packageManager": "pnpm@12.11.2",
+  "scripts": {
+    "lint": "pnpm --filter web lint",
+    "typecheck": "pnpm --filter web typecheck",
+    "test": "pnpm --filter web test",
+    "build": "pnpm --filter web build",
+    "format:check": "prettier --check apps/web e2e playwright.config.ts package.json pnpm-workspace.yaml",
+    "e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "prettier": "3.6.2"
+  }
+}
