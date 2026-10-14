@@ -3,6 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+cd "$ROOT"
 CONFIG_DIR="${COOP_CONFIG_DIR:-/root/.config/coop-dashboard}"
 REGISTRY_DATA="${REGISTRY_DATA:-/var/lib/coop-dashboard/registry}"
 REGISTRY_IMAGE='docker.io/library/registry@sha256:21078ecfcba8a0cd7e1a384f75b3509899661dd21823bf1da21b5a4674aaceb9'

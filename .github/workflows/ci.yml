@@ -68,9 +68,20 @@ jobs:
           tar -xzf /tmp/kubeconform.tar.gz kubeconform
           schema_catalog='https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
           for dir in infrastructure/database infrastructure/migration infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
-            kubectl kustomize "$dir" > "/tmp/$(basename "$dir").yaml"
-            ./kubeconform -strict -summary -schema-location default \
-              -schema-location "$schema_catalog" "/tmp/$(basename "$dir").yaml"
+            output="/tmp/$(echo "$dir" | tr / -).yaml"
+            # Flux removes top-level SOPS metadata before apply. Strip only that
+            # metadata block here; encrypted Secret values remain schema-checked.
+            kubectl kustomize "$dir" | awk '
+              /^sops:$/ { skip=1; next }
+              skip && /^---$/ { skip=0 }
+              !skip { print }
+            ' > "$output"
+            if grep -Eq 'git-0{12}|sha256:0{64}' "$output"; then
+              echo "Unpromoted image sentinel remains in deployable render: $dir" >&2
+              exit 1
+            fi
+            ./kubeconform -strict -summary -skip CustomResourceDefinition \
+              -schema-location default -schema-location "$schema_catalog" "$output"
           done
       - name: Validate shell syntax
         run: bash -n scripts/*.sh
