@@ -22,3 +22,4 @@ apps/web/out/
 apps/web/coverage/
 apps/web/tsconfig.tsbuildinfo
 node_modules/
+.tools/

@@ -2,11 +2,19 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
 
-export const metadata: Metadata = {
-  title: "Coop-Planung · öffentliche M1-Demo",
-  description:
-    "Sicherer statischer Click-Dummy mit synthetischen Beispieldaten",
-};
+const demo = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
+
+export const metadata: Metadata = demo
+  ? {
+      title: "Coop-Planung · öffentliche Demo",
+      description:
+        "Sicherer statischer Click-Dummy mit synthetischen Beispieldaten",
+    }
+  : {
+      title: "Coop-Planung",
+      description:
+        "Arbeitsoberfläche für die Planung von Kooperationen und Veröffentlichungen",
+    };
 
 export default function RootLayout({
   children,
@@ -20,7 +28,7 @@ export default function RootLayout({
               Zum Inhalt springen
             </a>
             <div className="wordmark">
-              Coop Planung <small>M1 · Demo</small>
+              Coop Planung <small>{demo ? "Öffentliche Demo" : "M2"}</small>
             </div>
             <nav aria-label="Hauptnavigation">
               <Link href="/coops">Kooperationen</Link>

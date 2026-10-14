@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coop-api
+  labels: &apiLabels
+    app.kubernetes.io/name: coop-api
+    app.kubernetes.io/part-of: coop-video-planning
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: *apiLabels
+  template:
+    metadata:
+      labels:
+        <<: *apiLabels
+        coop.example.com/postgres-client: "true"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: api
+          image: 127.0.0.1:5000/coop-api:git-000000000000@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 8000}
+          env:
+            - {name: APP_ENV, value: production}
+            - {name: AUTH_MODE, value: basic}
+            - name: AUTH_USERNAME
+              valueFrom:
+                secretKeyRef: {name: coop-runtime, key: AUTH_USERNAME}
+            - name: AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: coop-runtime, key: AUTH_PASSWORD}
+            - {name: CORS_ORIGIN, value: "https://coop.example.invalid"}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: coop-runtime, key: DATABASE_URL}
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {cpu: "1", memory: 768Mi}
+          startupProbe:
+            httpGet: {path: /api/v1/health/live, port: http}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /api/v1/health/ready, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /api/v1/health/live, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coop-api
+  labels:
+    app.kubernetes.io/name: coop-api
+    app.kubernetes.io/part-of: coop-video-planning
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: coop-api
+    app.kubernetes.io/part-of: coop-video-planning
+  ports:
+    - {name: http, port: 8000, targetPort: http}

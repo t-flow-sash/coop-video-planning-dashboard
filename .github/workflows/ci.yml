@@ -19,7 +19,7 @@ jobs:
           --health-interval 3s --health-timeout 3s --health-retries 20
     env:
       DATABASE_URL: postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test
-      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000/api/v1
+      NEXT_PUBLIC_API_URL: /api/v1
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -28,6 +28,14 @@ jobs:
         with: { version: 12.11.2 }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
+      - uses: azure/setup-kubectl@v4
+        with: { version: v1.31.4 }
+      - uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          scandir: ./scripts
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: pnpm install --frozen-lockfile
       - run: uv sync --project apps/api --all-groups --frozen
       - run: uv run --project apps/api alembic upgrade head
@@ -42,6 +50,28 @@ jobs:
       - run: pnpm --filter web typecheck
       - run: pnpm --filter web test
       - run: pnpm --filter web build
+      - name: Validate API Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with: { dockerfile: apps/api/Dockerfile }
+      - name: Validate Web Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with: { dockerfile: apps/web/Dockerfile }
+      - name: Render and schema-check GitOps manifests
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
+            -o /tmp/kubeconform.tar.gz
+          echo 'c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3  /tmp/kubeconform.tar.gz' \
+            | sha256sum --check --strict
+          tar -xzf /tmp/kubeconform.tar.gz kubeconform
+          schema_catalog='https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          for dir in infrastructure/database infrastructure/migration infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
+            kubectl kustomize "$dir" > "/tmp/$(basename "$dir").yaml"
+            ./kubeconform -strict -summary -schema-location default \
+              -schema-location "$schema_catalog" "/tmp/$(basename "$dir").yaml"
+          done
+      - name: Validate shell syntax
+        run: bash -n scripts/*.sh
       - run: pnpm exec playwright install --with-deps chrome
       - run: |
           set -Eeuo pipefail

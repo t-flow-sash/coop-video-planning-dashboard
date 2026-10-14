@@ -6,12 +6,10 @@ import type {
   Organization,
 } from "@/features/coops/domain";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
 
 function apiUrl(): string {
-  if (!API_URL)
-    throw new Error("NEXT_PUBLIC_API_URL ist für den API-Modus erforderlich.");
-  return API_URL;
+  return API_URL.replace(/\/$/, "");
 }
 
 export class ApiError extends Error {

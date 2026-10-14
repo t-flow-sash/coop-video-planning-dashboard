@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -20,7 +21,7 @@ def create_coop(client: TestClient, **overrides: object) -> dict[str, object]:
     payload.update(overrides)
     response = client.post("/api/v1/coops", json=payload)
     assert response.status_code == 201, response.text
-    return response.json()
+    return cast(dict[str, object], response.json())
 
 
 def test_health_live_has_no_database_dependency_and_ready_checks_schema(client: TestClient) -> None:

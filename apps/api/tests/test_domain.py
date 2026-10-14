@@ -90,7 +90,7 @@ def test_deliverable_schema_is_versioned_and_forbids_unknown_fields() -> None:
     with pytest.raises(ValidationError):
         Deliverable(version=2, kind="VIDEO")
     with pytest.raises(ValidationError):
-        Deliverable(version=1, kind="VIDEO", surprise=True)
+        Deliverable.model_validate({"version": 1, "kind": "VIDEO", "surprise": True})
 
 
 def test_normalization_trims_and_lowercases() -> None:

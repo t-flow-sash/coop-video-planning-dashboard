@@ -17,9 +17,9 @@ def test_migration_created_postgresql_schema() -> None:
 def test_seed_is_idempotent_and_preserves_user_changes() -> None:
     seed_database()
     with engine.begin() as connection:
-        first = connection.execute(text("SELECT count(*) FROM coop")).scalar_one()
+        first: int = connection.execute(text("SELECT count(*) FROM coop")).scalar_one()
         assert first >= 6
-        repeated = connection.execute(
+        repeated: int = connection.execute(
             text(
                 "SELECT count(*) FROM ("
                 "SELECT contact_id FROM coop_contact GROUP BY contact_id HAVING count(*) > 1"
@@ -35,7 +35,7 @@ def test_seed_is_idempotent_and_preserves_user_changes() -> None:
     seed_database()
     with engine.connect() as connection:
         assert connection.execute(text("SELECT count(*) FROM coop")).scalar_one() == first
-        title = connection.execute(
+        title: str = connection.execute(
             text("SELECT title FROM coop WHERE id = :id"),
             {"id": "00000000-0000-4000-8000-000000000301"},
         ).scalar_one()

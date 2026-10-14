@@ -1,0 +1,83 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+  labels:
+    app.kubernetes.io/name: postgres-backup
+    app.kubernetes.io/part-of: coop-video-planning
+spec:
+  schedule: "17 2 * * *"
+  timeZone: Europe/Berlin
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: postgres-backup
+            coop.example.com/postgres-client: "true"
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: pg-dump
+              image: postgres:17-alpine
+              imagePullPolicy: IfNotPresent
+              env:
+                - {name: PGHOST, value: postgres}
+                - {name: PGPORT, value: "5432"}
+                - name: PGDATABASE
+                  valueFrom:
+                    secretKeyRef: {name: coop-runtime, key: POSTGRES_DB}
+                - name: PGUSER
+                  valueFrom:
+                    secretKeyRef: {name: coop-runtime, key: POSTGRES_USER}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: {name: coop-runtime, key: POSTGRES_PASSWORD}
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |
+                  set -eu
+                  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                  tmp="/backups/.daily-${stamp}.dump.tmp"
+                  daily="/backups/daily-${stamp}.dump"
+                  trap 'rm -f "$tmp"' EXIT INT TERM
+                  pg_dump --format=custom --no-owner --no-acl --file="$tmp"
+                  pg_restore --list "$tmp" >/dev/null
+                  mv "$tmp" "$daily"
+                  trap - EXIT INT TERM
+                  if [ "$(date -u +%u)" = "7" ]; then
+                    cp "$daily" "/backups/.weekly-${stamp}.dump.tmp"
+                    mv "/backups/.weekly-${stamp}.dump.tmp" "/backups/weekly-${stamp}.dump"
+                  fi
+                  ls -1t /backups/daily-*.dump 2>/dev/null | sed -n '8,$p' | xargs -r rm -f --
+                  ls -1t /backups/weekly-*.dump 2>/dev/null | sed -n '5,$p' | xargs -r rm -f --
+              resources:
+                requests: {cpu: 100m, memory: 128Mi}
+                limits: {cpu: "1", memory: 512Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: ["ALL"]}
+              volumeMounts:
+                - {name: backups, mountPath: /backups}
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: postgres-backups
+            - name: tmp
+              emptyDir: {}
