@@ -404,24 +404,100 @@ class DocumentationContractTests(unittest.TestCase):
 
     def test_retained_pv_namespace_loss_runbook_is_fail_closed_and_identity_checked(self) -> None:
         runbook = (ROOT / "docs/gitops-m2.md").read_text(encoding="utf-8")
+        heading = "## Retained-PV-Recovery nach Namespaceverlust"
+        start = runbook.index(heading)
+        end = runbook.find("\n## ", start + len(heading))
+        recovery = runbook[start : end if end >= 0 else None]
+
         required_guards = (
             "Namespaceverlust",
             "Released",
             "claimRef",
             "hostPath",
-            "nodeAffinity",
+            "NodeAffinity",
             "read-only",
             "volumeName",
             "UID",
+            "Kapazität",
+            "StorageClass",
             "leere neue Volumes",
             "niemals vertauscht",
             "Backup-First",
             "Abbruch",
         )
         for guard in required_guards:
-            self.assertIn(guard, runbook)
-        for boundary in ("coop-root", "coop-database", "coop-apps", "coop-migration", "coop-backup"):
-            self.assertIn(boundary, runbook)
+            self.assertIn(guard, recovery)
+
+        pre_inventory = recovery.index("Unveränderlichen Checkpoint vor Suspension erstellen")
+        suspension = recovery.index("Source und alle Kustomizations suspendieren")
+        quiescence = recovery.index("Echte Flux-Quieszenz beweisen")
+        post_inventory = recovery.index("Inventur nach Quieszenz wiederholen")
+        drift_gate = recovery.index("Storage-Drift fail-closed ausschließen")
+        claim_ref_release = recovery.index("claimRef kontrolliert lösen")
+        self.assertLess(pre_inventory, suspension)
+        self.assertLess(suspension, quiescence)
+        self.assertLess(quiescence, post_inventory)
+        self.assertLess(post_inventory, drift_gate)
+        self.assertLess(drift_gate, claim_ref_release)
+
+        suspend_block = recovery[suspension:quiescence]
+        self.assertIn("Git-Source `coop-git`", suspend_block)
+        for boundary in (
+            "coop-root",
+            "coop-database",
+            "coop-migration",
+            "coop-apps",
+            "coop-ingress",
+            "coop-backup",
+        ):
+            self.assertIn(f"`{boundary}`", suspend_block)
+        self.assertIn("spec.suspend=true", suspend_block)
+        self.assertIn("read-back", suspend_block)
+
+        quiescence_block = recovery[quiescence:post_inventory]
+        self.assertIn("Reconciling=True", quiescence_block)
+        self.assertIn("keine aktive", quiescence_block)
+        self.assertIn("laufende Controller-Operationen", quiescence_block)
+        self.assertIn("Timeout", quiescence_block)
+
+        drift_block = recovery[post_inventory:claim_ref_release]
+        for drift_guard in (
+            "Neue oder ersetzte PVCs/PVs",
+            "UIDs",
+            "claimRefs",
+            "Kapazität",
+            "StorageClass",
+            "hostPath",
+            "NodeAffinity",
+            "unerwartete Claims",
+            "unmittelbar vor dem Lösen",
+        ):
+            self.assertIn(drift_guard, drift_block)
+        self.assertIn("automatische Neuprovisionierung", drift_block)
+
+        binding = recovery[claim_ref_release:]
+        self.assertIn("spec.volumeName", binding)
+        self.assertIn("postgres-data", binding)
+        self.assertIn("postgres-backups", binding)
+        self.assertIn("Bound", binding)
+        self.assertIn("PVC-UID", binding)
+
+        resume = recovery.index("Vollständig und einzeln fortsetzen")
+        resume_block = recovery[resume:]
+        resume_order = (
+            "Source",
+            "coop-root",
+            "coop-database",
+            "coop-migration",
+            "coop-apps",
+            "coop-ingress",
+            "coop-backup",
+        )
+        positions = [resume_block.index(item) for item in resume_order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("reconcile", resume_block)
+        self.assertIn("Ready", resume_block)
+        self.assertIn("Stop on failure", resume_block)
 
 
 class DurableStorageTests(unittest.TestCase):
