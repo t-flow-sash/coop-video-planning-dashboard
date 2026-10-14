@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal, TypeAlias
 from uuid import UUID
 
 from alembic.script import ScriptDirectory
@@ -57,6 +57,7 @@ from app.services.coops import (
 
 settings = get_settings()
 app = FastAPI(title="Coop Video Planning API", version="1.0.0")
+WriteSession: TypeAlias = Annotated[Session, Depends(get_session, scope="function")]
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 PUBLIC_PATHS = {"/api/v1/health/live", "/api/v1/health/ready"}
@@ -172,21 +173,17 @@ def ready(request: Request) -> dict[str, str]:
 
 
 @app.post("/api/v1/organizations", response_model=OrganizationRead, status_code=201)
-def post_organization(
-    payload: OrganizationCreate, session: Session = Depends(get_session)
-) -> OrganizationRead:
+def post_organization(payload: OrganizationCreate, session: WriteSession) -> OrganizationRead:
     return OrganizationRead.model_validate(create_organization(session, payload))
 
 
 @app.post("/api/v1/contacts", response_model=ContactRead, status_code=201)
-def post_contact(payload: ContactCreate, session: Session = Depends(get_session)) -> ContactRead:
+def post_contact(payload: ContactCreate, session: WriteSession) -> ContactRead:
     return ContactRead.model_validate(create_contact(session, payload))
 
 
 @app.post("/api/v1/coops", response_model=CoopRead, status_code=status.HTTP_201_CREATED)
-def post_coop(
-    payload: CoopCreate, request: Request, session: Session = Depends(get_session)
-) -> CoopRead:
+def post_coop(payload: CoopCreate, request: Request, session: WriteSession) -> CoopRead:
     return CoopRead.model_validate(create_coop(session, payload, request.state.request_id))
 
 
@@ -237,7 +234,7 @@ def patch_coop(
     coop_id: UUID,
     payload: CoopPatch,
     request: Request,
-    session: Session = Depends(get_session),
+    session: WriteSession,
 ) -> CoopRead:
     return CoopRead.model_validate(update_coop(session, coop_id, payload, request.state.request_id))
 
@@ -247,7 +244,7 @@ def post_transition(
     coop_id: UUID,
     payload: TransitionRequest,
     request: Request,
-    session: Session = Depends(get_session),
+    session: WriteSession,
 ) -> CoopRead:
     return CoopRead.model_validate(
         transition_coop(
@@ -266,7 +263,7 @@ def post_reopen(
     coop_id: UUID,
     payload: ReopenRequest,
     request: Request,
-    session: Session = Depends(get_session),
+    session: WriteSession,
 ) -> CoopRead:
     return CoopRead.model_validate(
         reopen_coop(

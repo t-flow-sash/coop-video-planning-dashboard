@@ -131,15 +131,14 @@ export const apiRepository: CoopRepository = {
     );
   },
   async transition(id, status, expectedVersion) {
-    await request<ApiCoop>(`/coops/${encodeURIComponent(id)}/transitions`, {
-      method: "POST",
-      body: JSON.stringify({
-        target_status: status,
-        expected_version: expectedVersion,
-      }),
-    });
     return normalize(
-      await request<ApiCoop>(`/coops/${encodeURIComponent(id)}`),
+      await request<ApiCoop>(`/coops/${encodeURIComponent(id)}/transitions`, {
+        method: "POST",
+        body: JSON.stringify({
+          target_status: status,
+          expected_version: expectedVersion,
+        }),
+      }),
     );
   },
 };

@@ -1,4 +1,9 @@
-import { expect, test, type Locator } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Locator,
+  type Response as PlaywrightResponse,
+} from "@playwright/test";
 
 const baseURL = process.env.E2E_BASE_URL ?? "http://localhost:3000";
 const nextStatus: Record<string, { value: string; label: string }> = {
@@ -11,6 +16,34 @@ const nextStatus: Record<string, { value: string; label: string }> = {
   SCHEDULED: { value: "REVIEW", label: "In Freigabe" },
   PUBLISHED: { value: "REVIEW", label: "In Freigabe" },
 };
+
+type ApiCoop = {
+  id: string;
+  title: string;
+  status: string;
+  version: number;
+};
+
+type ApiCoopPage = { items: ApiCoop[] };
+
+async function successfulJson<T>(
+  response: PlaywrightResponse,
+  context: string,
+): Promise<T> {
+  const body = await response.text();
+  expect(
+    response.ok(),
+    `${context}: ${response.request().method()} ${response.url()} -> ${response.status()} ${response.statusText()}\n${body}`,
+  ).toBeTruthy();
+  try {
+    return JSON.parse(body) as T;
+  } catch (error) {
+    throw new Error(
+      `${context}: ${response.request().method()} ${response.url()} lieferte kein JSON: ${body}`,
+      { cause: error },
+    );
+  }
+}
 
 test("Statusänderung bleibt nach Reload erhalten und erscheint im Audit", async ({
   page,
@@ -34,11 +67,10 @@ test("Statusänderung bleibt nach Reload erhalten und erscheint im Audit", async
     );
   });
   await page.goto(`${baseURL}/coops`);
-  const coopListResponse = await coopListResponsePromise;
-  expect(
-    coopListResponse.ok(),
-    `Same-Origin API-Routing fehlgeschlagen: GET ${coopListResponse.url()} -> ${coopListResponse.status()} ${coopListResponse.statusText()}`,
-  ).toBeTruthy();
+  const initialPage = await successfulJson<ApiCoopPage>(
+    await coopListResponsePromise,
+    "Initiale Coop-Liste fehlgeschlagen",
+  );
 
   const table = page.getByRole("table", { name: "Offene Kooperationen" });
   await expect(table).toBeVisible();
@@ -46,7 +78,9 @@ test("Statusänderung bleibt nach Reload erhalten und erscheint im Audit", async
   const rows = table.locator("tbody tr");
   let target: {
     row: Locator;
+    id: string;
     title: string;
+    version: number;
     status: { value: string; label: string };
   } | null = null;
   for (let index = 0; index < (await rows.count()); index += 1) {
@@ -55,9 +89,17 @@ test("Statusänderung bleibt nach Reload erhalten und erscheint im Audit", async
     if (await select.isDisabled()) continue;
     const current = await select.inputValue();
     if (nextStatus[current]) {
+      const title = (await row.locator(".title-link").innerText()).trim();
+      const apiCoop = initialPage.items.find((coop) => coop.title === title);
+      expect(
+        apiCoop,
+        `Coop „${title}“ fehlt in der initialen API-Antwort`,
+      ).toBeDefined();
       target = {
         row,
-        title: (await row.locator(".title-link").innerText()).trim(),
+        id: apiCoop!.id,
+        title,
+        version: apiCoop!.version,
         status: nextStatus[current],
       };
       break;
@@ -68,12 +110,44 @@ test("Statusänderung bleibt nach Reload erhalten und erscheint im Audit", async
     "Seed benötigt mindestens eine regulär änderbare offene Coop",
   ).not.toBeNull();
 
+  const transitionResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      response.request().method() === "POST" &&
+      url.pathname === `/api/v1/coops/${target!.id}/transitions`
+    );
+  });
   await target!.row
     .getByRole("combobox", { name: /Status für/ })
     .selectOption(target!.status.value);
+  const transitioned = await successfulJson<ApiCoop>(
+    await transitionResponsePromise,
+    "Statusänderung fehlgeschlagen",
+  );
+  expect(transitioned.id).toBe(target!.id);
+  expect(transitioned.status).toBe(target!.status.value);
+  expect(transitioned.version).toBeGreaterThan(target!.version);
   await expect(page.getByRole("status")).toContainText("Coop gespeichert");
 
+  const reloadedListResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      response.request().method() === "GET" && url.pathname === "/api/v1/coops"
+    );
+  });
   await page.reload();
+  const reloadedPage = await successfulJson<ApiCoopPage>(
+    await reloadedListResponsePromise,
+    "Coop-Liste nach Reload fehlgeschlagen",
+  );
+  const persisted = reloadedPage.items.find((coop) => coop.id === target!.id);
+  expect(
+    persisted,
+    `Coop ${target!.id} fehlt in der API-Antwort nach Reload`,
+  ).toBeDefined();
+  expect(persisted!.status).toBe(target!.status.value);
+  expect(persisted!.version).toBe(transitioned.version);
+
   const persistedRow = table
     .locator("tbody tr")
     .filter({ hasText: target!.title });
