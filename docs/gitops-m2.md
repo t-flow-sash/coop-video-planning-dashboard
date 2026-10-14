@@ -2,11 +2,11 @@
 
 ## Ziel und Grenzen
 
-Diese Basis beschreibt die deklarative Auslieferung nach `coop-prod` auf dem dedizierten Single-Node-Host `192.168.2.94`. Phase B1 installiert und prüft nur Hostplattform, lokale Registry, Schlüsselmaterial, verschlüsselte Manifeste und immutable Images. Sie führt **kein** Flux-Reconcile der Anwendung, keinen Seed und keinen Merge nach `main` aus. Erst Phase B2 installiert bzw. aktiviert die versionierten Flux-Controller und Bootstrap-Secrets und reconciliiert den bereits geprüften Stand aus `main`.
+Diese Basis beschreibt die deklarative Auslieferung nach `coop-prod` auf dem dedizierten Single-Node-Host `192.168.2.94`. Phase B1 installiert und prüft nur Hostplattform, lokale Registry, Schlüsselmaterial, verschlüsselte Manifeste und immutable Images. Sie führt **kein** Flux-Reconcile der Anwendung, keinen Seed und keinen Merge nach `main` aus. Erst Phase B2 installiert in einem ersten, getrennten Schritt die versionierten Flux-Controller und aktiviert nach bestätigten CRDs/Controllern in einem zweiten Schritt Bootstrap-Secrets, Source und `coop-root` für den bereits geprüften Stand aus `main`.
 
 Die Registry ist ausschließlich auf `127.0.0.1:5000` gebunden; Datenbank und Anwendungsservices bleiben ClusterIP. Traefik ist der einzige spätere LAN-Einstieg auf 80/443. Diese Loopback-Registry ist absichtlich nur für einen einzelnen k3s-Node geeignet.
 
-Ein reines k3s-API-Binding auf `127.0.0.1` wurde verworfen: dadurch war das Kubernetes-Service-IP-Ziel `10.43.0.1:443` aus Pods nicht erreichbar und CoreDNS, local-path sowie Traefik blieben ungesund. Der API-Server bindet deshalb an `192.168.2.94:6443` (zusätzlich erzeugt k3s lokale Listener). UFW bleibt in B1 bewusst inaktiv; vor jeder Internet-/WAN-Exposition muss B2 Port 6443 auf Loopback bzw. das vertrauenswürdige Management-LAN beschränken und anschließend Pod-/Service-CIDRs erneut testen.
+Ein reines k3s-API-Binding auf `127.0.0.1` wurde verworfen: dadurch war das Kubernetes-Service-IP-Ziel `10.43.0.1:443` aus Pods nicht erreichbar und CoreDNS, local-path sowie Traefik blieben ungesund. Der API-Server bindet deshalb an `192.168.2.94:6443` (zusätzlich erzeugt k3s lokale Listener). UFW ist aktiv. Die verifizierte Grundpolicy lautet `Default: deny (incoming), allow (outgoing), deny (routed)`; die konkret erlaubten Pfade stehen unten. Das ist eine LAN-Basis, keine Freigabe für Internet-/WAN-Exposition.
 
 ## Tatsächliche B1-Hostbasis
 
@@ -18,7 +18,7 @@ Ein reines k3s-API-Binding auf `127.0.0.1` wurde verworfen: dadurch war das Kube
 | Flux CLI / Controller-Export | v2.9.6 |
 | SOPS | v3.13.3 |
 | age | v1.3.2 |
-| Distribution Registry | v3.1.2, OCI-Digest `sha256:21078ecfcba8a0cd7e1a384f75b3509899661dd21823bf1da21b5a4674aaceb9` |
+| Distribution Registry | v3.1.2, Multiarch-Index `sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8` |
 
 Private Bootstrap-Dateien liegen root-only unter `/root/.config/coop-dashboard/`; Zugangsdaten stehen in `/root/.config/coop-dashboard/credentials.env` (Benutzer `sascha`). Private Schlüssel oder Passwörter dürfen niemals in Tickets, Logs oder Git kopiert werden. Die öffentliche lokale CA liegt zusätzlich unter `docs/certificates/coop-local-ca.crt` und kann auf Clients in den jeweiligen System-Truststore importiert werden. Danach Browser vollständig neu starten und die Kette gegen `https://192.168.2.94/` prüfen.
 
@@ -26,30 +26,25 @@ Private Bootstrap-Dateien liegen root-only unter `/root/.config/coop-dashboard/`
 
 ```text
 GitRepository (read-only SSH deploy key)
-  └─ coop-database (Namespace, Default-Deny, PostgreSQL 17, 10 Gi)
-      └─ coop-migration (releasebezogener Alembic Job, Seed suspendiert)
-          └─ coop-apps (API + Web, je Deployment und ClusterIP Service)
-              └─ coop-ingress (Traefik HTTPS + HTTP→HTTPS)
-                  └─ coop-backup (täglicher pg_dump auf separatem 10-Gi-PVC)
+  └─ coop-root (verwaltet clusters/production einschließlich sich selbst)
+      └─ coop-storage (local-path StorageClass, Retain, WaitForFirstConsumer)
+          └─ coop-database (Namespace, Default-Deny, PostgreSQL 17, 10 Gi)
+              └─ coop-migration (releasebezogener Alembic Job, Seed suspendiert)
+                  └─ coop-apps (API + Web, je Deployment und ClusterIP Service)
+                      └─ coop-ingress (Traefik HTTPS + HTTP→HTTPS)
+                          └─ coop-backup (täglicher pg_dump auf separatem 10-Gi-PVC)
 ```
 
-`clusters/production/flux-kustomizations.yaml` bildet diese Kette mit `dependsOn`, `wait` und Timeouts ab. Eine fehlgeschlagene Migration verhindert damit Apps, Ingress und Backup der neuen Revision. Das Migrations-Job-Objekt trägt die Git-SHA im Namen; das Promotion-Skript erzeugt für jede Revision einen neuen Job, statt einen abgeschlossenen Job wiederzuverwenden.
+`clusters/production/flux-kustomizations.yaml` bildet diese Kette mit `dependsOn`, `wait` und Timeouts ab. `coop-root` besitzt bewusst kein `dependsOn` auf sich selbst; der initial direkt angelegte Root und seine Git-Source vermeiden damit eine zirkuläre Startabhängigkeit. Eine fehlgeschlagene Migration verhindert Apps, Ingress und Backup der neuen Revision. Das Migrations-Job-Objekt trägt die Git-SHA im Namen; das Promotion-Skript erzeugt für jede Revision einen neuen Job, statt einen abgeschlossenen Job wiederzuverwenden.
 
-PostgreSQL läuft als einzelnes StatefulSet mit ClusterIP. `persistentVolumeClaimRetentionPolicy` behält den Daten-PVC bei Scale-down und Löschen des StatefulSets. Der Backup-PVC trägt zusätzlich `kustomize.toolkit.fluxcd.io/prune: disabled`. Die StorageClass/PV-Reclaim-Policy muss der Betreiber ebenfalls auf `Retain` prüfen; diese repo-lokale Basis kann die clusterweite StorageClass nicht festlegen.
+PostgreSQL läuft als einzelnes StatefulSet mit ClusterIP und bindet den expliziten PVC `postgres-data`; Backups verwenden den getrennten expliziten PVC `postgres-backups`. Beide Claims und der Namespace tragen `kustomize.toolkit.fluxcd.io/prune: disabled`. Die repo-eigene StorageClass `coop-local-path` verwendet den vorhandenen k3s-Provisioner `rancher.io/local-path`, `reclaimPolicy: Retain` und `volumeBindingMode: WaitForFirstConsumer`. PVC-Prune-Schutz und PV-Reclaim-Schutz bleiben zwei getrennte Sicherungsebenen.
 
 ## Vorbereitungen und Bootstrap
 
-Vorausgesetzt werden ein bereits betriebener Cluster mit funktionierendem CNI/NetworkPolicy, Traefik-CRDs, Flux-Controllern, einer erreichbaren Registry auf `127.0.0.1:5000` aus Sicht des Build-Hosts **und der Cluster-Nodes**, einer dynamischen RWO-StorageClass sowie lokal `git`, `docker`/Buildx, `sops`, `age` und `kubectl` oder `kustomize`.
+Vorausgesetzt werden ein bereits betriebener Cluster mit funktionierendem CNI/NetworkPolicy und Traefik-CRDs, eine erreichbare Registry auf `127.0.0.1:5000` aus Sicht des Build-Hosts **und der Cluster-Nodes**, der k3s-local-path-Provisioner sowie lokal `git`, `docker`/Buildx, `flux` v2.9.6, `sops`, `age` und `kubectl` oder `kustomize`.
 
 1. `clusters/production/source.yaml` auf die echte SSH-Repository-URL und den gewünschten Branch setzen. Der SSH Deploy Key erhält im Git-Provider ausschließlich Leserechte.
-2. Den privaten Deploy Key nur im Cluster anlegen, nie im Repository:
-   ```bash
-   flux create secret git coop-git-readonly \
-     --namespace=flux-system \
-     --url=ssh://git@github.com/t-flow-sash/coop-video-planning-dashboard.git \
-     --private-key-file="/root/.config/coop-dashboard/flux-github-readonly"
-   ```
-   `clusters/production/flux-git-auth.secret.example.yaml` dokumentiert lediglich Form und erforderliche Keys und enthält absichtlich keine Werte/private Keys.
+2. Den privaten Deploy Key nur im Cluster anlegen, nie im Repository. `scripts/bootstrap-production-host.sh --bootstrap-coop-root` verwendet ausschließlich den versionierten offiziellen Ed25519-Eintrag aus `config/github-known-hosts` und prüft vor jeder Cluster-Mutation dessen offiziellen GitHub-Fingerprint `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`. Es gibt kein ungeprüftes `ssh-keyscan`-Trust-on-first-use. `clusters/production/flux-git-auth.secret.example.yaml` dokumentiert lediglich Form und erforderliche Keys und enthält absichtlich keine Werte/private Keys.
 3. Ein Age-Keypaar offline erzeugen. Den **öffentlichen** Empfänger in `.sops.yaml` ersetzen; den privaten Schlüssel nur als `sops-age` in `flux-system` hinterlegen:
    ```bash
    age-keygen -o age.key
@@ -58,7 +53,16 @@ Vorausgesetzt werden ein bereits betriebener Cluster mit funktionierendem CNI/Ne
    ```
 4. Die produktiven Secrets `coop-runtime`, `coop-basic-auth` und `coop-tls` liegen bereits SOPS-age-verschlüsselt im Repository. Nur die root-only Quelldaten unter `/root/.config/coop-dashboard/` dürfen zur Rotation verwendet werden. Klartextdateien niemals committen.
 5. Ingress ist bewusst host-unabhängig und path-basiert; `/api/v1` hat Vorrang vor `/`. `CORS_ORIGIN` ist exakt `https://192.168.2.94`.
-6. Mit `kubectl kustomize` lokal rendern. Erst nach Review, grüner CI und Merge installiert Phase B2 die Controller, erzeugt die beiden Flux-Bootstrap-Secrets mit `scripts/bootstrap-production-host.sh --create-flux-secrets` und wendet die Root-Kustomization an.
+6. Vor jedem B2-Schritt die bereits aktive Firewall ausschließlich lesend und fail-closed prüfen; dieser Modus ändert weder UFW-Regeln noch Registry oder Cluster:
+   ```bash
+   scripts/bootstrap-production-host.sh --verify-firewall
+   ```
+7. Mit `kubectl kustomize` lokal rendern. Erst nach Review, grüner CI und Merge läuft Phase B2 explizit zweistufig und fail-closed:
+   ```bash
+   scripts/bootstrap-production-host.sh --install-flux-controllers
+   scripts/bootstrap-production-host.sh --bootstrap-coop-root
+   ```
+   Stufe 1 wendet ausschließlich den gepinnten v2.9.6-Controller-Export an und wartet auf `Established` für die Flux-CRDs sowie `Available` für alle vier Controller. Stufe 2 prüft dieselben Bedingungen erneut, bevor sie Secrets mutiert, und legt anschließend nur GitRepository und den selbstverwalteten `coop-root` direkt an. Scheitert eine Prüfung, werden Source und Root nicht angelegt.
 
 ## Security-Modell
 
@@ -66,10 +70,30 @@ Vorausgesetzt werden ein bereits betriebener Cluster mit funktionierendem CNI/Ne
 - Workloads laufen ohne Service-Account-Token, non-root, mit `RuntimeDefault`-Seccomp, ohne Linux-Capabilities und ohne Privilege Escalation. App-/Job-Dateisysteme sind read-only; nur explizite `emptyDir`/PVC-Mounts sind schreibbar.
 - CPU-/Memory-Requests und Limits sowie Startup-, Readiness- und Liveness-Probes sind definiert.
 - `default-deny` blockiert Ingress und Egress. Explizit erlaubt sind DNS zu CoreDNS, Traefik→API/Web und mit `coop.example.com/postgres-client=true` markierte API-/Migration-/Seed-/Backup-/Restore-Pods→PostgreSQL.
+- Die deklarative Flux-Overlay-Policy ersetzt das exportierte `egress: - {}` ohne Änderung an `gotk-components.yaml`: erlaubt bleiben CoreDNS (UDP/TCP 53), Git SSH (TCP 22), Git/OCI/API über HTTPS (TCP 443), der k3s-API-Endpunkt `192.168.2.94:6443` und controller-interne Kommunikation innerhalb `flux-system`.
 - Traefik bedient HTTPS auf `websecure` (Port 443 in der Clusterinstallation) und leitet HTTP permanent auf HTTPS um. `/api/v1` hat höhere Priorität als `/`.
-- BasicAuth liegt auf beiden fachlichen HTTPS-Routen. Nur die höher priorisierten Exact-Routen für `/api/v1/health/live` und `/api/v1/health/ready` bleiben ohne Middleware. `removeHeader: false` sorgt dafür, dass der `Authorization`-Header an API/Web weitergereicht wird. Damit sieht die API bei BasicAuth denselben Basic-Header; ein zweites Bearer-Schema kann nicht gleichzeitig denselben HTTP-Header nutzen und müsste später über ForwardAuth/SSO gelöst werden.
+- BasicAuth liegt auf beiden fachlichen HTTPS-Routen. Nur die höher priorisierten Exact-Routen für `/api/v1/health/live` und `/api/v1/health/ready` bleiben ohne Middleware. API: `removeHeader: false`, damit der `Authorization`-Header an die API weitergereicht wird. Web: `removeHeader: true`, damit Browser-Credentials nicht beim Web-Upstream verbleiben. Ein zweites Bearer-Schema kann nicht gleichzeitig denselben API-Header nutzen und müsste später über ForwardAuth/SSO gelöst werden.
 - TLS referenziert ausschließlich Secret `coop-tls`. Zertifikate und htpasswd-Daten stehen nicht im Klartext im Git.
-- Die PostgreSQL- und Backup-Images sind auf Major `17` begrenzt; für einen streng reproduzierbaren Betrieb sollten Betreiber diese nach eigener Supply-Chain-Prüfung zusätzlich auf freigegebene Digests pinnen.
+- PostgreSQL/Backup/Restore/CI verwenden den live verifizierten Multiarch-Index `postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24`. Dockerfile-Frontend und alle Dockerfile-Basen sind ebenfalls per Multiarch-Index gepinnt.
+- `gotk-components.yaml` bleibt bytegleich zum `flux install --version=v2.9.6 --export` (SHA-256 `e0b32861e2701c26336b1a25e5d2896d9f1bc0eed68c2115e2a80277a93cdf03`). Die vier Controller-Digests werden ausschließlich deklarativ in `flux-system/kustomization.yaml` ergänzt.
+- Alle GitHub Actions sind auf vollständige 40-stellige Commit-SHAs gepinnt; Versionskommentare halten die Release-Zuordnung lesbar. `.github/dependabot.yml` lässt Dependabot wöchentlich geprüfte SHA-Aktualisierungen für `github-actions` vorschlagen.
+
+### Aktive UFW-Regeln und read-only Prüfung
+
+Der Host wurde mit folgenden Allow-Regeln geprüft; jede nicht aufgeführte zusätzliche Allow-Regel lässt `--verify-firewall` fehlschlagen:
+
+```text
+22/tcp                     ALLOW IN    Anywhere
+80/tcp                     ALLOW IN    192.168.2.0/24
+443/tcp                    ALLOW IN    192.168.2.0/24
+Anywhere                   ALLOW IN    10.42.0.0/16
+Anywhere                   ALLOW IN    10.43.0.0/16
+22/tcp (v6)                ALLOW IN    Anywhere (v6)
+Anywhere                   ALLOW FWD   10.42.0.0/16
+Anywhere                   ALLOW FWD   10.43.0.0/16
+```
+
+Manuell kontrollieren: `ufw status verbose` und `ufw status numbered`. Automatisiert ausschließlich lesen: `scripts/bootstrap-production-host.sh --verify-firewall`. Der Prüfer verlangt UFW `active`, exakt die Default-Policy und exakt obige Allow-Menge; bei Lesefehler oder Drift endet er ungleich null, ohne `ufw allow`, `ufw delete`, `ufw reset` oder `ufw enable` aufzurufen.
 
 ## Build und Promote
 
@@ -114,20 +138,20 @@ Ein PVC ist kein Offsite-Backup. Produktiv ist zusätzlich ein verschlüsselter,
 Restore ist destruktiv und benötigt ein Wartungsfenster.
 
 1. Gewünschten Dump anhand Job-Logs/Bestandsliste identifizieren; nur Dateinamen der Form `daily-*`, `weekly-*` oder `pre-restore-*` akzeptieren.
-2. Aktuelle Git-/Image-/Migrationsrevision und Replica-Zahl dokumentieren. Schreibzugriffe am Ingress organisatorisch sperren; das Skript suspendiert `coop-apps` und skaliert die API auf null.
-3. Sicherstellen, dass kein Migrationsjob aktiv ist und ausreichend Platz auf dem Backup-PVC vorhanden ist.
+2. Aktuelle Git-/Image-/Migrationsrevision und Replica-Zahl dokumentieren. Das Skript suspendiert fail-closed zuerst `coop-root`, die Git-Source, `coop-database`, `coop-migration`, `coop-apps`, `coop-ingress`, `coop-backup` sowie den Backup-CronJob und verifiziert jede Sperre, bevor es aktive PostgreSQL-Writer prüft.
+3. Bei einem aktiven Writer-Job oder einer nicht verifizierbaren Abfrage bricht das Skript ab; Flux und Backup-CronJob bleiben suspendiert und die API wird auf null gehalten.
 4. Ausführen:
    ```bash
    scripts/restore-postgres.sh daily-20260101T011700Z.dump --yes
    ```
-5. Das Skript startet einen eingeschränkten PostgreSQL-17-Restore-Pod mit dem Backup-PVC, validiert den Dump, erstellt vorab atomar einen `pre-restore-*`-Sicherungsdump, beendet DB-Verbindungen und führt `pg_restore --clean --if-exists --exit-on-error --single-transaction` aus. Erst nach erfolgreichem Restore, API-Rollout und Readiness wird Flux wieder freigegeben; bei Fehlern bleiben API und Reconciliation fail-closed gestoppt.
+5. Das Skript skaliert die API auf null, startet einen eingeschränkten PostgreSQL-17-Restore-Pod mit dem Backup-PVC, validiert den Dump, erstellt vorab atomar einen `pre-restore-*`-Sicherungsdump, beendet DB-Verbindungen und führt `pg_restore --clean --if-exists --exit-on-error --single-transaction` aus. Nach erfolgreichem Restore setzt es Source, Database, Migration, Apps, Ingress, Backup und zuletzt Root kontrolliert fort, fordert jeweils einen Reconcile an und wartet auf `Ready`; erst danach ist die Wartung beendet. Bei Fehlern bleiben alle Sperren und API null fail-closed bestehen.
 6. Danach prüfen:
    ```bash
    kubectl -n coop-prod rollout status deployment/coop-api
    kubectl -n coop-prod exec statefulset/postgres -- pg_isready
    curl https://192.168.2.94/api/v1/health/ready
    ```
-7. Bei Fehlern bleiben API auf null und `coop-apps` suspendiert. Logs und den automatisch erzeugten Pre-Restore-Dump sichern, Ursache beheben und erst danach Flux bewusst fortsetzen; nicht blind erneut migrieren.
+7. Bei Fehlern bleiben API auf null, Root/Source/Kinder und der Backup-CronJob suspendiert. Logs und den automatisch erzeugten Pre-Restore-Dump sichern, Ursache beheben und erst danach Flux bewusst in Abhängigkeitsreihenfolge fortsetzen; nicht blind erneut migrieren.
 
 ## Rollback
 
@@ -141,32 +165,39 @@ Restore ist destruktiv und benötigt ein Wartungsfenster.
 | Anforderung | Umsetzung / Nachweis |
 |---|---|
 | Namespace | `infrastructure/database/namespace.yaml`: `coop-prod`, restricted PSS |
-| PostgreSQL 17, ClusterIP, 10 Gi retained | StatefulSet/Service; PVC-Template 10 Gi; RetentionPolicy `Retain` |
+| PostgreSQL 17, ClusterIP, 10 Gi retained | StatefulSet/Service; expliziter `postgres-data`-PVC; `coop-local-path` mit PV-Reclaim `Retain` |
 | API/Web Deploy+Svc | `infrastructure/apps/{api,web}.yaml`, je 2 Replicas, ClusterIP |
 | HTTPS, Redirect, Routing | Traefik IngressRoutes: `websecure`, `/api/v1` vor `/`, `web`→HTTPS |
-| BasicAuth + Authorization weiter | Middleware auf beiden fachlichen HTTPS-Routen, `removeHeader: false`; nur Exact-Health-Routen öffentlich |
+| BasicAuth + Authorization | API `removeHeader: false`, Web `removeHeader: true`; nur Exact-Health-Routen öffentlich |
 | TLS Secret | `tls.secretName: coop-tls`; leeres Secret-Template ohne Werte |
 | Hardening | Resources, drei Probe-Typen, non-root, seccomp, drop ALL, read-only FS |
-| Netzwerk | Default-deny; DNS; Traefik→Apps; markierte Clients→PostgreSQL |
+| Netzwerk | Default-deny; DNS; Traefik→Apps; markierte Clients→PostgreSQL; eingeschränkter Flux-Egress |
 | Migration vor Apps | releasebezogener SHA-Job; Flux `dependsOn` und `wait` |
 | Seed bewusst aus | suspendierter CronJob; ausschließlich manueller One-off-Start |
-| Flux-Reihenfolge | DB→Migration→Apps→Ingress→Backup in `clusters/production` |
+| Flux-Reihenfolge | Storage→DB→Migration→Apps→Ingress→Backup in `clusters/production` |
 | Backup | täglich; eigener 10-Gi-PVC; validiert + atomic rename; 7 daily/4 weekly |
 | Restore | `scripts/restore-postgres.sh` plus Wartungs-/Verifikationsrunbook |
 | SOPS Age | `.sops.yaml`, Flux-Decryption, keine echten oder Fake-Secrets im Repo |
 | Read-only Git SSH | GitRepository mit SecretRef; private Key nur clusterseitig |
-| Immutable Images | SHA-Tag plus verifizierter Digest; kein `latest` |
+| Immutable Images | App-SHA-Tag plus verifizierter Digest; Third-party-, Flux- und Dockerfile-Basen per live geprüftem Multiarch-Index; kein `latest` |
+| Fresh Bootstrap | Zwei explizite Stufen; CRD-/Controller-Waits; selbstverwalteter `coop-root` ohne zyklisches `dependsOn` |
+| Storage-Schutz | `Retain`/`WaitForFirstConsumer`; beide PVCs und Namespace gegen Flux-Prune geschützt |
 | Keine Cluster-Push-Automation | Build-Skript endet nach Manifestupdate/Rendercheck |
 
 ## Lokale Validierung
 
 ```bash
-bash -n scripts/build-and-push-images.sh scripts/restore-postgres.sh
-for d in infrastructure/{database,migration,apps,ingress,backup} clusters/production; do
+bash -n scripts/bootstrap-production-host.sh scripts/build-and-push-images.sh scripts/restore-postgres.sh
+uv run --with pyyaml==6.0.3 -- python3 -m unittest scripts.tests.test_gitops_static scripts.tests.test_operational_scripts
+for d in infrastructure/{storage,database,migration,apps,ingress,backup} clusters/production; do
   kubectl kustomize "$d" >/dev/null   # oder: kustomize build "$d"
 done
 git diff --check
 git status --short
 ```
 
-Serverseitige OpenAPI-/CRD-Validierung erfordert einen passenden Cluster und erfolgt bewusst erst im kontrollierten Bootstrap-/Reviewprozess.
+CI baut jedes echte Produktions-Dockerimage genau einmal und startet API/Web non-root mit read-only Root-FS. Render-Verträge prüfen die exakten öffentlichen Traefik-Health-Routen, BasicAuth-/Authorization-Header-Semantik, TLS-Secret, NetworkPolicies und alle drei Probe-Typen. Ein globaler semantischer Render-Gate verwirft jede `image`-Referenz ohne `@sha256` sowie unpromotete Null-Sentinels.
+
+### Ausstehendes B2-Deployment-Gate
+
+Ein echter k3s-/TLS-/NetworkPolicy-Live-Test wurde in dieser Änderung **nicht** ausgeführt, weil kein Deployment/Reconcile Teil von B1 bzw. dieser Änderung ist. Er bleibt ein ausstehendes B2-Deployment-Gate und muss vor Produktionsfreigabe auf dem Zielcluster protokolliert grün sein: Flux-Reconcile und Controller-Readiness; TLS-Kette gegen `docs/certificates/coop-local-ca.crt`; nur beide exakten Health-Endpunkte ohne BasicAuth; geschützte API-/Web-Routen mit und ohne Credentials einschließlich der unterschiedlichen `removeHeader`-Semantik; positive DNS/HTTPS/Git-SSH/API/controller-interne Egress-Probes; negative Egress- und Ingress-Probes; PostgreSQL nur von markierten Clients; sowie Kubernetes Startup-/Readiness-/Liveness-Probes. Serverseitige OpenAPI-/CRD-Validierung gehört ebenfalls in dieses kontrollierte Gate.

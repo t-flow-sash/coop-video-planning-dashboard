@@ -33,7 +33,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: pg-dump
-              image: postgres:17-alpine
+              image: docker.io/library/postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
               imagePullPolicy: IfNotPresent
               env:
                 - {name: PGHOST, value: postgres}
@@ -53,15 +53,15 @@ spec:
                   set -eu
                   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
                   tmp="/backups/.daily-${stamp}.dump.tmp"
+                  weekly_tmp="/backups/.weekly-${stamp}.dump.tmp"
                   daily="/backups/daily-${stamp}.dump"
-                  trap 'rm -f "$tmp"' EXIT INT TERM
+                  trap 'rm -f "$tmp" "$weekly_tmp"' EXIT INT TERM
                   pg_dump --format=custom --no-owner --no-acl --file="$tmp"
                   pg_restore --list "$tmp" >/dev/null
                   mv "$tmp" "$daily"
-                  trap - EXIT INT TERM
                   if [ "$(date -u +%u)" = "7" ]; then
-                    cp "$daily" "/backups/.weekly-${stamp}.dump.tmp"
-                    mv "/backups/.weekly-${stamp}.dump.tmp" "/backups/weekly-${stamp}.dump"
+                    cp "$daily" "$weekly_tmp"
+                    mv "$weekly_tmp" "/backups/weekly-${stamp}.dump"
                   fi
                   ls -1t /backups/daily-*.dump 2>/dev/null | sed -n '8,$p' | xargs -r rm -f --
                   ls -1t /backups/weekly-*.dump 2>/dev/null | sed -n '5,$p' | xargs -r rm -f --

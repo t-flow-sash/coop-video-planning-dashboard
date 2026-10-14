@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress
+  namespace: flux-system
+spec:
+  egress:
+    # DNS resolution through the in-cluster CoreDNS pods.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    # Git over SSH and HTTPS-based Git/OCI/API endpoints.
+    - ports:
+        - {protocol: TCP, port: 22}
+        - {protocol: TCP, port: 443}
+    # The node-bound k3s API endpoint used during bootstrap/recovery.
+    - to:
+        - ipBlock:
+            cidr: 192.168.2.94/32
+      ports:
+        - {protocol: TCP, port: 6443}
+    # Flux controllers exchange artifacts and notifications inside the namespace.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: flux-system
+          podSelector: {}

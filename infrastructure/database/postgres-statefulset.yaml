@@ -8,9 +8,6 @@ metadata:
 spec:
   serviceName: postgres
   replicas: 1
-  persistentVolumeClaimRetentionPolicy:
-    whenDeleted: Retain
-    whenScaled: Retain
   selector:
     matchLabels:
       app.kubernetes.io/name: postgres
@@ -30,7 +27,7 @@ spec:
         seccompProfile: {type: RuntimeDefault}
       containers:
         - name: postgres
-          image: postgres:17-alpine
+          image: docker.io/library/postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
           imagePullPolicy: IfNotPresent
           env:
             - name: POSTGRES_DB
@@ -70,19 +67,10 @@ spec:
             - {name: postgres-run, mountPath: /var/run/postgresql}
             - {name: tmp, mountPath: /tmp}
       volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: postgres-data
         - name: postgres-run
           emptyDir: {}
         - name: tmp
           emptyDir: {}
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-        labels:
-          app.kubernetes.io/name: postgres
-        annotations:
-          coop.example.com/retention: retain
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        resources:
-          requests:
-            storage: 10Gi

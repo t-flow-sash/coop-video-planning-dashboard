@@ -3,6 +3,7 @@ kind: Kustomization
 namespace: coop-prod
 resources:
   - namespace.yaml
+  - postgres-data-pvc.yaml
   - postgres-service.yaml
   - postgres-statefulset.yaml
   - network-policies.yaml

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: coop-video-planning
+  annotations:
+    coop.example.com/retention: retain
+    kustomize.toolkit.fluxcd.io/prune: disabled
+spec:
+  storageClassName: coop-local-path
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi

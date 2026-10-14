@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: docker.io/library/postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
           POSTGRES_DB: coop_test
           POSTGRES_USER: coop
@@ -25,20 +25,20 @@ jobs:
       DATABASE_URL: postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test
       NEXT_PUBLIC_API_URL: /api/v1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with: { fetch-depth: 0 }
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with: { enable-cache: true }
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with: { version: 12.11.2 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22, cache: pnpm }
-      - uses: azure/setup-kubectl@v4
+      - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
         with: { version: v1.31.4 }
-      - uses: ludeeus/action-shellcheck@2.0.0
+      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         with:
           scandir: ./scripts
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: pnpm install --frozen-lockfile
@@ -55,13 +55,52 @@ jobs:
       - run: pnpm --filter web typecheck
       - run: pnpm --filter web test
       - run: node --test scripts/tests/*.test.mjs
+      - run: uv run --with pyyaml==6.0.3 -- python3 -m unittest scripts.tests.test_gitops_static scripts.tests.test_operational_scripts
       - run: node --check scripts/e2e-gateway.mjs
       - run: pnpm --filter web build
+      - name: Build and smoke-test production images
+        run: |
+          set -Eeuo pipefail
+          docker build --tag coop-api:ci --file apps/api/Dockerfile apps/api
+          docker build --tag coop-web:ci --file apps/web/Dockerfile .
+
+          for image in coop-api:ci coop-web:ci; do
+            configured_user="$(docker image inspect --format '{{.Config.User}}' "$image")"
+            [[ -n "$configured_user" && "$configured_user" != 0 && "$configured_user" != root ]]
+            docker run --rm --read-only --entrypoint /bin/sh "$image" \
+              -c 'test "$(id -u)" -ne 0 && ! touch /read-only-rootfs-probe'
+          done
+
+          cleanup_images() {
+            docker rm -f coop-api-smoke coop-web-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup_images EXIT INT TERM
+          docker run -d --name coop-api-smoke --network host --read-only --tmpfs /tmp \
+            -e DATABASE_URL="$DATABASE_URL" coop-api:ci >/dev/null
+          docker run -d --name coop-web-smoke -p 3000:3000 --read-only \
+            --tmpfs /tmp --tmpfs /app/apps/web/.next/cache coop-web:ci >/dev/null
+          for container in coop-api-smoke coop-web-smoke; do
+            [[ "$(docker exec "$container" id -u)" -ne 0 ]]
+          done
+          ready=false
+          for _ in {1..30}; do
+            if curl -fsS http://127.0.0.1:8000/api/v1/health/live >/dev/null \
+              && curl -fsS http://127.0.0.1:3000/ >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          [[ "$ready" == true ]] || {
+            docker logs coop-api-smoke
+            docker logs coop-web-smoke
+            exit 1
+          }
       - name: Validate API Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with: { dockerfile: apps/api/Dockerfile }
       - name: Validate Web Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with: { dockerfile: apps/web/Dockerfile }
       - name: Render and schema-check GitOps manifests
         run: |
@@ -72,7 +111,7 @@ jobs:
             | sha256sum --check --strict
           tar -xzf /tmp/kubeconform.tar.gz kubeconform
           schema_catalog='https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
-          for dir in infrastructure/database infrastructure/migration infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
+          for dir in infrastructure/storage infrastructure/database infrastructure/migration infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
             output="/tmp/$(echo "$dir" | tr / -).yaml"
             # Flux removes top-level SOPS metadata before apply. Strip only that
             # metadata block here; encrypted Secret values remain schema-checked.
@@ -81,6 +120,7 @@ jobs:
               skip && /^---$/ { skip=0 }
               !skip { print }
             ' > "$output"
+            uv run --with pyyaml==6.0.3 -- python3 scripts/validate-rendered-images.py < "$output"
             if grep -Eq 'git-0{12}|sha256:0{64}' "$output"; then
               echo "Unpromoted image sentinel remains in deployable render: $dir" >&2
               exit 1

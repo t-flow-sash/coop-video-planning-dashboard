@@ -8,6 +8,7 @@ metadata:
     coop.example.com/retention: retain
     kustomize.toolkit.fluxcd.io/prune: disabled
 spec:
+  storageClassName: coop-local-path
   accessModes: ["ReadWriteOnce"]
   resources:
     requests:
