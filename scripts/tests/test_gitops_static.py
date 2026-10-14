@@ -47,6 +47,10 @@ class FreshBootstrapTests(unittest.TestCase):
         )
         self.assertNotIn("ssh-keyscan", script)
         self.assertIn("SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU", script)
+        self.assertIn("create secret generic coop-git-readonly", script)
+        self.assertIn('--from-file=identity="$CONFIG_DIR/flux-github-readonly"', script)
+        self.assertIn('--from-file=known_hosts="$GITHUB_KNOWN_HOSTS_FILE"', script)
+        self.assertNotIn("--known-hosts-file", script)
 
     def test_bootstrap_is_two_stage_fail_closed_and_root_is_self_managed(self) -> None:
         script = (ROOT / "scripts/bootstrap-production-host.sh").read_text(encoding="utf-8")

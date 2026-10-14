@@ -637,7 +637,15 @@ class RegistryBootstrapTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(any(call[0] == "ssh-keyscan" for call in calls))
-        self.assertTrue(any(call[0] == "flux" and "create" in call for call in calls))
+        self.assertTrue(
+            any(
+                call[0] == "k3s"
+                and "create" in call
+                and "coop-git-readonly" in call
+                and any(part.startswith("--from-file=known_hosts=") for part in call)
+                for call in calls
+            )
+        )
 
     def test_verify_firewall_is_read_only_and_accepts_the_documented_rules(self) -> None:
         result, calls = self.run_bootstrap(running=True, arguments=("--verify-firewall",))
