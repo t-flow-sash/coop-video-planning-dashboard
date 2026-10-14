@@ -21,9 +21,7 @@ def documents(relative_path: str) -> list[dict[str, Any]]:
 def document(relative_path: str) -> dict[str, Any]:
     parsed = documents(relative_path)
     if len(parsed) != 1:
-        raise AssertionError(
-            f"expected one YAML document in {relative_path}, got {len(parsed)}"
-        )
+        raise AssertionError(f"expected one YAML document in {relative_path}, got {len(parsed)}")
     return parsed[0]
 
 
@@ -39,12 +37,8 @@ def rendered_documents(relative_path: str) -> list[dict[str, Any]]:
 
 
 class FreshBootstrapTests(unittest.TestCase):
-    def test_github_ed25519_host_key_is_versioned_and_no_keyscan_trust_remains(
-        self,
-    ) -> None:
-        script = (ROOT / "scripts/bootstrap-production-host.sh").read_text(
-            encoding="utf-8"
-        )
+    def test_github_ed25519_host_key_is_versioned_and_no_keyscan_trust_remains(self) -> None:
+        script = (ROOT / "scripts/bootstrap-production-host.sh").read_text(encoding="utf-8")
         known_hosts = (ROOT / "config/github-known-hosts").read_text(encoding="utf-8")
         self.assertEqual(
             known_hosts,
@@ -55,9 +49,7 @@ class FreshBootstrapTests(unittest.TestCase):
         self.assertIn("SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU", script)
 
     def test_bootstrap_is_two_stage_fail_closed_and_root_is_self_managed(self) -> None:
-        script = (ROOT / "scripts/bootstrap-production-host.sh").read_text(
-            encoding="utf-8"
-        )
+        script = (ROOT / "scripts/bootstrap-production-host.sh").read_text(encoding="utf-8")
         root = document("clusters/production/root-kustomization.yaml")
         cluster = document("clusters/production/kustomization.yaml")
 
@@ -69,9 +61,7 @@ class FreshBootstrapTests(unittest.TestCase):
         )
         flux_crds = {
             item["metadata"]["name"]
-            for item in documents(
-                "clusters/production/flux-system/gotk-components.yaml"
-            )
+            for item in documents("clusters/production/flux-system/gotk-components.yaml")
             if item.get("kind") == "CustomResourceDefinition"
         }
         self.assertGreater(len(flux_crds), 0)
@@ -91,9 +81,7 @@ class FreshBootstrapTests(unittest.TestCase):
         stage_two = script.index("--bootstrap-coop-root")
         readiness = script.index("wait_flux_ready", stage_two)
         secret_creation = script.index("create secret generic sops-age", stage_two)
-        source_apply = script.index(
-            "apply -f clusters/production/source.yaml", stage_two
-        )
+        source_apply = script.index("apply -f clusters/production/source.yaml", stage_two)
         source_ready = script.index(
             "gitrepository/coop-video-planning --timeout=5m", stage_two
         )
@@ -104,9 +92,7 @@ class FreshBootstrapTests(unittest.TestCase):
         self.assertLess(source_ready, root_apply)
 
         self.assertEqual(root["kind"], "Kustomization")
-        self.assertEqual(
-            root["metadata"], {"name": "coop-root", "namespace": "flux-system"}
-        )
+        self.assertEqual(root["metadata"], {"name": "coop-root", "namespace": "flux-system"})
         self.assertEqual(root["spec"]["path"], "./clusters/production")
         self.assertEqual(
             root["spec"]["sourceRef"],
@@ -151,12 +137,8 @@ class ImmutableImageTests(unittest.TestCase):
         "sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24"
     )
 
-    def test_flux_export_stays_official_and_overlay_pins_controller_indexes(
-        self,
-    ) -> None:
-        export = (
-            ROOT / "clusters/production/flux-system/gotk-components.yaml"
-        ).read_bytes()
+    def test_flux_export_stays_official_and_overlay_pins_controller_indexes(self) -> None:
+        export = (ROOT / "clusters/production/flux-system/gotk-components.yaml").read_bytes()
         self.assertEqual(
             hashlib.sha256(export).hexdigest(),
             "e0b32861e2701c26336b1a25e5d2896d9f1bc0eed68c2115e2a80277a93cdf03",
@@ -178,13 +160,9 @@ class ImmutableImageTests(unittest.TestCase):
         ):
             content = (ROOT / relative_path).read_text(encoding="utf-8")
             self.assertIn(self.POSTGRES, content, relative_path)
-            self.assertNotRegex(
-                content, r"(?<![\w/])postgres:17-alpine(?!@)", relative_path
-            )
+            self.assertNotRegex(content, r"(?<![\w/])postgres:17-alpine(?!@)", relative_path)
 
-        bootstrap = (ROOT / "scripts/bootstrap-production-host.sh").read_text(
-            encoding="utf-8"
-        )
+        bootstrap = (ROOT / "scripts/bootstrap-production-host.sh").read_text(encoding="utf-8")
         self.assertIn(
             "docker.io/library/registry:3.1.2@"
             "sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8",
@@ -209,9 +187,7 @@ class ImmutableImageTests(unittest.TestCase):
                 self.assertIn(reference, content, relative_path)
             for line in content.splitlines():
                 if line.startswith("FROM "):
-                    self.assertRegex(
-                        line.split()[1], r"@sha256:[0-9a-f]{64}$", relative_path
-                    )
+                    self.assertRegex(line.split()[1], r"@sha256:[0-9a-f]{64}$", relative_path)
 
     def test_every_rendered_container_image_is_digest_pinned(self) -> None:
         roots = (
@@ -228,19 +204,11 @@ class ImmutableImageTests(unittest.TestCase):
             for item in rendered_documents(root):
                 spec = item.get("spec", {})
                 pod_specs = []
-                if item.get("kind") in {
-                    "Deployment",
-                    "StatefulSet",
-                    "DaemonSet",
-                    "Job",
-                }:
+                if item.get("kind") in {"Deployment", "StatefulSet", "DaemonSet", "Job"}:
                     pod_specs.append(spec.get("template", {}).get("spec", {}))
                 elif item.get("kind") == "CronJob":
                     pod_specs.append(
-                        spec.get("jobTemplate", {})
-                        .get("spec", {})
-                        .get("template", {})
-                        .get("spec", {})
+                        spec.get("jobTemplate", {}).get("spec", {}).get("template", {}).get("spec", {})
                     )
                 for pod_spec in pod_specs:
                     for container in [
@@ -261,9 +229,7 @@ class RenderedSecurityContractTests(unittest.TestCase):
             for item in rendered_documents(root)
         }
 
-    def test_rendered_postgres_client_jobs_are_selectable_by_restore_guard(
-        self,
-    ) -> None:
+    def test_rendered_postgres_client_jobs_are_selectable_by_restore_guard(self) -> None:
         selector = "coop.example.com/postgres-client"
         migration = self.by_kind_name("infrastructure/migration")
         backup = self.by_kind_name("infrastructure/backup")
@@ -274,19 +240,13 @@ class RenderedSecurityContractTests(unittest.TestCase):
         self.assertEqual(migration_job["metadata"]["labels"][selector], "true")
         for cronjob in (seed, backup_cron):
             self.assertEqual(cronjob["metadata"]["labels"][selector], "true")
-            self.assertEqual(
-                cronjob["spec"]["jobTemplate"]["metadata"]["labels"][selector], "true"
-            )
+            self.assertEqual(cronjob["spec"]["jobTemplate"]["metadata"]["labels"][selector], "true")
 
-    def test_ingress_has_only_exact_public_health_and_expected_auth_contracts(
-        self,
-    ) -> None:
+    def test_ingress_has_only_exact_public_health_and_expected_auth_contracts(self) -> None:
         objects = self.by_kind_name("infrastructure/ingress")
         ingress = objects[("IngressRoute", "coop-https")]
         routes = {route["match"]: route for route in ingress["spec"]["routes"]}
-        public = {
-            match for match, route in routes.items() if not route.get("middlewares")
-        }
+        public = {match for match, route in routes.items() if not route.get("middlewares")}
         self.assertEqual(
             public,
             {"Path(`/api/v1/health/live`)", "Path(`/api/v1/health/ready`)"},
@@ -323,17 +283,11 @@ class RenderedSecurityContractTests(unittest.TestCase):
             },
         }
         for name, probes in expected.items():
-            container = objects[("Deployment", name)]["spec"]["template"]["spec"][
-                "containers"
-            ][0]
+            container = objects[("Deployment", name)]["spec"]["template"]["spec"]["containers"][0]
             for probe, path in probes.items():
-                self.assertEqual(
-                    container[probe]["httpGet"]["path"], path, f"{name}/{probe}"
-                )
+                self.assertEqual(container[probe]["httpGet"]["path"], path, f"{name}/{probe}")
 
-    def test_application_network_policies_are_default_deny_and_least_privilege(
-        self,
-    ) -> None:
+    def test_application_network_policies_are_default_deny_and_least_privilege(self) -> None:
         objects = self.by_kind_name("infrastructure/database")
         policies = {
             name: item
@@ -342,17 +296,9 @@ class RenderedSecurityContractTests(unittest.TestCase):
         }
         self.assertEqual(
             set(policies),
-            {
-                "default-deny",
-                "allow-dns-egress",
-                "allow-traefik-to-apps",
-                "allow-postgres-clients",
-                "allow-postgres-egress",
-            },
+            {"default-deny", "allow-dns-egress", "allow-traefik-to-apps", "allow-postgres-clients", "allow-postgres-egress"},
         )
-        self.assertEqual(
-            policies["default-deny"]["spec"]["policyTypes"], ["Ingress", "Egress"]
-        )
+        self.assertEqual(policies["default-deny"]["spec"]["policyTypes"], ["Ingress", "Egress"])
         self.assertNotIn("ingress", policies["default-deny"]["spec"])
         self.assertNotIn("egress", policies["default-deny"]["spec"])
         dns = policies["allow-dns-egress"]["spec"]["egress"]
@@ -376,9 +322,7 @@ class RenderedSecurityContractTests(unittest.TestCase):
             rule = policies[name]["spec"][direction][0]
             self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": 5432}])
 
-    def test_flux_egress_overlay_removes_allow_all_and_keeps_required_paths(
-        self,
-    ) -> None:
+    def test_flux_egress_overlay_removes_allow_all_and_keeps_required_paths(self) -> None:
         objects = self.by_kind_name("clusters/production/flux-system")
         policy = objects[("NetworkPolicy", "allow-egress")]
         egress = policy["spec"]["egress"]
@@ -388,15 +332,10 @@ class RenderedSecurityContractTests(unittest.TestCase):
             for rule in egress
             for port in rule.get("ports", [])
         }
-        self.assertTrue(
-            {("UDP", 53), ("TCP", 53), ("TCP", 22), ("TCP", 443), ("TCP", 6443)}
-            <= ports
-        )
+        self.assertTrue({("UDP", 53), ("TCP", 53), ("TCP", 22), ("TCP", 443), ("TCP", 6443)} <= ports)
         self.assertTrue(
             any(
-                target.get("namespaceSelector", {})
-                .get("matchLabels", {})
-                .get("kubernetes.io/metadata.name")
+                target.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name")
                 == "flux-system"
                 and target.get("podSelector") == {}
                 for rule in egress
@@ -406,13 +345,9 @@ class RenderedSecurityContractTests(unittest.TestCase):
 
 
 class ContinuousIntegrationContractTests(unittest.TestCase):
-    def test_actions_are_full_sha_pinned_and_dependency_updates_are_configured(
-        self,
-    ) -> None:
+    def test_actions_are_full_sha_pinned_and_dependency_updates_are_configured(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        uses = re.findall(
-            r"^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#\s*(.+))?$", workflow, re.MULTILINE
-        )
+        uses = re.findall(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#\s*(.+))?$", workflow, re.MULTILINE)
         self.assertGreater(len(uses), 0)
         for action, comment in uses:
             self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$", action)
@@ -423,12 +358,8 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
 
     def test_ci_builds_each_real_image_once_and_smokes_read_only_non_root(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-        self.assertEqual(
-            len(re.findall(r"docker build[^\n]+apps/api/Dockerfile", workflow)), 1
-        )
-        self.assertEqual(
-            len(re.findall(r"docker build[^\n]+apps/web/Dockerfile", workflow)), 1
-        )
+        self.assertEqual(len(re.findall(r"docker build[^\n]+apps/api/Dockerfile", workflow)), 1)
+        self.assertEqual(len(re.findall(r"docker build[^\n]+apps/web/Dockerfile", workflow)), 1)
         self.assertIn("--file apps/api/Dockerfile apps/api", workflow)
         self.assertIn("--file apps/web/Dockerfile .", workflow)
         self.assertGreaterEqual(workflow.count("--read-only"), 2)
@@ -465,17 +396,13 @@ class DocumentationContractTests(unittest.TestCase):
     def test_runbook_matches_firewall_auth_and_live_gate_reality(self) -> None:
         runbook = (ROOT / "docs/gitops-m2.md").read_text(encoding="utf-8")
         self.assertIn("scripts/bootstrap-production-host.sh --verify-firewall", runbook)
-        self.assertIn(
-            "Default: deny (incoming), allow (outgoing), deny (routed)", runbook
-        )
+        self.assertIn("Default: deny (incoming), allow (outgoing), deny (routed)", runbook)
         self.assertIn("API: `removeHeader: false`", runbook)
         self.assertIn("Web: `removeHeader: true`", runbook)
         self.assertIn("ausstehendes B2-Deployment-Gate", runbook)
         self.assertIn("SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU", runbook)
 
-    def test_retained_pv_namespace_loss_runbook_is_fail_closed_and_identity_checked(
-        self,
-    ) -> None:
+    def test_retained_pv_namespace_loss_runbook_is_fail_closed_and_identity_checked(self) -> None:
         runbook = (ROOT / "docs/gitops-m2.md").read_text(encoding="utf-8")
         heading = "## Retained-PV-Recovery nach Namespaceverlust"
         start = runbook.index(heading)
@@ -501,9 +428,7 @@ class DocumentationContractTests(unittest.TestCase):
         for guard in required_guards:
             self.assertIn(guard, recovery)
 
-        pre_inventory = recovery.index(
-            "Unveränderlichen Checkpoint vor Suspension erstellen"
-        )
+        pre_inventory = recovery.index("Unveränderlichen Checkpoint vor Suspension erstellen")
         suspension = recovery.index("Source und alle Kustomizations suspendieren")
         quiescence = recovery.index("Echte Flux-Quieszenz beweisen")
         post_inventory = recovery.index("Inventur nach Quieszenz wiederholen")
@@ -613,9 +538,7 @@ class DurableStorageTests(unittest.TestCase):
             for volume in stateful_set["spec"]["template"]["spec"]["volumes"]
             if volume["name"] == "data"
         )
-        self.assertEqual(
-            data_volume["persistentVolumeClaim"]["claimName"], "postgres-data"
-        )
+        self.assertEqual(data_volume["persistentVolumeClaim"]["claimName"], "postgres-data")
         database_kustomization = document("infrastructure/database/kustomization.yaml")
         self.assertIn("postgres-data-pvc.yaml", database_kustomization["resources"])
 
@@ -630,13 +553,9 @@ class DurableStorageTests(unittest.TestCase):
             item["metadata"]["name"]: item
             for item in documents("clusters/production/flux-kustomizations.yaml")
         }
-        self.assertEqual(
-            syncs["coop-storage"]["spec"]["path"], "./infrastructure/storage"
-        )
+        self.assertEqual(syncs["coop-storage"]["spec"]["path"], "./infrastructure/storage")
         self.assertTrue(syncs["coop-storage"]["spec"]["prune"])
-        self.assertEqual(
-            syncs["coop-database"]["spec"]["dependsOn"], [{"name": "coop-storage"}]
-        )
+        self.assertEqual(syncs["coop-database"]["spec"]["dependsOn"], [{"name": "coop-storage"}])
 
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("python3 -m unittest scripts.tests.test_gitops_static", workflow)
