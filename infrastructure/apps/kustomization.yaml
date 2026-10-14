@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: coop-prod
+resources:
+  - api.yaml
+  - web.yaml
+images:
+  - name: 127.0.0.1:5000/coop-api
+    newTag: git-a4b4d9f030ee
+    digest: sha256:ebe650d1273c88c6a5223be5d2e1a55a8a5a7207153e14849f78d99e95beca5a
+  - name: 127.0.0.1:5000/coop-web
+    newTag: git-a4b4d9f030ee
+    digest: sha256:e987d6bb0796ea1c53108862adfd147d8660aca32eea6fcbbe717b6ce06ad0ff

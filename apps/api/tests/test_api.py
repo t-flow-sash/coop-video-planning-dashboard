@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import cast
 from uuid import uuid4
 
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from app.db import engine
+from app.db import engine, get_session
 from app.main import app
 
 
@@ -20,7 +22,35 @@ def create_coop(client: TestClient, **overrides: object) -> dict[str, object]:
     payload.update(overrides)
     response = client.post("/api/v1/coops", json=payload)
     assert response.status_code == 201, response.text
-    return response.json()
+    return cast(dict[str, object], response.json())
+
+
+def test_all_write_routes_finalize_the_session_before_sending_the_response() -> None:
+    expected_write_routes = {
+        ("POST", "/api/v1/organizations"),
+        ("POST", "/api/v1/contacts"),
+        ("POST", "/api/v1/coops"),
+        ("PATCH", "/api/v1/coops/{coop_id}"),
+        ("POST", "/api/v1/coops/{coop_id}/transitions"),
+        ("POST", "/api/v1/coops/{coop_id}/reopen"),
+    }
+    write_routes = {
+        (method, route.path): route
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods
+        if method in {"POST", "PUT", "PATCH", "DELETE"}
+    }
+
+    assert set(write_routes) == expected_write_routes
+    for route in write_routes.values():
+        session_dependencies = [
+            dependency
+            for dependency in route.dependant.dependencies
+            if dependency.call is get_session
+        ]
+        assert len(session_dependencies) == 1, route.path
+        assert session_dependencies[0].scope == "function", route.path
 
 
 def test_health_live_has_no_database_dependency_and_ready_checks_schema(client: TestClient) -> None:
@@ -222,4 +252,56 @@ def test_coop_update_rolls_back_when_audit_insert_fails(client: TestClient) -> N
 
     unchanged = client.get(f"/api/v1/coops/{coop_id}").json()
     assert unchanged["title"] == "Synthetic launch"
+    assert unchanged["version"] == 1
+
+
+def test_transition_commit_failure_cannot_send_a_success_response(client: TestClient) -> None:
+    created = create_coop(client, status="PUBLISHED")
+    coop_id = created["id"]
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE FUNCTION reject_transition_commit() RETURNS trigger LANGUAGE plpgsql AS $$ "
+                "BEGIN RAISE EXCEPTION 'transition commit rejected'; END $$"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE CONSTRAINT TRIGGER reject_transition_commit_trigger "
+                "AFTER UPDATE ON coop DEFERRABLE INITIALLY DEFERRED "
+                "FOR EACH ROW EXECUTE FUNCTION reject_transition_commit()"
+            )
+        )
+
+    response_statuses: list[int] = []
+
+    async def observe_response_start(scope: object, receive: object, send: object) -> None:
+        async def observed_send(message: dict[str, object]) -> None:
+            if message["type"] == "http.response.start":
+                response_statuses.append(cast(int, message["status"]))
+            await send(message)  # type: ignore[operator]
+
+        await app(scope, receive, observed_send)  # type: ignore[arg-type]
+
+    try:
+        with TestClient(observe_response_start, raise_server_exceptions=False) as failing_client:
+            response = failing_client.post(
+                f"/api/v1/coops/{coop_id}/transitions",
+                json={
+                    "target_status": "COMPLETED",
+                    "expected_version": 1,
+                    "reason": "Delivered",
+                },
+            )
+        assert response.status_code == 500, response.text
+        assert response_statuses == [500]
+    finally:
+        with engine.begin() as connection:
+            connection.execute(
+                text("DROP TRIGGER IF EXISTS reject_transition_commit_trigger ON coop")
+            )
+            connection.execute(text("DROP FUNCTION IF EXISTS reject_transition_commit()"))
+
+    unchanged = client.get(f"/api/v1/coops/{coop_id}").json()
+    assert unchanged["status"] == "PUBLISHED"
     assert unchanged["version"] == 1

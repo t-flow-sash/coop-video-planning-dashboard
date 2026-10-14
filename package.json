@@ -7,7 +7,7 @@
     "typecheck": "pnpm --filter web typecheck",
     "test": "pnpm --filter web test",
     "build": "pnpm --filter web build",
-    "format:check": "prettier --check apps/web e2e playwright.config.ts package.json pnpm-workspace.yaml",
+    "format:check": "prettier --check apps/web e2e scripts/*.mjs scripts/tests/*.mjs playwright.config.ts package.json pnpm-workspace.yaml",
     "e2e": "playwright test"
   },
   "devDependencies": {

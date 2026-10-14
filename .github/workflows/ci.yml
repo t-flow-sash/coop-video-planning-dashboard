@@ -3,12 +3,16 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   quality:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17-alpine
+        image: docker.io/library/postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
         env:
           POSTGRES_DB: coop_test
           POSTGRES_USER: coop
@@ -19,15 +23,24 @@ jobs:
           --health-interval 3s --health-timeout 3s --health-retries 20
     env:
       DATABASE_URL: postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test
-      NEXT_PUBLIC_API_URL: http://127.0.0.1:8000/api/v1
+      NEXT_PUBLIC_API_URL: /api/v1
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: { fetch-depth: 0 }
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with: { enable-cache: true }
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with: { version: 12.11.2 }
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: 22, cache: pnpm }
+      - uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4
+        with: { version: v1.31.4 }
+      - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          scandir: ./scripts
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: pnpm install --frozen-lockfile
       - run: uv sync --project apps/api --all-groups --frozen
       - run: uv run --project apps/api alembic upgrade head
@@ -41,22 +54,111 @@ jobs:
       - run: pnpm --filter web lint
       - run: pnpm --filter web typecheck
       - run: pnpm --filter web test
+      - run: node --test scripts/tests/*.test.mjs
+      - run: uv run --with pyyaml==6.0.3 -- python3 -m unittest scripts.tests.test_gitops_static scripts.tests.test_operational_scripts
+      - run: node --check scripts/e2e-gateway.mjs
       - run: pnpm --filter web build
+      - name: Build and smoke-test production images
+        run: |
+          set -Eeuo pipefail
+          docker build --tag coop-api:ci --file apps/api/Dockerfile apps/api
+          docker build --tag coop-web:ci --file apps/web/Dockerfile .
+
+          for image in coop-api:ci coop-web:ci; do
+            configured_user="$(docker image inspect --format '{{.Config.User}}' "$image")"
+            [[ -n "$configured_user" && "$configured_user" != 0 && "$configured_user" != root ]]
+            docker run --rm --read-only --entrypoint /bin/sh "$image" \
+              -c 'test "$(id -u)" -ne 0 && ! touch /read-only-rootfs-probe'
+          done
+
+          cleanup_images() {
+            docker rm -f coop-api-smoke coop-web-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup_images EXIT INT TERM
+          docker run -d --name coop-api-smoke --network host --read-only --tmpfs /tmp \
+            -e DATABASE_URL="$DATABASE_URL" coop-api:ci >/dev/null
+          docker run -d --name coop-web-smoke -p 3000:3000 --read-only \
+            --tmpfs /tmp --tmpfs /app/apps/web/.next/cache coop-web:ci >/dev/null
+          for container in coop-api-smoke coop-web-smoke; do
+            [[ "$(docker exec "$container" id -u)" -ne 0 ]]
+          done
+          ready=false
+          for _ in {1..30}; do
+            if curl -fsS http://127.0.0.1:8000/api/v1/health/live >/dev/null \
+              && curl -fsS http://127.0.0.1:3000/ >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          [[ "$ready" == true ]] || {
+            docker logs coop-api-smoke
+            docker logs coop-web-smoke
+            exit 1
+          }
+      - name: Validate API Dockerfile
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with: { dockerfile: apps/api/Dockerfile }
+      - name: Validate Web Dockerfile
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with: { dockerfile: apps/web/Dockerfile }
+      - name: Render and schema-check GitOps manifests
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
+            -o /tmp/kubeconform.tar.gz
+          echo 'c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3  /tmp/kubeconform.tar.gz' \
+            | sha256sum --check --strict
+          tar -xzf /tmp/kubeconform.tar.gz kubeconform
+          schema_catalog='https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          for dir in infrastructure/storage infrastructure/database infrastructure/migration infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
+            output="/tmp/$(echo "$dir" | tr / -).yaml"
+            # Flux removes top-level SOPS metadata before apply. Strip only that
+            # metadata block here; encrypted Secret values remain schema-checked.
+            kubectl kustomize "$dir" | awk '
+              /^sops:$/ { skip=1; next }
+              skip && /^---$/ { skip=0 }
+              !skip { print }
+            ' > "$output"
+            uv run --with pyyaml==6.0.3 -- python3 scripts/validate-rendered-images.py < "$output"
+            if grep -Eq 'git-0{12}|sha256:0{64}' "$output"; then
+              echo "Unpromoted image sentinel remains in deployable render: $dir" >&2
+              exit 1
+            fi
+            ./kubeconform -strict -summary -skip CustomResourceDefinition \
+              -schema-location default -schema-location "$schema_catalog" "$output"
+          done
+      - name: Validate shell syntax
+        run: bash -n scripts/*.sh
       - run: pnpm exec playwright install --with-deps chrome
       - run: |
           set -Eeuo pipefail
 
           api_pid=""
           web_pid=""
+          gateway_pid=""
           cleanup() {
             status=$?
             trap - EXIT INT TERM
-            for pid in "$web_pid" "$api_pid"; do
+            for pid in "$gateway_pid" "$web_pid" "$api_pid"; do
               if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-                kill "$pid" 2>/dev/null || true
+                kill -TERM "$pid" 2>/dev/null || true
               fi
             done
-            for pid in "$web_pid" "$api_pid"; do
+            for _ in {1..25}; do
+              running=false
+              for pid in "$gateway_pid" "$web_pid" "$api_pid"; do
+                if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                  running=true
+                fi
+              done
+              [[ "$running" == true ]] || break
+              sleep 0.2
+            done
+            for pid in "$gateway_pid" "$web_pid" "$api_pid"; do
+              if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null || true
+              fi
               if [[ -n "$pid" ]]; then
                 wait "$pid" 2>/dev/null || true
               fi
@@ -67,23 +169,36 @@ jobs:
           trap 'exit 130' INT
           trap 'exit 143' TERM
 
+          mkdir -p apps/web/.next/standalone/apps/web/.next
+          cp -R apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static
+          if [[ -d apps/web/public ]]; then
+            cp -R apps/web/public apps/web/.next/standalone/apps/web/public
+          fi
+
+          # The backend test fixtures truncate the shared CI database after each test.
+          uv run --project apps/api python -m app.seed
+
           (cd apps/api && exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000) &
           api_pid=$!
-          (cd apps/web && exec ./node_modules/.bin/next start --hostname 127.0.0.1 --port 3000) &
+          (cd apps/web/.next/standalone && HOSTNAME=127.0.0.1 PORT=3000 exec node apps/web/server.js) &
           web_pid=$!
+          GATEWAY_PORT=3001 API_ORIGIN=http://127.0.0.1:8000 \
+            WEB_ORIGIN=http://127.0.0.1:3000 node scripts/e2e-gateway.mjs &
+          gateway_pid=$!
 
           ready=false
           for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:8000/api/v1/health/ready \
-              && curl -fsS http://127.0.0.1:3000/coops; then
+            if curl -fsS http://127.0.0.1:3001/_gateway/health \
+              && curl -fsS http://127.0.0.1:3001/api/v1/health/ready \
+              && curl -fsS http://127.0.0.1:3001/coops; then
               ready=true
               break
             fi
             sleep 2
           done
           if [[ "$ready" != true ]]; then
-            echo "E2E servers did not become ready after 30 attempts" >&2
+            echo "E2E gateway and upstreams did not become ready after 30 attempts" >&2
             exit 1
           fi
 
-          pnpm exec playwright test
+          E2E_BASE_URL=http://127.0.0.1:3001 pnpm exec playwright test

@@ -1,0 +1,103 @@
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: coop-storage
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  path: ./infrastructure/storage
+  prune: true
+  wait: true
+  sourceRef: {kind: GitRepository, name: coop-video-planning}
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: coop-database
+  namespace: flux-system
+spec:
+  dependsOn: [{name: coop-storage}]
+  interval: 10m
+  retryInterval: 1m
+  timeout: 10m
+  path: ./infrastructure/database
+  prune: true
+  wait: true
+  sourceRef: {kind: GitRepository, name: coop-video-planning}
+  decryption:
+    provider: sops
+    secretRef: {name: sops-age}
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: coop-migration
+  namespace: flux-system
+spec:
+  dependsOn: [{name: coop-database}]
+  interval: 10m
+  retryInterval: 1m
+  timeout: 15m
+  path: ./infrastructure/migration
+  prune: true
+  wait: true
+  sourceRef: {kind: GitRepository, name: coop-video-planning}
+  decryption:
+    provider: sops
+    secretRef: {name: sops-age}
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: coop-apps
+  namespace: flux-system
+spec:
+  dependsOn: [{name: coop-migration}]
+  interval: 10m
+  retryInterval: 1m
+  timeout: 10m
+  path: ./infrastructure/apps
+  prune: true
+  wait: true
+  sourceRef: {kind: GitRepository, name: coop-video-planning}
+  decryption:
+    provider: sops
+    secretRef: {name: sops-age}
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: coop-ingress
+  namespace: flux-system
+spec:
+  dependsOn: [{name: coop-apps}]
+  interval: 10m
+  retryInterval: 1m
+  timeout: 10m
+  path: ./infrastructure/ingress
+  prune: true
+  wait: true
+  sourceRef: {kind: GitRepository, name: coop-video-planning}
+  decryption:
+    provider: sops
+    secretRef: {name: sops-age}
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: coop-backup
+  namespace: flux-system
+spec:
+  dependsOn: [{name: coop-ingress}]
+  interval: 10m
+  retryInterval: 1m
+  timeout: 10m
+  path: ./infrastructure/backup
+  prune: true
+  wait: true
+  sourceRef: {kind: GitRepository, name: coop-video-planning}
+  decryption:
+    provider: sops
+    secretRef: {name: sops-age}

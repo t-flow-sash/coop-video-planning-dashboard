@@ -6,7 +6,7 @@ const repositoryName =
   "coop-video-planning-dashboard";
 
 const nextConfig = {
-  output: demo ? "export" : undefined,
+  output: demo ? "export" : "standalone",
   basePath: demo ? `/${repositoryName}` : "",
   assetPrefix: demo ? `/${repositoryName}/` : undefined,
   trailingSlash: demo,

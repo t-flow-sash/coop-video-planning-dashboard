@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: coop-prod
+resources:
+  - namespace.yaml
+  - postgres-data-pvc.yaml
+  - postgres-service.yaml
+  - postgres-statefulset.yaml
+  - network-policies.yaml
+  - coop-runtime.secret.sops.yaml

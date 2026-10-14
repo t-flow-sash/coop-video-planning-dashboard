@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coop-web
+  labels: &webLabels
+    app.kubernetes.io/name: coop-web
+    app.kubernetes.io/part-of: coop-video-planning
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: *webLabels
+  template:
+    metadata:
+      labels: *webLabels
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: web
+          image: 127.0.0.1:5000/coop-web:git-000000000000@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 3000}
+          env:
+            - {name: NODE_ENV, value: production}
+            - {name: HOSTNAME, value: 0.0.0.0}
+            - {name: PORT, value: "3000"}
+          resources:
+            requests: {cpu: 100m, memory: 192Mi}
+            limits: {cpu: "1", memory: 768Mi}
+          startupProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+            - {name: next-cache, mountPath: /app/apps/web/.next/cache}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: next-cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: coop-web
+  labels:
+    app.kubernetes.io/name: coop-web
+    app.kubernetes.io/part-of: coop-video-planning
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: coop-web
+    app.kubernetes.io/part-of: coop-video-planning
+  ports:
+    - {name: http, port: 3000, targetPort: http}

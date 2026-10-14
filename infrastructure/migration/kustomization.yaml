@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: coop-prod
+resources:
+  - migration-job.yaml
+  - seed-cronjob.yaml
+images:
+  - name: 127.0.0.1:5000/coop-api
+    newTag: git-a4b4d9f030ee
+    digest: sha256:ebe650d1273c88c6a5223be5d2e1a55a8a5a7207153e14849f78d99e95beca5a

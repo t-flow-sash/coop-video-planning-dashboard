@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Dependabot opens reviewed SHA-refresh PRs while workflow comments retain
+  # the human-readable release line associated with each immutable pin.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

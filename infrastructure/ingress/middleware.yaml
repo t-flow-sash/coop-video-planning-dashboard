@@ -1,0 +1,28 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: coop-api-auth
+spec:
+  basicAuth:
+    secret: coop-basic-auth
+    # API validates the same credentials, so Authorization must be forwarded.
+    removeHeader: false
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: coop-web-auth
+spec:
+  basicAuth:
+    secret: coop-basic-auth
+    # The web upstream never receives browser credentials.
+    removeHeader: true
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-https
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true

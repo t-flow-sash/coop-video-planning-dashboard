@@ -1,0 +1,47 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: coop-https
+spec:
+  entryPoints: [websecure]
+  routes:
+    - match: Path(`/api/v1/health/live`)
+      kind: Rule
+      priority: 300
+      services:
+        - {name: coop-api, port: 8000}
+    - match: Path(`/api/v1/health/ready`)
+      kind: Rule
+      priority: 300
+      services:
+        - {name: coop-api, port: 8000}
+    - match: PathPrefix(`/api/v1`)
+      kind: Rule
+      priority: 200
+      middlewares:
+        - name: coop-api-auth
+      services:
+        - {name: coop-api, port: 8000}
+    - match: PathPrefix(`/`)
+      kind: Rule
+      priority: 100
+      middlewares:
+        - name: coop-web-auth
+      services:
+        - {name: coop-web, port: 3000}
+  tls:
+    secretName: coop-tls
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: coop-http-redirect
+spec:
+  entryPoints: [web]
+  routes:
+    - match: PathPrefix(`/`)
+      kind: Rule
+      middlewares:
+        - name: redirect-https
+      services:
+        - {name: noop@internal, kind: TraefikService}
