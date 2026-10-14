@@ -27,7 +27,19 @@ test("Statusänderung bleibt nach Reload erhalten und erscheint im Audit", async
   });
   page.on("pageerror", (error) => pageErrors.push(error.message));
 
+  const coopListResponsePromise = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      response.request().method() === "GET" && url.pathname === "/api/v1/coops"
+    );
+  });
   await page.goto(`${baseURL}/coops`);
+  const coopListResponse = await coopListResponsePromise;
+  expect(
+    coopListResponse.ok(),
+    `Same-Origin API-Routing fehlgeschlagen: GET ${coopListResponse.url()} -> ${coopListResponse.status()} ${coopListResponse.statusText()}`,
+  ).toBeTruthy();
+
   const table = page.getByRole("table", { name: "Offene Kooperationen" });
   await expect(table).toBeVisible();
 

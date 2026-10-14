@@ -49,6 +49,8 @@ jobs:
       - run: pnpm --filter web lint
       - run: pnpm --filter web typecheck
       - run: pnpm --filter web test
+      - run: node --test scripts/tests/*.test.mjs
+      - run: node --check scripts/e2e-gateway.mjs
       - run: pnpm --filter web build
       - name: Validate API Dockerfile
         uses: hadolint/hadolint-action@v3.1.0
@@ -78,15 +80,29 @@ jobs:
 
           api_pid=""
           web_pid=""
+          gateway_pid=""
           cleanup() {
             status=$?
             trap - EXIT INT TERM
-            for pid in "$web_pid" "$api_pid"; do
+            for pid in "$gateway_pid" "$web_pid" "$api_pid"; do
               if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-                kill "$pid" 2>/dev/null || true
+                kill -TERM "$pid" 2>/dev/null || true
               fi
             done
-            for pid in "$web_pid" "$api_pid"; do
+            for _ in {1..25}; do
+              running=false
+              for pid in "$gateway_pid" "$web_pid" "$api_pid"; do
+                if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                  running=true
+                fi
+              done
+              [[ "$running" == true ]] || break
+              sleep 0.2
+            done
+            for pid in "$gateway_pid" "$web_pid" "$api_pid"; do
+              if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                kill -KILL "$pid" 2>/dev/null || true
+              fi
               if [[ -n "$pid" ]]; then
                 wait "$pid" 2>/dev/null || true
               fi
@@ -97,23 +113,36 @@ jobs:
           trap 'exit 130' INT
           trap 'exit 143' TERM
 
+          mkdir -p apps/web/.next/standalone/apps/web/.next
+          cp -R apps/web/.next/static apps/web/.next/standalone/apps/web/.next/static
+          if [[ -d apps/web/public ]]; then
+            cp -R apps/web/public apps/web/.next/standalone/apps/web/public
+          fi
+
+          # The backend test fixtures truncate the shared CI database after each test.
+          uv run --project apps/api python -m app.seed
+
           (cd apps/api && exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000) &
           api_pid=$!
-          (cd apps/web && exec ./node_modules/.bin/next start --hostname 127.0.0.1 --port 3000) &
+          (cd apps/web/.next/standalone && HOSTNAME=127.0.0.1 PORT=3000 exec node apps/web/server.js) &
           web_pid=$!
+          GATEWAY_PORT=3001 API_ORIGIN=http://127.0.0.1:8000 \
+            WEB_ORIGIN=http://127.0.0.1:3000 node scripts/e2e-gateway.mjs &
+          gateway_pid=$!
 
           ready=false
           for i in {1..30}; do
-            if curl -fsS http://127.0.0.1:8000/api/v1/health/ready \
-              && curl -fsS http://127.0.0.1:3000/coops; then
+            if curl -fsS http://127.0.0.1:3001/_gateway/health \
+              && curl -fsS http://127.0.0.1:3001/api/v1/health/ready \
+              && curl -fsS http://127.0.0.1:3001/coops; then
               ready=true
               break
             fi
             sleep 2
           done
           if [[ "$ready" != true ]]; then
-            echo "E2E servers did not become ready after 30 attempts" >&2
+            echo "E2E gateway and upstreams did not become ready after 30 attempts" >&2
             exit 1
           fi
 
-          pnpm exec playwright test
+          E2E_BASE_URL=http://127.0.0.1:3001 pnpm exec playwright test
