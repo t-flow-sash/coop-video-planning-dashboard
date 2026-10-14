@@ -44,7 +44,46 @@ jobs:
       - run: pnpm --filter web build
       - run: pnpm exec playwright install --with-deps chrome
       - run: |
-          uv run --project apps/api uvicorn app.main:app --host 127.0.0.1 --port 8000 &
-          pnpm --filter web start --hostname 127.0.0.1 --port 3000 &
-          for i in {1..30}; do curl -fsS http://127.0.0.1:8000/api/v1/health/ready && curl -fsS http://127.0.0.1:3000/coops && break; sleep 2; done
+          set -Eeuo pipefail
+
+          api_pid=""
+          web_pid=""
+          cleanup() {
+            status=$?
+            trap - EXIT INT TERM
+            for pid in "$web_pid" "$api_pid"; do
+              if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+                kill "$pid" 2>/dev/null || true
+              fi
+            done
+            for pid in "$web_pid" "$api_pid"; do
+              if [[ -n "$pid" ]]; then
+                wait "$pid" 2>/dev/null || true
+              fi
+            done
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          (cd apps/api && exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000) &
+          api_pid=$!
+          (cd apps/web && exec ./node_modules/.bin/next start --hostname 127.0.0.1 --port 3000) &
+          web_pid=$!
+
+          ready=false
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8000/api/v1/health/ready \
+              && curl -fsS http://127.0.0.1:3000/coops; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [[ "$ready" != true ]]; then
+            echo "E2E servers did not become ready after 30 attempts" >&2
+            exit 1
+          fi
+
           pnpm exec playwright test
