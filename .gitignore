@@ -18,6 +18,7 @@ apps/api/.ruff_cache/
 apps/api/**/__pycache__/
 apps/web/node_modules/
 apps/web/.next/
+apps/web/out/
 apps/web/coverage/
 apps/web/tsconfig.tsbuildinfo
 node_modules/

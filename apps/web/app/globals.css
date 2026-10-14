@@ -166,6 +166,17 @@ main {
   border-radius: 6px;
   padding: 10px 12px;
   margin: 24px 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.environment-note button {
+  flex: 0 0 auto;
+  border: 1px solid currentColor;
+  background: transparent;
+  border-radius: 6px;
+  padding: 6px 10px;
 }
 .observations {
   display: flex;
@@ -447,6 +458,15 @@ td:first-child {
   background: #fff;
   border-left: 1px solid var(--border);
   padding: 24px;
+}
+.detail-demo-note {
+  margin: 0 0 16px;
+  padding: 9px 10px;
+  border: 1px solid #e5c777;
+  border-radius: 6px;
+  background: var(--warning-soft);
+  color: #684500;
+  font-size: 13px;
 }
 .detail-top {
   display: flex;
@@ -737,6 +757,8 @@ td:first-child {
   }
   .environment-note {
     margin-top: 18px;
+    align-items: flex-start;
+    flex-direction: column;
   }
   .observations {
     scroll-snap-type: x mandatory;

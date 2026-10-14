@@ -3,8 +3,9 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Coop-Planung",
-  description: "Lokales M1-Dashboard für Kooperationen",
+  title: "Coop-Planung · öffentliche M1-Demo",
+  description:
+    "Sicherer statischer Click-Dummy mit synthetischen Beispieldaten",
 };
 
 export default function RootLayout({
@@ -19,7 +20,7 @@ export default function RootLayout({
               Zum Inhalt springen
             </a>
             <div className="wordmark">
-              Coop Planung <small>M1 · lokal</small>
+              Coop Planung <small>M1 · Demo</small>
             </div>
             <nav aria-label="Hauptnavigation">
               <Link href="/coops">Kooperationen</Link>

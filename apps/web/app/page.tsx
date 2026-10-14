@@ -1,4 +1,3 @@
-import { redirect } from "next/navigation";
-export default function Home() {
-  redirect("/coops");
-}
+import CoopsPage from "./coops/page";
+
+export default CoopsPage;

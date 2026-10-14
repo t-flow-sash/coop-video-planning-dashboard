@@ -6,8 +6,13 @@ import type {
   Organization,
 } from "@/features/coops/domain";
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000/api/v1";
+const API_URL = process.env.NEXT_PUBLIC_API_URL;
+
+function apiUrl(): string {
+  if (!API_URL)
+    throw new Error("NEXT_PUBLIC_API_URL ist für den API-Modus erforderlich.");
+  return API_URL;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -20,7 +25,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
+  const response = await fetch(`${apiUrl()}${path}`, {
     ...init,
     headers: {
       Accept: "application/json",
@@ -88,6 +93,7 @@ export interface CoopRepository {
     status: CoopStatus,
     expectedVersion: number,
   ): Promise<Coop>;
+  reset?(): Coop[];
 }
 
 export const apiRepository: CoopRepository = {

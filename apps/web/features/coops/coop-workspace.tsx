@@ -21,7 +21,7 @@ import {
   type ReleaseFilter,
   type SortKey,
 } from "@/features/coops/domain";
-import { ApiError, apiRepository, type CoopRepository } from "@/lib/api/coops";
+import { type CoopRepository } from "@/lib/api/coops";
 
 const SYNC_LABELS = {
   local: "Lokal",
@@ -30,6 +30,17 @@ const SYNC_LABELS = {
   conflict: "Konflikt",
   error: "Fehler",
 } as const;
+
+const DEFAULT_QUERY: QueryState = {
+  q: "",
+  scope: "open",
+  statuses: [],
+  sort: "updated",
+  release: null,
+  quality: null,
+  contact: null,
+  agency: null,
+};
 
 function readQuery(): QueryState & { coop: string | null } {
   const params =
@@ -116,26 +127,23 @@ function deliverableText(item: Coop["deliverables"][number]) {
 }
 
 interface Props {
-  repository?: CoopRepository;
+  repository: CoopRepository;
   initialCoops?: Coop[];
+  demoMode?: boolean;
 }
 export function CoopWorkspace({
-  repository = apiRepository,
+  repository,
   initialCoops,
+  demoMode = false,
 }: Props) {
-  const [{ initialQuery }] = useState(() => ({ initialQuery: readQuery() }));
   const [coops, setCoops] = useState<Coop[]>(initialCoops ?? []);
-  const [query, setQuery] = useState<QueryState>(initialQuery);
-  const [searchDraft, setSearchDraft] = useState(initialQuery.q);
-  const [selectedId, setSelectedId] = useState<string | null>(
-    initialQuery.coop,
-  );
+  const [query, setQuery] = useState<QueryState>(DEFAULT_QUERY);
+  const [searchDraft, setSearchDraft] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<Coop | null>(null);
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(!initialCoops);
-  const [detailLoading, setDetailLoading] = useState(
-    Boolean(initialQuery.coop),
-  );
+  const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
@@ -144,6 +152,7 @@ export function CoopWorkspace({
   } | null>(null);
   const [savingId, setSavingId] = useState<string | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const detailTrigger = useRef<HTMLElement | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -164,6 +173,16 @@ export function CoopWorkspace({
     const timeout = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timeout);
   }, [initialCoops, load]);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      const state = readQuery();
+      setQuery(state);
+      setSearchDraft(state.q);
+      setSelectedId(state.coop);
+      setDetailLoading(Boolean(state.coop));
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, []);
   useEffect(() => {
     const onPopState = () => {
       const state = readQuery();
@@ -210,6 +229,7 @@ export function CoopWorkspace({
     searchTimer.current = setTimeout(() => updateQuery({ q: value }), 250);
   };
   const openDetail = (id: string) => {
+    detailTrigger.current = document.activeElement as HTMLElement | null;
     setDetail(null);
     setAudit([]);
     setDetailError(null);
@@ -223,7 +243,15 @@ export function CoopWorkspace({
     setAudit([]);
     setDetailLoading(false);
     setUrl(query, null);
+    window.setTimeout(() => detailTrigger.current?.focus(), 0);
   };
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && selectedId) closeDetail();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  });
   const reset = () => {
     const next: QueryState = {
       q: "",
@@ -271,9 +299,8 @@ export function CoopWorkspace({
         setAudit(await repository.audit(updated.id));
     } catch (reason) {
       const stale =
-        reason instanceof ApiError
-          ? reason.status === 409 && reason.code === "stale_version"
-          : (reason as { status?: number; code?: string }).status === 409;
+        (reason as { status?: number; code?: string }).status === 409 &&
+        (reason as { status?: number; code?: string }).code === "stale_version";
       setNotice({
         tone: "error",
         text: stale
@@ -359,10 +386,33 @@ export function CoopWorkspace({
           </button>
         </header>
 
-        <p className="environment-note">
-          <strong>Lokale M1-Vorschau:</strong> Keine Live-Gmail-Verbindung oder
-          automatische Agentenbearbeitung aktiv.
-        </p>
+        <div className="environment-note" role="note">
+          <span>
+            <strong>
+              {demoMode ? "Öffentliche Demo:" : "Lokale M1-Vorschau:"}
+            </strong>{" "}
+            {demoMode
+              ? "Ausschließlich synthetische Beispieldaten · keine API, Gmail- oder Agentenbearbeitung · Änderungen nur in diesem Browser."
+              : "Keine Live-Gmail-Verbindung oder automatische Agentenbearbeitung aktiv."}
+          </span>
+          {demoMode && repository.reset && (
+            <button
+              type="button"
+              onClick={() => {
+                setCoops(repository.reset!());
+                setSelectedId(null);
+                setDetail(null);
+                setAudit([]);
+                setNotice({
+                  tone: "success",
+                  text: "Demo-Daten wurden zurückgesetzt.",
+                });
+              }}
+            >
+              Demo zurücksetzen
+            </button>
+          )}
+        </div>
 
         <nav className="observations" aria-label="Beobachtungen">
           {observations.map((item) => (
@@ -574,6 +624,7 @@ export function CoopWorkspace({
           }}
           onOpen={openDetail}
           onTransition={transition}
+          demoMode={demoMode}
         />
       )}
       {notice && (
@@ -733,15 +784,27 @@ function RelationshipNote({
   relationships: RelationIndex;
 }) {
   const contact = primaryContact(coop);
-  const max = Math.max(
-    contact ? (relationships.contacts.get(contact.id)?.length ?? 0) : 0,
-    coop.agency ? (relationships.agencies.get(coop.agency.id)?.length ?? 0) : 0,
+  const contactCount = contact
+    ? (relationships.contacts.get(contact.id)?.length ?? 0)
+    : 0;
+  const agencyCount = coop.agency
+    ? (relationships.agencies.get(coop.agency.id)?.length ?? 0)
+    : 0;
+  if (contactCount < 2 && agencyCount < 2) return null;
+  return (
+    <span className="relationship-notes">
+      {contactCount > 1 && (
+        <small className="relationship-note">
+          ↔ Kontakt auch in {contactCount - 1} weiteren offenen Coops
+        </small>
+      )}
+      {agencyCount > 1 && (
+        <small className="relationship-note">
+          ↔ Agentur auch in {agencyCount - 1} weiteren offenen Coops
+        </small>
+      )}
+    </span>
   );
-  return max > 1 ? (
-    <small className="relationship-note">
-      ↔ Auch in {max - 1} weiteren offenen Coops
-    </small>
-  ) : null;
 }
 function StatusSelect({
   coop,
@@ -940,6 +1003,7 @@ function DetailPanel({
   onRetry,
   onOpen,
   onTransition,
+  demoMode,
 }: {
   coop: Coop | null;
   loading: boolean;
@@ -952,6 +1016,7 @@ function DetailPanel({
   onRetry: () => void;
   onOpen: (id: string) => void;
   onTransition: (coop: Coop, target: CoopStatus) => void;
+  demoMode: boolean;
 }) {
   const heading = useRef<HTMLHeadingElement>(null);
   useEffect(() => {
@@ -987,6 +1052,12 @@ function DetailPanel({
   );
   return (
     <aside className="detail-panel" aria-labelledby="coop-detail-title">
+      {demoMode && (
+        <p className="detail-demo-note" role="note">
+          <strong>Öffentliche Demo:</strong> Synthetische Daten · keine API,
+          Gmail- oder Agentenbearbeitung · Änderungen nur in diesem Browser.
+        </p>
+      )}
       <div className="detail-top">
         <div>
           <small>{coop.brand?.name ?? "Marke nicht erfasst"}</small>
@@ -1090,7 +1161,7 @@ function DetailPanel({
             <dd>
               {coop.source === "gmail_preview"
                 ? "Gmail-Vorschau"
-                : "Manuell / lokale API"}
+                : "Manuell erfasst"}
             </dd>
           </div>
           <div>
