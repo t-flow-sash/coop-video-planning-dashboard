@@ -1,6 +1,9 @@
 /** @type {import('next').NextConfig} */
 const demo = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
-const repositoryName = "coop-video-planning-dashboard";
+const repositoryName =
+  process.env.PAGES_REPOSITORY_NAME ??
+  process.env.GITHUB_REPOSITORY?.split("/").pop() ??
+  "coop-video-planning-dashboard";
 
 const nextConfig = {
   output: demo ? "export" : undefined,
