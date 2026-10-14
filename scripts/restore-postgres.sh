@@ -57,9 +57,9 @@ spec:
   automountServiceAccountToken: false
   securityContext:
     runAsNonRoot: true
-    runAsUser: 999
-    runAsGroup: 999
-    fsGroup: 999
+    runAsUser: 70
+    runAsGroup: 70
+    fsGroup: 70
     seccompProfile: {type: RuntimeDefault}
   containers:
     - name: restore

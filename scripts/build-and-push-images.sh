@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT="$(git rev-parse --show-toplevel)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT"
 
 REGISTRY="${REGISTRY:-127.0.0.1:5000}"
@@ -11,6 +11,7 @@ REGISTRY="${REGISTRY:-127.0.0.1:5000}"
 }
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 127; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 127; }
+(command -v kustomize >/dev/null || command -v kubectl >/dev/null) || { echo "kustomize or kubectl is required" >&2; exit 127; }
 
 git_sha="$(git rev-parse HEAD)"
 short_sha="$(git rev-parse --short=12 HEAD)"
@@ -18,8 +19,8 @@ tag="git-${short_sha}"
 api_image="${REGISTRY}/coop-api"
 web_image="${REGISTRY}/coop-web"
 
-if [[ -n "$(git status --porcelain --untracked-files=no -- apps packages package.json pnpm-lock.yaml pnpm-workspace.yaml)" ]]; then
-  echo "Refusing to build: tracked application inputs differ from commit ${git_sha}." >&2
+if [[ -n "$(git status --porcelain --untracked-files=all -- apps packages package.json pnpm-lock.yaml pnpm-workspace.yaml)" ]]; then
+  echo "Refusing to build: application inputs differ from commit ${git_sha}." >&2
   exit 3
 fi
 

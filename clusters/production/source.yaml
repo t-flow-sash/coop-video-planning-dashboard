@@ -5,8 +5,8 @@ metadata:
   namespace: flux-system
 spec:
   interval: 1m
-  url: ssh://git@github.com/OWNER/coop-video-planning-dashboard.git
+  url: ssh://git@github.com/t-flow-sash/coop-video-planning-dashboard.git
   ref:
-    branch: feat/m2-gitops
+    branch: main
   secretRef:
     name: coop-git-readonly

@@ -2,7 +2,25 @@
 
 ## Ziel und Grenzen
 
-Diese Basis beschreibt die deklarative Auslieferung nach `coop-prod`. Sie installiert **nicht** Host, k3s, Flux, Traefik, StorageClass, Registry, DNS oder Firewall und exponiert nichts automatisch. Vor dem ersten Reconcile müssen Betreiber Hostnamen, Secrets, Storage und die Git-Quelle bewusst konfigurieren. Es gibt keine Automation, die Manifeste auf einen Cluster pusht; Flux zieht ausschließlich aus Git.
+Diese Basis beschreibt die deklarative Auslieferung nach `coop-prod` auf dem dedizierten Single-Node-Host `192.168.2.94`. Phase B1 installiert und prüft nur Hostplattform, lokale Registry, Schlüsselmaterial, verschlüsselte Manifeste und immutable Images. Sie führt **kein** Flux-Reconcile der Anwendung, keinen Seed und keinen Merge nach `main` aus. Erst Phase B2 installiert bzw. aktiviert die versionierten Flux-Controller und Bootstrap-Secrets und reconciliiert den bereits geprüften Stand aus `main`.
+
+Die Registry ist ausschließlich auf `127.0.0.1:5000` gebunden; Datenbank und Anwendungsservices bleiben ClusterIP. Traefik ist der einzige spätere LAN-Einstieg auf 80/443. Diese Loopback-Registry ist absichtlich nur für einen einzelnen k3s-Node geeignet.
+
+Ein reines k3s-API-Binding auf `127.0.0.1` wurde verworfen: dadurch war das Kubernetes-Service-IP-Ziel `10.43.0.1:443` aus Pods nicht erreichbar und CoreDNS, local-path sowie Traefik blieben ungesund. Der API-Server bindet deshalb an `192.168.2.94:6443` (zusätzlich erzeugt k3s lokale Listener). UFW bleibt in B1 bewusst inaktiv; vor jeder Internet-/WAN-Exposition muss B2 Port 6443 auf Loopback bzw. das vertrauenswürdige Management-LAN beschränken und anschließend Pod-/Service-CIDRs erneut testen.
+
+## Tatsächliche B1-Hostbasis
+
+| Komponente | Gepinnte Version |
+|---|---|
+| Docker Engine | 29.9.1 (`docker-ce` 5:29.9.1-1~ubuntu.26.04~resolute) |
+| containerd.io (Docker) | 2.4.2-2 |
+| k3s / Kubernetes | v1.36.5+k3s1 / v1.36.5 |
+| Flux CLI / Controller-Export | v2.9.6 |
+| SOPS | v3.13.3 |
+| age | v1.3.2 |
+| Distribution Registry | v3.1.2, OCI-Digest `sha256:21078ecfcba8a0cd7e1a384f75b3509899661dd21823bf1da21b5a4674aaceb9` |
+
+Private Bootstrap-Dateien liegen root-only unter `/root/.config/coop-dashboard/`; Zugangsdaten stehen in `/root/.config/coop-dashboard/credentials.env` (Benutzer `sascha`). Private Schlüssel oder Passwörter dürfen niemals in Tickets, Logs oder Git kopiert werden. Die öffentliche lokale CA liegt zusätzlich unter `docs/certificates/coop-local-ca.crt` und kann auf Clients in den jeweiligen System-Truststore importiert werden. Danach Browser vollständig neu starten und die Kette gegen `https://192.168.2.94/` prüfen.
 
 ## Architektur und Reihenfolge
 
@@ -28,8 +46,8 @@ Vorausgesetzt werden ein bereits betriebener Cluster mit funktionierendem CNI/Ne
    ```bash
    flux create secret git coop-git-readonly \
      --namespace=flux-system \
-     --url=ssh://git@github.com/OWNER/coop-video-planning-dashboard.git \
-     --private-key-file="$HOME/.ssh/coop_flux_readonly"
+     --url=ssh://git@github.com/t-flow-sash/coop-video-planning-dashboard.git \
+     --private-key-file="/root/.config/coop-dashboard/flux-github-readonly"
    ```
    `clusters/production/flux-git-auth.secret.example.yaml` dokumentiert lediglich Form und erforderliche Keys und enthält absichtlich keine Werte/private Keys.
 3. Ein Age-Keypaar offline erzeugen. Den **öffentlichen** Empfänger in `.sops.yaml` ersetzen; den privaten Schlüssel nur als `sops-age` in `flux-system` hinterlegen:
@@ -38,12 +56,9 @@ Vorausgesetzt werden ein bereits betriebener Cluster mit funktionierendem CNI/Ne
    age-keygen -y age.key
    kubectl -n flux-system create secret generic sops-age --from-file=age.agekey=age.key
    ```
-4. Aus `infrastructure/database/coop-runtime.secret.example.yaml` eine Datei `coop-runtime.secret.sops.yaml` erzeugen. Benötigt werden `POSTGRES_DB`, `POSTGRES_USER`, ein starkes `POSTGRES_PASSWORD`, eine URL-encodierte `DATABASE_URL` im Format `postgresql+psycopg://USER:PASSWORD@postgres:5432/DB` sowie `AUTH_USERNAME` und `AUTH_PASSWORD`. Echte Werte eintragen, sofort mit `sops --encrypt --in-place ...` verschlüsseln und erst dann als Resource in `infrastructure/database/kustomization.yaml` aufnehmen.
-5. Analog aus `infrastructure/ingress/ingress-secrets.secret.example.yaml` verschlüsselte Secrets für `coop-basic-auth` (`users`: htpasswd-Zeile derselben API-Credentials) und `coop-tls` (`tls.crt`, `tls.key`) erzeugen und in `infrastructure/ingress/kustomization.yaml` aufnehmen. Alternativ darf ein vorhandener cert-manager das TLS-Secret `coop-tls` erzeugen; dann nur BasicAuth über SOPS verwalten. Es werden bewusst keine Fake- oder Klartext-Secrets mitgeliefert.
-6. `coop.example.invalid` in IngressRoute und `CORS_ORIGIN` durch den echten, identischen HTTPS-Host ersetzen. Vor Anwendung prüfen, dass Traefik im Namespace `kube-system` mit Label `app.kubernetes.io/name=traefik` läuft; andernfalls die NetworkPolicy-Selektoren an die reale Installation anpassen.
-7. Mit `kubectl kustomize`/`kustomize build` lokal rendern. Erst nach Review und Merge die zwei Flux-Bootstrapobjekte aus `clusters/production/` über den bereits vorhandenen Flux-Bootstrapweg einbinden. Dieses Repository installiert Flux nicht.
-
-Die Null-Digests und `git-000000000000` sind eindeutig nicht lauffähige Bootstrap-Sentinels, keine `latest`-Tags. Vor dem ersten Reconcile müssen echte Images promoted werden.
+4. Die produktiven Secrets `coop-runtime`, `coop-basic-auth` und `coop-tls` liegen bereits SOPS-age-verschlüsselt im Repository. Nur die root-only Quelldaten unter `/root/.config/coop-dashboard/` dürfen zur Rotation verwendet werden. Klartextdateien niemals committen.
+5. Ingress ist bewusst host-unabhängig und path-basiert; `/api/v1` hat Vorrang vor `/`. `CORS_ORIGIN` ist exakt `https://192.168.2.94`.
+6. Mit `kubectl kustomize` lokal rendern. Erst nach Review, grüner CI und Merge installiert Phase B2 die Controller, erzeugt die beiden Flux-Bootstrap-Secrets mit `scripts/bootstrap-production-host.sh --create-flux-secrets` und wendet die Root-Kustomization an.
 
 ## Security-Modell
 
@@ -110,7 +125,7 @@ Restore ist destruktiv und benötigt ein Wartungsfenster.
    ```bash
    kubectl -n coop-prod rollout status deployment/coop-api
    kubectl -n coop-prod exec statefulset/postgres -- pg_isready
-   curl https://<HOST>/api/v1/health/ready
+   curl https://192.168.2.94/api/v1/health/ready
    ```
 7. Bei Fehlern bleiben API auf null und `coop-apps` suspendiert. Logs und den automatisch erzeugten Pre-Restore-Dump sichern, Ursache beheben und erst danach Flux bewusst fortsetzen; nicht blind erneut migrieren.
 

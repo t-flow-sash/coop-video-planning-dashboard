@@ -1,5 +1,4 @@
 creation_rules:
   - path_regex: '(^|/)(infrastructure|clusters)/.*\.sops\.ya?ml$'
     encrypted_regex: '^(data|stringData)$'
-    # Public recipient, not a secret. Replace before creating the first encrypted file.
-    age: 'REPLACE_WITH_YOUR_AGE_PUBLIC_RECIPIENT'
+    age: 'age1hmnzrm4sskhqyd93e3jr503p92hdz06lk342qhndyh84tw4dcdkq5lmlv2'

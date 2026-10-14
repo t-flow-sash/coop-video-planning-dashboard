@@ -40,7 +40,7 @@ spec:
             - name: AUTH_PASSWORD
               valueFrom:
                 secretKeyRef: {name: coop-runtime, key: AUTH_PASSWORD}
-            - {name: CORS_ORIGIN, value: "https://coop.example.invalid"}
+            - {name: CORS_ORIGIN, value: "https://192.168.2.94"}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: coop-runtime, key: DATABASE_URL}

@@ -5,28 +5,28 @@ metadata:
 spec:
   entryPoints: [websecure]
   routes:
-    - match: Host(`coop.example.invalid`) && Path(`/api/v1/health/live`)
+    - match: Path(`/api/v1/health/live`)
       kind: Rule
-      priority: 200
+      priority: 300
       services:
         - {name: coop-api, port: 8000}
-    - match: Host(`coop.example.invalid`) && Path(`/api/v1/health/ready`)
+    - match: Path(`/api/v1/health/ready`)
       kind: Rule
-      priority: 200
+      priority: 300
       services:
         - {name: coop-api, port: 8000}
-    - match: Host(`coop.example.invalid`) && PathPrefix(`/api/v1`)
+    - match: PathPrefix(`/api/v1`)
+      kind: Rule
+      priority: 200
+      middlewares:
+        - name: coop-api-auth
+      services:
+        - {name: coop-api, port: 8000}
+    - match: PathPrefix(`/`)
       kind: Rule
       priority: 100
       middlewares:
-        - name: coop-basic-auth
-      services:
-        - {name: coop-api, port: 8000}
-    - match: Host(`coop.example.invalid`) && PathPrefix(`/`)
-      kind: Rule
-      priority: 10
-      middlewares:
-        - name: coop-basic-auth
+        - name: coop-web-auth
       services:
         - {name: coop-web, port: 3000}
   tls:
@@ -39,7 +39,7 @@ metadata:
 spec:
   entryPoints: [web]
   routes:
-    - match: Host(`coop.example.invalid`) && PathPrefix(`/`)
+    - match: PathPrefix(`/`)
       kind: Rule
       middlewares:
         - name: redirect-https
