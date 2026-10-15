@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/part-of: coop-video-planning
     coop.example.com/postgres-client: "true"
 spec:
-  schedule: "5 7 15 10 *"
+  schedule: "17 2 * * *"
   timeZone: Europe/Berlin
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
