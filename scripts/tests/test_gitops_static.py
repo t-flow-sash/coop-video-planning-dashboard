@@ -568,8 +568,145 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("Default: deny (incoming), allow (outgoing), deny (routed)", runbook)
         self.assertIn("API: `removeHeader: false`", runbook)
         self.assertIn("Web: `removeHeader: true`", runbook)
-        self.assertIn("ausstehendes B2-Deployment-Gate", runbook)
+        self.assertIn("Abgeschlossenes B2-Deployment-Gate", runbook)
+        self.assertIn("milestone-2-verification.md", runbook)
         self.assertIn("SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU", runbook)
+
+    def test_m2_verification_contract_is_complete_and_nonaccepting(self) -> None:
+        verification_path = ROOT / "docs/milestone-2-verification.md"
+        self.assertTrue(verification_path.is_file())
+        verification = verification_path.read_text(encoding="utf-8")
+
+        required_sections = (
+            "## 1. Zweck, Scope und Architektur",
+            "## 2. Verifizierte Versionen und unveränderliche Artefakte",
+            "## 3. Git-, PR- und CI-Linie",
+            "## 4. Flux-Bootstrap, Verschlüsselung und aktueller Graph",
+            "## 5. Workloads, Daten, Migration und Storage",
+            "## 6. HTTPS, Authentifizierung, CORS und TLS",
+            "## 7. NetworkPolicy-Verifikation",
+            "## 8. Browser-Transition, Persistenz und Drift",
+            "## 9. Deklarativer PR-Rollout und Revert",
+            "## 10. Backup- und Restore-Nachweis",
+            "## 11. Security, Firewall und Listener",
+            "## 12. Finalinventar und Evidenz",
+            "## 13. Restmaßnahmen und Risikoklassifikation",
+            "## 14. Nutzerabnahme",
+        )
+        for section in required_sections:
+            self.assertIn(section, verification)
+
+        self.assertIn("m2-final-network-policy.json", verification)
+        self.assertIn("m2-controller-backup.json", verification)
+        self.assertIn("**Nutzerabnahme:** noch nicht erteilt", verification)
+        self.assertIn("- [ ] Ich, Sascha", verification)
+        self.assertNotIn("- [x]", verification.lower())
+
+        def extract_section(number: int, next_number: int) -> str:
+            start = verification.index(f"## {number}.")
+            end = verification.index(f"## {next_number}.", start)
+            return verification[start:end]
+
+        network_policy = extract_section(7, 8)
+        network_policy_compact = " ".join(network_policy.split())
+        for scenario in (
+            "dns_udp_tcp_allowed",
+            "postgres_unlabeled_same_namespace_denied",
+            "postgres_labeled_same_namespace_allowed",
+            "postgres_labeled_cross_namespace_denied",
+            "external_https_unlabeled_denied",
+            "traefik_to_api_allowed",
+            "traefik_to_web_allowed",
+        ):
+            self.assertIn(scenario, network_policy)
+        for classification in (
+            "dns_resolution_and_tcp53_allowed",
+            "tcp_timeout_after_successful_dns_network_policy_denied",
+            "postgres_accepting_connections",
+            "http_200_service_allowed",
+        ):
+            self.assertIn(classification, network_policy)
+        self.assertIn("Schema `coop-dashboard-network-policy-live-evidence-v2`", network_policy_compact)
+        self.assertRegex(network_policy_compact, r"SHA-256 `[0-9a-f]{64}`")
+        self.assertRegex(network_policy, r"[0-9][0-9.]* Byte")
+        self.assertIn(
+            "DNS wurde bei allen zielnamensbasierten Fällen separat erfolgreich geprüft",
+            network_policy_compact,
+        )
+        self.assertIn("keine Probe-Pods verblieben", network_policy)
+
+        backup = extract_section(10, 11)
+        backup_compact = " ".join(backup.split())
+        backup_cronjob = document("infrastructure/backup/backup-cronjob.yaml")
+        self.assertEqual(backup_cronjob["kind"], "CronJob")
+        schedule = backup_cronjob["spec"]["schedule"]
+        timezone = backup_cronjob["spec"]["timeZone"]
+        self.assertEqual(schedule, "17 2 * * *")
+        self.assertEqual(timezone, "Europe/Berlin")
+        for proof in (
+            "vom CronJob-Controller geplant",
+            "batch.kubernetes.io/cronjob-scheduled-timestamp",
+            "OwnerReference",
+            "Complete=True",
+            "pg_restore --list",
+            "m2-controller-backup.json",
+            "Seed-CronJob blieb suspendiert",
+            f"Zeitplan `{schedule}`",
+            f"`{timezone}`",
+            "Exakt ein Controller-Lauf",
+            "keinen weiteren Controller-Lauf",
+            "keine aktiven oder fehlgeschlagenen Backup-Jobs",
+        ):
+            self.assertIn(proof, backup_compact)
+        self.assertRegex(backup, r"Job-UID `[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}`")
+        self.assertRegex(backup, r"Scheduled-Timestamp-Annotation")
+        self.assertRegex(backup, r"Exit 0")
+        self.assertRegex(backup, r"15\.911 Byte")
+        self.assertIn("47 erfolgreiche Zeilen", backup_compact)
+        self.assertIn("PR #14", backup_compact)
+        self.assertIn("PR #15", backup_compact)
+        for run_id in (
+            "38681431135",
+            "38681436517",
+            "38682065639",
+            "38685425590",
+            "38685429273",
+            "38685912239",
+        ):
+            self.assertIn(f"actions/runs/{run_id}", backup_compact)
+        self.assertIn("Schema `coop-dashboard-controller-backup-evidence-v1`", backup_compact)
+        self.assertIn("13.799 Byte", backup_compact)
+        self.assertIn(
+            "d0c48c4db3c99077a41182446a0f546dbc8597149b95abc513633ab0a1fcaca3",
+            backup_compact,
+        )
+        self.assertIn("5662e306c7d06c402f05536b92a0005f25f95da0", verification)
+
+        inventory = extract_section(12, 13)
+        self.assertIn("gemeinsamen root-only Store", inventory)
+        self.assertIn("Verzeichnismodus `0700`", inventory)
+        self.assertIn("Dateimodus `0600`", inventory)
+        self.assertNotIn("getrennt geschützten root-only Stores", verification)
+        self.assertNotIn("physisch getrennt", verification)
+
+        private_path_patterns = (
+            r"(?<![\w.])/(?:root|home|Users|tmp|var/lib|etc|run|srv|opt|mnt)/",
+            r"\b[A-Za-z]:\\",
+            r"\\\\[^\s]+\\[^\s]+",
+        )
+        for pattern in private_path_patterns:
+            self.assertNotRegex(verification, pattern)
+
+        secret_patterns = (
+            r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+            r"AGE-SECRET-KEY-[A-Z0-9]+",
+            r"\b(?:github_pat_|gh[opusr]_)[A-Za-z0-9_]+",
+            r"\$2[aby]\$\d{2}\$[./A-Za-z0-9]{20,}",
+            r"Authorization:\s*(?:Basic|Bearer)\s+[A-Za-z0-9._~+/=-]+",
+            r"(?im)^\s*(?:password|api_key|client_secret|access_token)\s*[:=]\s*(?!<redacted>|\$\{)[^\s]+",
+        )
+        for pattern in secret_patterns:
+            self.assertNotRegex(verification, pattern)
 
     def test_retained_pv_namespace_loss_runbook_is_fail_closed_and_identity_checked(self) -> None:
         runbook = (ROOT / "docs/gitops-m2.md").read_text(encoding="utf-8")
