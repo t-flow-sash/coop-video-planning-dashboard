@@ -37,7 +37,10 @@ class RestoreScriptTests(unittest.TestCase):
         fail_active_check: bool = False,
         lock_collision: bool = False,
         stale_reconcile: bool = False,
+        stale_marker_resource: str | None = None,
         stale_observed_generation: bool = False,
+        root_stale_observed_generation: bool = False,
+        root_not_ready: bool = False,
         initially_suspended: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], list[list[str]], dict[str, Any]]:
         with tempfile.TemporaryDirectory() as directory:
@@ -118,6 +121,13 @@ class RestoreScriptTests(unittest.TestCase):
                         if kind != "cronjob" and state["suspended"][resource] != new_suspend:
                             state["generation"][resource] += 1
                         state["suspended"][resource] = new_suspend
+                        if (
+                            resource == "kustomization/coop-root"
+                            and not new_suspend
+                        ):
+                            if os.environ.get("MOCK_ROOT_STALE_OBSERVED_GENERATION") != "1":
+                                state["observed_generation"][resource] = state["generation"][resource]
+                            state["ready"][resource] = os.environ.get("MOCK_ROOT_NOT_READY") != "1"
                         save()
                         if "-o" in args:
                             print(state["generation"][resource], end="")
@@ -143,8 +153,16 @@ class RestoreScriptTests(unittest.TestCase):
                     elif "annotate" in args:
                         resource = next(word for word in args if "/" in word and not word.startswith("reconcile."))
                         requested = next(word for word in args if word.startswith("reconcile.fluxcd.io/requestedAt=")).split("=", 1)[1]
-                        if os.environ.get("MOCK_STALE_RECONCILE") != "1":
-                            state["last_handled"][resource] = requested
+                        self_applied_root = (
+                            resource == "kustomization/coop-root"
+                        )
+                        if not self_applied_root:
+                            marker_is_stale = (
+                                os.environ.get("MOCK_STALE_RECONCILE") == "1"
+                                or os.environ.get("MOCK_STALE_MARKER_RESOURCE") == resource
+                            )
+                            if not marker_is_stale:
+                                state["last_handled"][resource] = requested
                             if os.environ.get("MOCK_STALE_OBSERVED_GENERATION") != "1":
                                 state["observed_generation"][resource] = state["generation"][resource]
                             state["ready"][resource] = True
@@ -173,7 +191,10 @@ class RestoreScriptTests(unittest.TestCase):
                     "MOCK_FAIL_ACTIVE_CHECK": "1" if fail_active_check else "0",
                     "MOCK_LOCK_COLLISION": "1" if lock_collision else "0",
                     "MOCK_STALE_RECONCILE": "1" if stale_reconcile else "0",
+                    "MOCK_STALE_MARKER_RESOURCE": stale_marker_resource or "",
                     "MOCK_STALE_OBSERVED_GENERATION": "1" if stale_observed_generation else "0",
+                    "MOCK_ROOT_STALE_OBSERVED_GENERATION": "1" if root_stale_observed_generation else "0",
+                    "MOCK_ROOT_NOT_READY": "1" if root_not_ready else "0",
                     "RECONCILE_ATTEMPTS": "2",
                     "RECONCILE_POLL_SECONDS": "0",
                 }
@@ -347,6 +368,18 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertEqual(resume_indexes, sorted(resume_indexes))
         for resource, resume_index in zip(expected, resume_indexes, strict=True):
             kind, name = resource.split("/", 1)
+            if resource == "kustomization/coop-root":
+                self.assertTrue(
+                    any(
+                        index > resume_index and f"get {kind} {name} -o json" in call
+                        for index, call in enumerate(rendered)
+                    ),
+                    resource,
+                )
+                self.assertFalse(
+                    any("annotate" in call and f"{kind}/{name}" in call for call in rendered)
+                )
+                continue
             annotate_index = next(
                 index
                 for index, call in enumerate(rendered)
@@ -366,13 +399,34 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertFalse(any(state["suspended"].values()))
         self.assertEqual(state["replicas"], 2)
 
-    def test_stale_ready_and_last_handled_reconcile_do_not_resume_api(self) -> None:
+    def test_matching_generation_and_ready_with_stale_marker_does_not_resume_api(self) -> None:
         result, calls, state = self.run_restore(stale_reconcile=True)
         rendered = [self.operation(call) for call in calls]
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fresh reconciliation", result.stderr)
         self.assertFalse(any("--replicas=2" in call for call in rendered))
         self.assertNotIn("Restore completed", result.stdout)
+        source = "gitrepository/coop-video-planning"
+        self.assertEqual(
+            state["observed_generation"][source] + 1, state["generation"][source]
+        )
+        self.assertTrue(state["ready"][source])
+        self.assertEqual(state["last_handled"][source], "old-request")
+        self.assertTrue(all(state["suspended"].values()))
+        self.assertEqual(state["replicas"], 0)
+
+    def test_child_with_matching_generation_and_ready_still_requires_marker(self) -> None:
+        child = "kustomization/coop-migration"
+        result, calls, state = self.run_restore(stale_marker_resource=child)
+        rendered = [self.operation(call) for call in calls]
+        self.assertEqual(result.returncode, 10)
+        self.assertIn(f"fresh reconciliation of {child}", result.stderr)
+        self.assertEqual(
+            state["observed_generation"][child] + 1, state["generation"][child]
+        )
+        self.assertTrue(state["ready"][child])
+        self.assertEqual(state["last_handled"][child], "old-request")
+        self.assertFalse(any("--replicas=2" in call for call in rendered))
         self.assertTrue(all(state["suspended"].values()))
         self.assertEqual(state["replicas"], 0)
 
@@ -382,6 +436,43 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("fresh reconciliation", result.stderr)
         self.assertFalse(any("--replicas=2" in call for call in rendered))
+        self.assertTrue(all(state["suspended"].values()))
+        self.assertEqual(state["replicas"], 0)
+
+    def test_self_managed_root_uses_fresh_generation_without_request_marker(self) -> None:
+        result, calls, state = self.run_restore()
+        rendered = [self.operation(call) for call in calls]
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            state["observed_generation"]["kustomization/coop-root"],
+            state["generation"]["kustomization/coop-root"],
+        )
+        self.assertEqual(state["last_handled"]["kustomization/coop-root"], "old-request")
+        self.assertFalse(
+            any(
+                "annotate" in call and "kustomization/coop-root" in call
+                for call in rendered
+            )
+        )
+
+    def test_self_managed_root_rejects_stale_observed_generation(self) -> None:
+        result, calls, state = self.run_restore(root_stale_observed_generation=True)
+        rendered = [self.operation(call) for call in calls]
+        self.assertEqual(result.returncode, 10)
+        self.assertIn("fresh reconciliation of kustomization/coop-root", result.stderr)
+        self.assertFalse(
+            any(
+                "annotate" in call and "kustomization/coop-root" in call
+                for call in rendered
+            )
+        )
+        self.assertTrue(all(state["suspended"].values()))
+        self.assertEqual(state["replicas"], 0)
+
+    def test_self_managed_root_rejects_not_ready(self) -> None:
+        result, _, state = self.run_restore(root_not_ready=True)
+        self.assertEqual(result.returncode, 10)
+        self.assertIn("fresh reconciliation of kustomization/coop-root", result.stderr)
         self.assertTrue(all(state["suspended"].values()))
         self.assertEqual(state["replicas"], 0)
 
