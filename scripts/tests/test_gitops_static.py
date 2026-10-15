@@ -246,6 +246,16 @@ class RenderedSecurityContractTests(unittest.TestCase):
             self.assertEqual(cronjob["metadata"]["labels"][selector], "true")
             self.assertEqual(cronjob["spec"]["jobTemplate"]["metadata"]["labels"][selector], "true")
 
+    def test_backup_waits_boundedly_for_network_policy_egress(self) -> None:
+        backup = self.by_kind_name("infrastructure/backup")
+        cronjob = backup[("CronJob", "postgres-backup")]
+        command = cronjob["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0][
+            "args"
+        ][0]
+        self.assertIn("until pg_isready --quiet", command)
+        self.assertIn('if [ "$attempts" -ge 30 ]', command)
+        self.assertIn("sleep 2", command)
+
     def test_ingress_has_only_exact_public_health_and_expected_auth_contracts(self) -> None:
         objects = self.by_kind_name("infrastructure/ingress")
         ingress = objects[("IngressRoute", "coop-https")]

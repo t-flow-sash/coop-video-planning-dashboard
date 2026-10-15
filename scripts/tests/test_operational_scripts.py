@@ -681,6 +681,7 @@ class BackupTrapTests(unittest.TestCase):
             commands = {
                 "date": "#!/bin/sh\ncase \"$*\" in *%u*) echo 7;; *) echo 20260104T011700Z;; esac\n",
                 "pg_dump": "#!/bin/sh\nfor x in \"$@\"; do case \"$x\" in --file=*) f=${x#--file=};; esac; done\nprintf dump >\"$f\"\n",
+                "pg_isready": "#!/bin/sh\nexit 0\n",
                 "pg_restore": "#!/bin/sh\nexit 0\n",
                 "cp": textwrap.dedent(
                     f"""\
