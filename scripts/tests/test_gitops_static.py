@@ -572,7 +572,7 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("milestone-2-verification.md", runbook)
         self.assertIn("SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU", runbook)
 
-    def test_m2_verification_contract_is_complete_and_nonaccepting(self) -> None:
+    def test_m2_verification_contract_is_complete_and_accepted(self) -> None:
         verification_path = ROOT / "docs/milestone-2-verification.md"
         self.assertTrue(verification_path.is_file())
         verification = verification_path.read_text(encoding="utf-8")
@@ -598,9 +598,11 @@ class DocumentationContractTests(unittest.TestCase):
 
         self.assertIn("m2-final-network-policy.json", verification)
         self.assertIn("m2-controller-backup.json", verification)
-        self.assertIn("**Nutzerabnahme:** noch nicht erteilt", verification)
-        self.assertIn("- [ ] Ich, Sascha", verification)
-        self.assertNotIn("- [x]", verification.lower())
+        self.assertIn("**Nutzerabnahme:** erteilt", verification)
+        self.assertIn("- [x] Ich, Sascha", verification)
+        self.assertIn("**Datum:** 15. Oktober 2026", verification)
+        self.assertIn("Discord-Nachricht `1560181857251885118`", verification)
+        self.assertNotIn("- [ ] Ich, Sascha", verification)
 
         def extract_section(number: int, next_number: int) -> str:
             start = verification.index(f"## {number}.")

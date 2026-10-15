@@ -399,13 +399,17 @@ behauptet. Private Ablagepfade und Secret-Werte sind nicht Teil dieses Dokuments
 
 ## 14. Nutzerabnahme
 
-Die technische Verifikation erteilt keine stellvertretende Produktabnahme.
+Die technische Verifikation erteilte keine stellvertretende Produktabnahme. Sascha hat
+Milestone 2 anschließend selbst über die produktive Ziel-URL geprüft und ausdrücklich
+freigegeben.
 
-- [ ] Ich, Sascha, habe Ziel-URL, Browserzugriff, CA-Installation und den fachlichen
-      Zustand geprüft und nehme Milestone 2 ab.
-- [ ] Ich bestätige die akzeptierten Restrisiken und die genannten laufenden
+- [x] Ich, Sascha, habe Ziel-URL, Browserzugriff und den fachlichen Zustand geprüft und
+      nehme Milestone 2 ab.
+- [x] Ich bestätige die akzeptierten Restrisiken und die genannten laufenden
       Betriebsaufgaben.
 
-- **Name:** `____________________`
-- **Datum:** `____________________`
-- **Kommentar:** `______________________________________________________________`
+- **Nutzerabnahme:** erteilt
+- **Name:** Sascha
+- **Datum:** 15. Oktober 2026
+- **Nachweis:** Discord-Nachricht `1560181857251885118`
+- **Kommentar:** „Freigabe erteilt! Läuft super!“
