@@ -55,6 +55,18 @@ spec:
               args:
                 - |
                   set -eu
+                  # A newly-created Job pod can start before the node NetworkPolicy
+                  # controller has admitted its label-selected PostgreSQL egress.
+                  # Wait boundedly instead of consuming all Job retries in that race.
+                  attempts=0
+                  until pg_isready --quiet; do
+                    attempts=$((attempts + 1))
+                    if [ "$attempts" -ge 30 ]; then
+                      echo "PostgreSQL did not become reachable before backup" >&2
+                      exit 1
+                    fi
+                    sleep 2
+                  done
                   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
                   tmp="/backups/.daily-${stamp}.dump.tmp"
                   weekly_tmp="/backups/.weekly-${stamp}.dump.tmp"
