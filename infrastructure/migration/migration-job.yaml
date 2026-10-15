@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: coop-migration-a4b4d9f030ee
+  name: coop-migration-9e31c2b8a4f0
   labels:
     app.kubernetes.io/name: coop-migration
     app.kubernetes.io/part-of: coop-video-planning
@@ -30,11 +30,15 @@ spec:
         - name: migrate
           image: 127.0.0.1:5000/coop-api:git-000000000000@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
-          command: ["alembic", "upgrade", "head"]
+          command: ["/bin/sh", "-ec"]
+          args: ["python -m app.database_access provision && alembic upgrade head && python -m app.database_access reconcile"]
           env:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: coop-runtime, key: DATABASE_URL}
+            - name: COLLECTOR_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: coop-runtime, key: COLLECTOR_DATABASE_URL}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {cpu: 500m, memory: 512Mi}

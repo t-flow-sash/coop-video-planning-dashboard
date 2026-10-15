@@ -9,10 +9,12 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -163,3 +165,146 @@ class AuditEvent(Base):
     request_id: Mapped[str] = mapped_column(String(100))
     source_reference: Mapped[str | None] = mapped_column(String(300))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class IngestionSource(Base):
+    __tablename__ = "ingestion_source"
+    __table_args__ = (CheckConstraint("kind IN ('GMAIL')", name="ck_ingestion_source_kind"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_key: Mapped[str] = mapped_column(String(160), unique=True)
+    kind: Mapped[str] = mapped_column(String(30))
+    enabled: Mapped[bool] = mapped_column(default=True, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class IngestionRun(Base):
+    __tablename__ = "ingestion_run"
+    __table_args__ = (
+        CheckConstraint("mode = 'FULL'", name="ck_ingestion_run_mode"),
+        CheckConstraint(
+            "status IN ('RUNNING','SUCCEEDED','FAILED')", name="ck_ingestion_run_status"
+        ),
+        Index(
+            "uq_ingestion_run_one_running",
+            "source_id",
+            unique=True,
+            postgresql_where=text("status = 'RUNNING'"),
+        ),
+        UniqueConstraint("source_id", "id", name="uq_ingestion_run_source_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingestion_source.id"))
+    mode: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(30))
+    summary: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IngestionCheckpoint(Base):
+    __tablename__ = "ingestion_checkpoint"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_id", "succeeded_run_id"],
+            ["ingestion_run.source_id", "ingestion_run.id"],
+            name="fk_ingestion_checkpoint_run",
+        ),
+    )
+
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ingestion_source.id"), primary_key=True
+    )
+    checkpoint_key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    checkpoint_value: Mapped[str] = mapped_column(Text)
+    query_hash: Mapped[str] = mapped_column(String(64))
+    succeeded_run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SourceRecord(Base):
+    __tablename__ = "source_record"
+    __table_args__ = (
+        CheckConstraint(
+            "record_type IN ('GMAIL_THREAD','GMAIL_MESSAGE')", name="ck_source_record_type"
+        ),
+        UniqueConstraint(
+            "source_id", "record_type", "external_id", name="uq_source_record_external"
+        ),
+        UniqueConstraint("source_id", "id", name="uq_source_record_source_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingestion_source.id"))
+    record_type: Mapped[str] = mapped_column(String(20))
+    external_id: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SourceRecordRevision(Base):
+    __tablename__ = "source_record_revision"
+    __table_args__ = (
+        UniqueConstraint("source_record_id", "content_hash", name="uq_source_record_revision_hash"),
+        UniqueConstraint("source_id", "id", name="uq_source_record_revision_source_id"),
+        ForeignKeyConstraint(
+            ["source_id", "source_record_id"],
+            ["source_record.source_id", "source_record.id"],
+            name="fk_source_record_revision_source_record",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingestion_source.id"))
+    source_record_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class IngestionItem(Base):
+    __tablename__ = "ingestion_item"
+    __table_args__ = (
+        CheckConstraint("status = 'PENDING_REVIEW'", name="ck_ingestion_item_status"),
+        UniqueConstraint("run_id", "candidate_key", name="uq_ingestion_item_run_candidate"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingestion_run.id"))
+    candidate_key: Mapped[str] = mapped_column(String(160))
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(30))
+    reason_code: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SourceRecordObservation(Base):
+    __tablename__ = "source_record_observation"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_id", "run_id"],
+            ["ingestion_run.source_id", "ingestion_run.id"],
+            name="fk_source_observation_run",
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "source_record_revision_id"],
+            ["source_record_revision.source_id", "source_record_revision.id"],
+            name="fk_source_observation_revision",
+        ),
+        UniqueConstraint("run_id", "source_record_revision_id", name="uq_source_observation"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingestion_source.id"))
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    source_record_revision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

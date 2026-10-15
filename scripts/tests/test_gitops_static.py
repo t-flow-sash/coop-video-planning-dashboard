@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -201,6 +202,7 @@ class ImmutableImageTests(unittest.TestCase):
             "infrastructure/storage",
             "infrastructure/database",
             "infrastructure/migration",
+            "infrastructure/import",
             "infrastructure/apps",
             "infrastructure/ingress",
             "infrastructure/backup",
@@ -240,7 +242,7 @@ class RenderedSecurityContractTests(unittest.TestCase):
         selector = "coop.example.com/postgres-client"
         migration = self.by_kind_name("infrastructure/migration")
         backup = self.by_kind_name("infrastructure/backup")
-        migration_job = migration[("Job", "coop-migration-a4b4d9f030ee")]
+        migration_job = migration[("Job", "coop-migration-9e31c2b8a4f0")]
         seed = migration[("CronJob", "coop-seed")]
         backup_cron = backup[("CronJob", "postgres-backup")]
 
@@ -491,6 +493,91 @@ class RenderedSecurityContractTests(unittest.TestCase):
             rule = policies[name]["spec"][direction][0]
             self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": 5432}])
 
+    def test_import_jobs_are_suspended_hardened_and_share_one_immutable_image(self) -> None:
+        objects = self.by_kind_name("infrastructure/import")
+        cronjobs = {
+            name: item
+            for (kind, name), item in objects.items()
+            if kind == "CronJob"
+        }
+        self.assertEqual(set(cronjobs), {"gmail-import-full"})
+        images = set()
+        for name, cronjob in cronjobs.items():
+            spec = cronjob["spec"]
+            self.assertTrue(spec["suspend"], name)
+            self.assertEqual(spec["concurrencyPolicy"], "Forbid", name)
+            self.assertIn("startingDeadlineSeconds", spec, name)
+            pod = spec["jobTemplate"]["spec"]["template"]["spec"]
+            self.assertFalse(pod["automountServiceAccountToken"], name)
+            self.assertTrue(pod["securityContext"]["runAsNonRoot"], name)
+            self.assertEqual(pod["securityContext"]["seccompProfile"], {"type": "RuntimeDefault"})
+            container = pod["containers"][0]
+            images.add(container["image"])
+            self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"], name)
+            self.assertFalse(container["securityContext"]["allowPrivilegeEscalation"], name)
+            self.assertEqual(container["securityContext"]["capabilities"], {"drop": ["ALL"]})
+            self.assertTrue(container["resources"]["requests"], name)
+            self.assertTrue(container["resources"]["limits"], name)
+        self.assertEqual(
+            images,
+            {
+                "127.0.0.1:5000/coop-api:git-000000000000@"
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            },
+        )
+
+    def test_import_egress_is_only_dns_postgres_and_controlled_proxy(self) -> None:
+        objects = self.by_kind_name("infrastructure/import")
+        policies = {
+            name: item for (kind, name), item in objects.items() if kind == "NetworkPolicy"
+        }
+        self.assertEqual(set(policies), {"gmail-import-egress", "gmail-egress-proxy"})
+        importer_rules = policies["gmail-import-egress"]["spec"]["egress"]
+        importer_ports = [port for rule in importer_rules for port in rule["ports"]]
+        self.assertEqual(
+            {(port.get("protocol", "TCP"), port["port"]) for port in importer_ports},
+            {("UDP", 53), ("TCP", 53), ("TCP", 5432), ("TCP", 10000)},
+        )
+        self.assertNotIn("ipBlock", yaml.safe_dump(policies["gmail-import-egress"]))
+        proxy_rules = policies["gmail-egress-proxy"]["spec"]["egress"]
+        https_rule = next(
+            rule for rule in proxy_rules if {port["port"] for port in rule["ports"]} == {443}
+        )
+        self.assertEqual(https_rule["to"][0]["ipBlock"]["cidr"], "0.0.0.0/0")
+        self.assertIn("10.0.0.0/8", https_rule["to"][0]["ipBlock"]["except"])
+        self.assertNotIn("192.0.2.10/32", yaml.safe_dump_all(policies.values()))
+
+    def test_import_secret_example_is_value_free_and_not_rendered(self) -> None:
+        example = document("infrastructure/import/gmail-oauth.secret.example.yaml")
+        self.assertEqual(example["metadata"]["name"], "gmail-oauth")
+        self.assertEqual(example["data"], {})
+        text = (ROOT / "infrastructure/import/gmail-oauth.secret.example.yaml").read_text()
+        for key in ("GMAIL_CLIENT_ID", "GMAIL_CLIENT_SECRET", "GMAIL_REFRESH_TOKEN", "GMAIL_ACCOUNT"):
+            self.assertIn(key, text)
+        rendered_names = {
+            item.get("metadata", {}).get("name") for item in rendered_documents("infrastructure/import")
+        }
+        self.assertNotIn("gmail-oauth", rendered_names)
+
+    def test_import_flux_dependency_promotion_and_ci_render_are_integrated(self) -> None:
+        syncs = {
+            item["metadata"]["name"]: item
+            for item in documents("clusters/production/flux-kustomizations.yaml")
+        }
+        import_sync = syncs["coop-import"]
+        self.assertEqual(import_sync["spec"]["path"], "./infrastructure/import")
+        self.assertEqual(
+            import_sync["spec"]["dependsOn"],
+            [{"name": "coop-database"}, {"name": "coop-migration"}],
+        )
+        promotion = (ROOT / "scripts/build-and-push-images.sh").read_text()
+        self.assertIn('update_image("infrastructure/import/kustomization.yaml"', promotion)
+        self.assertIn("infrastructure/import", promotion[promotion.index("for dir in") :])
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        render_loop = re.search(r"for dir in ([^;]+); do", workflow)
+        self.assertIsNotNone(render_loop)
+        self.assertIn("infrastructure/import", render_loop.group(1))
+
     def test_flux_egress_overlay_removes_allow_all_and_keeps_required_paths(self) -> None:
         objects = self.by_kind_name("clusters/production/flux-system")
         policy = objects[("NetworkPolicy", "allow-egress")]
@@ -514,6 +601,12 @@ class RenderedSecurityContractTests(unittest.TestCase):
 
 
 class ContinuousIntegrationContractTests(unittest.TestCase):
+    def test_api_pytest_uses_the_api_project_configuration(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn("- run: cd apps/api && uv run pytest", workflow)
+        self.assertIn("\tcd apps/api && DATABASE_URL=$(DATABASE_URL) uv run pytest", makefile)
+
     def test_actions_are_full_sha_pinned_and_dependency_updates_are_configured(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         uses = re.findall(r"^\s*(?:-\s*)?uses:\s*([^\s#]+)(?:\s+#\s*(.+))?$", workflow, re.MULTILINE)
@@ -551,7 +644,7 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
             """
         )
         result = subprocess.run(
-            ["python3", str(ROOT / "scripts/validate-rendered-images.py")],
+            [sys.executable, str(ROOT / "scripts/validate-rendered-images.py")],
             input=invalid,
             text=True,
             capture_output=True,
@@ -562,6 +655,22 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
 
 
 class DocumentationContractTests(unittest.TestCase):
+    def test_m3_import_trust_boundary_is_explicit_and_fail_closed(self) -> None:
+        runbook = (ROOT / "docs/gmail-import-operations.md").read_text(encoding="utf-8")
+        for contract in (
+            "PENDING_REVIEW",
+            "technische Gmail-IDs",
+            "keinen** Gmail-History-Sync",
+            "keine** fachliche Manifest-Mutation",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "oauth2.googleapis.com:443",
+            "gmail.googleapis.com:443",
+            "BLOCKED_REQUIRES_EVIDENCE_ENRICHMENT",
+            "0700",
+            "0600",
+        ):
+            self.assertIn(contract, runbook)
+
     def test_runbook_matches_firewall_auth_and_live_gate_reality(self) -> None:
         runbook = (ROOT / "docs/gitops-m2.md").read_text(encoding="utf-8")
         self.assertIn("scripts/bootstrap-production-host.sh --verify-firewall", runbook)
@@ -754,6 +863,7 @@ class DocumentationContractTests(unittest.TestCase):
             "coop-root",
             "coop-database",
             "coop-migration",
+            "coop-import",
             "coop-apps",
             "coop-ingress",
             "coop-backup",
@@ -796,6 +906,7 @@ class DocumentationContractTests(unittest.TestCase):
             "Source",
             "coop-database",
             "coop-migration",
+            "coop-import",
             "coop-apps",
             "coop-ingress",
             "coop-backup",

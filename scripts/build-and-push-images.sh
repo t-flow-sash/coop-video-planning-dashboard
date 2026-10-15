@@ -66,6 +66,7 @@ def update_image(path: str, image: str, digest: str) -> None:
 update_image("infrastructure/apps/kustomization.yaml", "127.0.0.1:5000/coop-api", api_digest)
 update_image("infrastructure/apps/kustomization.yaml", "127.0.0.1:5000/coop-web", web_digest)
 update_image("infrastructure/migration/kustomization.yaml", "127.0.0.1:5000/coop-api", api_digest)
+update_image("infrastructure/import/kustomization.yaml", "127.0.0.1:5000/coop-api", api_digest)
 
 job = Path("infrastructure/migration/migration-job.yaml")
 text = job.read_text()
@@ -79,7 +80,7 @@ if count != 1:
 job.write_text(updated)
 PY
 
-for dir in infrastructure/apps infrastructure/migration; do
+for dir in infrastructure/apps infrastructure/migration infrastructure/import; do
   if command -v kustomize >/dev/null; then
     kustomize build "$dir" >/dev/null
   elif command -v kubectl >/dev/null; then

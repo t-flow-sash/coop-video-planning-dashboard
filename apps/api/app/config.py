@@ -38,8 +38,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_auth_configuration(self) -> "Settings":
-        if self.auth_mode == "disabled" and self.app_env != "development":
-            raise ValueError("AUTH_MODE=disabled is allowed only in development")
+        if self.auth_mode == "disabled" and self.app_env not in {"development", "test"}:
+            raise ValueError("AUTH_MODE=disabled is allowed only in development or test")
         if self.auth_mode == "basic":
             username = self.auth_username.get_secret_value() if self.auth_username else ""
             password = self.auth_password.get_secret_value() if self.auth_password else ""
