@@ -568,7 +568,8 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("Default: deny (incoming), allow (outgoing), deny (routed)", runbook)
         self.assertIn("API: `removeHeader: false`", runbook)
         self.assertIn("Web: `removeHeader: true`", runbook)
-        self.assertIn("ausstehendes B2-Deployment-Gate", runbook)
+        self.assertIn("Abgeschlossenes B2-Deployment-Gate", runbook)
+        self.assertIn("milestone-2-verification.md", runbook)
         self.assertIn("SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU", runbook)
 
     def test_retained_pv_namespace_loss_runbook_is_fail_closed_and_identity_checked(self) -> None:
