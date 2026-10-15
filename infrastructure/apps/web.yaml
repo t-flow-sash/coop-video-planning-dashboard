@@ -14,8 +14,6 @@ spec:
     matchLabels: *webLabels
   template:
     metadata:
-      annotations:
-        coop.example.com/rollback-probe: "stage-b1-20261015T014900Z"
       labels: *webLabels
     spec:
       automountServiceAccountToken: false
