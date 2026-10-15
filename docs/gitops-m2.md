@@ -20,7 +20,7 @@ Ein reines k3s-API-Binding auf `127.0.0.1` wurde verworfen: dadurch war das Kube
 | age                          | v1.3.2                                                                                            |
 | Distribution Registry        | v3.1.2, Multiarch-Index `sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8` |
 
-Private Bootstrap-Dateien liegen root-only unter `/root/.config/coop-dashboard/`; Zugangsdaten stehen in `/root/.config/coop-dashboard/credentials.env` (Benutzer `sascha`). Private Schlüssel oder Passwörter dürfen niemals in Tickets, Logs oder Git kopiert werden. Die öffentliche lokale CA liegt zusätzlich unter `docs/certificates/coop-local-ca.crt` und kann auf Clients in den jeweiligen System-Truststore importiert werden. Danach Browser vollständig neu starten und die Kette gegen `https://192.168.2.94/` prüfen.
+Private Bootstrap-Dateien und Zugangsdaten liegen ausschließlich in einem root-only Verzeichnis außerhalb des Repositorys (Verzeichnis `0700`, Dateien `0600`). Private Schlüssel oder Passwörter dürfen niemals in Tickets, Logs oder Git kopiert werden. Die öffentliche lokale CA liegt zusätzlich unter `docs/certificates/coop-local-ca.crt` und kann auf Clients in den jeweiligen System-Truststore importiert werden. Danach Browser vollständig neu starten und die Kette gegen `https://192.168.2.94/` prüfen.
 
 ## Architektur und Reihenfolge
 
@@ -51,7 +51,7 @@ Vorausgesetzt werden ein bereits betriebener Cluster mit funktionierendem CNI/Ne
    age-keygen -y age.key
    kubectl -n flux-system create secret generic sops-age --from-file=age.agekey=age.key
    ```
-4. Die produktiven Secrets `coop-runtime`, `coop-basic-auth` und `coop-tls` liegen bereits SOPS-age-verschlüsselt im Repository. Nur die root-only Quelldaten unter `/root/.config/coop-dashboard/` dürfen zur Rotation verwendet werden. Klartextdateien niemals committen.
+4. Die produktiven Secrets `coop-runtime`, `coop-basic-auth` und `coop-tls` liegen bereits SOPS-age-verschlüsselt im Repository. Nur Quelldaten aus dem root-only, repository-externen Secretspeicher dürfen zur Rotation verwendet werden. Klartextdateien niemals committen.
 5. Ingress ist bewusst host-unabhängig und path-basiert; `/api/v1` hat Vorrang vor `/`. `CORS_ORIGIN` ist exakt `https://192.168.2.94`.
 6. Vor jedem B2-Schritt die bereits aktive Firewall ausschließlich lesend und fail-closed prüfen; dieser Modus ändert weder UFW-Regeln noch Registry oder Cluster:
    ```bash
@@ -73,11 +73,26 @@ Vorausgesetzt werden ein bereits betriebener Cluster mit funktionierendem CNI/Ne
 - Die deklarative Flux-Overlay-Policy ersetzt das exportierte `egress: - {}` ohne Änderung an `gotk-components.yaml`: erlaubt bleiben CoreDNS (UDP/TCP 53), Git SSH (TCP 22), Git/OCI/API über HTTPS (TCP 443), der k3s-API-Endpunkt `192.168.2.94:6443` und controller-interne Kommunikation innerhalb `flux-system`.
 - Traefik bedient HTTPS auf `websecure` (Port 443 in der Clusterinstallation) und leitet HTTP permanent auf HTTPS um. `/api/v1` hat höhere Priorität als `/`.
 - BasicAuth liegt auf beiden fachlichen HTTPS-Routen. Nur die höher priorisierten Exact-Routen für `/api/v1/health/live` und `/api/v1/health/ready` bleiben ohne Middleware. API: `removeHeader: false`, damit der `Authorization`-Header an die API weitergereicht wird. Web: `removeHeader: true`, damit Browser-Credentials nicht beim Web-Upstream verbleiben. Ein zweites Bearer-Schema kann nicht gleichzeitig denselben API-Header nutzen und müsste später über ForwardAuth/SSO gelöst werden.
-- TLS referenziert ausschließlich Secret `coop-tls`. Ein clusterweit eindeutiger Traefik-`TLSStore/default` verwendet dasselbe Secret auch für Clients ohne SNI. Das produktive Leaf hat einen ECDSA-P-256-Schlüssel, ist weiterhin von der unveränderten lokalen CA signiert und gilt vom **15. Oktober 2026, 00:46:34 UTC** bis **17. Januar 2029, 00:46:34 UTC**. Zertifikate und htpasswd-Daten stehen nicht im Klartext im Git.
+- TLS referenziert ausschließlich Secret `coop-tls`. Ein clusterweit eindeutiger Traefik-`TLSStore/default` verwendet dasselbe Secret auch für Clients ohne SNI. CA und Leaf wurden am 15. Oktober 2026 gemeinsam auf ECDSA P-256 rotiert; Metadaten und Installationshinweise stehen im folgenden Abschnitt. Zertifikate und htpasswd-Daten stehen nicht im Klartext im Git.
 - PostgreSQL/Backup/Restore/CI verwenden den live verifizierten Multiarch-Index `postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24`. Dockerfile-Frontend und alle Dockerfile-Basen sind ebenfalls per Multiarch-Index gepinnt.
 - Die App-Images wurden reproduzierbar aus dem sauberen Zwischencommit `a4b4d9f030ee` gebaut und in die lokale Registry gepusht: API `git-a4b4d9f030ee@sha256:ebe650d1273c88c6a5223be5d2e1a55a8a5a7207153e14849f78d99e95beca5a`, Web `git-a4b4d9f030ee@sha256:e987d6bb0796ea1c53108862adfd147d8660aca32eea6fcbbe717b6ce06ad0ff`.
 - `gotk-components.yaml` bleibt bytegleich zum `flux install --version=v2.9.6 --export` (SHA-256 `e0b32861e2701c26336b1a25e5d2896d9f1bc0eed68c2115e2a80277a93cdf03`). Die vier Controller-Digests werden ausschließlich deklarativ in `flux-system/kustomization.yaml` ergänzt.
 - Alle GitHub Actions sind auf vollständige 40-stellige Commit-SHAs gepinnt; Versionskommentare halten die Release-Zuordnung lesbar. `.github/dependabot.yml` lässt Dependabot wöchentlich geprüfte SHA-Aktualisierungen für `github-actions` vorschlagen.
+
+### Lokale CA-Rotation vom 15. Oktober 2026
+
+Die vorherige lokale CA besaß keine kritische `keyUsage`-Erweiterung. Dadurch akzeptierten curl und nicht-strikte OpenSSL-Prüfungen die Kette, NSS/Google Chrome lehnten sie jedoch mit unzureichender Zertifikatsverwendung ab. Da die CA noch nicht produktiv verteilt oder abgenommen war, wurde der Trust Anchor vor M2-Abnahme ersetzt; es gibt keine Übergangs- oder Dual-Trust-Zusage.
+
+Öffentliche Metadaten der neuen Kette:
+
+| Zertifikat | Schlüssel / Signatur | Gültigkeit (UTC) | SHA-256-Fingerprint |
+| --- | --- | --- | --- |
+| Lokale CA | ECDSA P-256 / ECDSA-SHA256 | 2026-10-15 01:15:54 bis 2036-10-12 01:15:54 | `F9:B4:F4:62:90:50:7D:B9:BF:53:0D:A0:56:88:60:15:6A:21:5D:C4:37:D3:3A:80:96:05:BF:62:7F:58:50:55` |
+| Serverleaf | ECDSA P-256 / ECDSA-SHA256 | 2026-10-15 01:15:54 bis 2029-01-17 01:15:54 | `9D:6E:AE:45:72:39:52:71:61:5E:B9:A4:CF:63:84:8F:CC:3A:B5:56:05:17:2C:A5:10:59:15:85:A8:90:B7:59` |
+
+Die CA hat `basicConstraints = critical, CA:TRUE, pathlen:0`, `keyUsage = critical, keyCertSign,cRLSign` sowie passende SKI/AKI. Das Leaf hat `basicConstraints = critical, CA:FALSE`, `keyUsage = critical, digitalSignature`, `extendedKeyUsage = serverAuth`, passende SKI/AKI und exakt die SANs `IP:192.168.2.94`, `DNS:zionhermes`, `DNS:coop.zionhermes.local`.
+
+Clients müssen ein gegebenenfalls bereits importiertes altes Zertifikat mit gleichem Anzeigenamen entfernen und anschließend **diese** Datei `docs/certificates/coop-local-ca.crt` als vertrauenswürdige Zertifizierungsstelle importieren. Vor dem Import ist der SHA-256-Fingerprint über einen unabhängigen Kanal mit der obigen Angabe zu vergleichen. Danach alle Browserprozesse beenden und neu starten. Zertifikatswarnungen, globale Ignore-Flags oder SPKI-Ausnahmen sind kein zulässiger Ersatz für den Truststore-Import.
 
 ### Aktive UFW-Regeln und read-only Prüfung
 

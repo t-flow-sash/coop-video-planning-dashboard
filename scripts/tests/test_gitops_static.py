@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import os
 import re
 import subprocess
+import tempfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -300,6 +303,139 @@ class RenderedSecurityContractTests(unittest.TestCase):
             objects[("IngressRoute", "coop-https")]["spec"]["tls"],
             {"secretName": "coop-tls"},
         )
+
+    def test_public_local_ca_is_a_strict_browser_compatible_p256_anchor(self) -> None:
+        ca_path = ROOT / "docs/certificates/coop-local-ca.crt"
+        details = subprocess.run(
+            ["openssl", "x509", "-in", str(ca_path), "-noout", "-text"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        strict = subprocess.run(
+            ["openssl", "verify", "-x509_strict", "-CAfile", str(ca_path), str(ca_path)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(strict.returncode, 0, strict.stderr)
+        self.assertIn("Public Key Algorithm: id-ecPublicKey", details)
+        self.assertIn("ASN1 OID: prime256v1", details)
+        self.assertRegex(details, r"X509v3 Basic Constraints: critical\s+CA:TRUE, pathlen:0")
+        self.assertRegex(
+            details,
+            r"X509v3 Key Usage: critical\s+Certificate Sign, CRL Sign",
+        )
+        self.assertIn("X509v3 Subject Key Identifier:", details)
+        self.assertIn("X509v3 Authority Key Identifier:", details)
+
+    def test_ingress_secret_remains_sops_encrypted(self) -> None:
+        secrets = documents("infrastructure/ingress/ingress-secrets.secret.sops.yaml")
+        self.assertEqual(
+            {item["metadata"]["name"] for item in secrets},
+            {"coop-basic-auth", "coop-tls"},
+        )
+        for secret in secrets:
+            self.assertEqual(secret["kind"], "Secret")
+            self.assertIn("sops", secret)
+            encrypted_values = (secret.get("stringData") or secret.get("data") or {}).values()
+            self.assertTrue(encrypted_values)
+            for value in encrypted_values:
+                self.assertRegex(value, r"^ENC\[AES256_GCM,")
+
+    @unittest.skipUnless(os.environ.get("SOPS_AGE_KEY_FILE"), "requires root-only SOPS key")
+    def test_decryptable_tls_secret_matches_the_public_ca_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            decrypted = subprocess.run(
+                [
+                    "sops",
+                    "--decrypt",
+                    str(ROOT / "infrastructure/ingress/ingress-secrets.secret.sops.yaml"),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            secrets = {
+                item["metadata"]["name"]: item
+                for item in yaml.safe_load_all(decrypted)
+                if item
+            }
+            secret = secrets["coop-tls"]
+            if "stringData" in secret:
+                tls = secret["stringData"]
+            else:
+                tls = {
+                    key: base64.b64decode(value).decode("utf-8")
+                    for key, value in secret["data"].items()
+                }
+            leaf_path = Path(temp_dir) / "tls.crt"
+            key_path = Path(temp_dir) / "tls.key"
+            leaf_path.write_text(tls["tls.crt"], encoding="utf-8")
+            key_path.write_text(tls["tls.key"], encoding="utf-8")
+            leaf_path.chmod(0o600)
+            key_path.chmod(0o600)
+
+            leaf_details = subprocess.run(
+                ["openssl", "x509", "-in", str(leaf_path), "-noout", "-text"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            leaf_sans = subprocess.run(
+                ["openssl", "x509", "-in", str(leaf_path), "-noout", "-ext", "subjectAltName"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            certificate_public_key = subprocess.run(
+                ["openssl", "x509", "-in", str(leaf_path), "-pubkey", "-noout"],
+                capture_output=True,
+                check=True,
+            ).stdout
+            private_public_key = subprocess.run(
+                ["openssl", "pkey", "-in", str(key_path), "-pubout"],
+                capture_output=True,
+                check=True,
+            ).stdout
+            verify = subprocess.run(
+                [
+                    "openssl",
+                    "verify",
+                    "-x509_strict",
+                    "-purpose",
+                    "sslserver",
+                    "-verify_ip",
+                    "192.168.2.94",
+                    "-CAfile",
+                    str(ROOT / "docs/certificates/coop-local-ca.crt"),
+                    str(leaf_path),
+                ],
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(verify.returncode, 0, verify.stderr)
+            self.assertEqual(certificate_public_key, private_public_key)
+            self.assertIn("Public Key Algorithm: id-ecPublicKey", leaf_details)
+            self.assertIn("ASN1 OID: prime256v1", leaf_details)
+            self.assertRegex(leaf_details, r"X509v3 Basic Constraints: critical\s+CA:FALSE")
+            self.assertRegex(leaf_details, r"X509v3 Key Usage: critical\s+Digital Signature")
+            self.assertRegex(
+                leaf_details,
+                r"X509v3 Extended Key Usage:\s+TLS Web Server Authentication",
+            )
+            self.assertEqual(
+                set(re.findall(r"(?:IP Address|DNS):[^,\n]+", leaf_sans)),
+                {
+                    "IP Address:192.168.2.94",
+                    "DNS:zionhermes",
+                    "DNS:coop.zionhermes.local",
+                },
+            )
 
     def test_apps_render_all_three_http_probes(self) -> None:
         objects = self.by_kind_name("infrastructure/apps")
