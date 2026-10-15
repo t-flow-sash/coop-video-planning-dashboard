@@ -1,7 +1,7 @@
 # Milestone 2 – Produktions- und GitOps-Verifikation
 
 - **Verifikationsdatum:** 15. Oktober 2026 (UTC)
-- **Status:** technisch vollständig, zur Nutzerabnahme bereit
+- **Status:** Dokumentationskandidat; technische Nachweise abgeschlossen, noch nicht gemergt
 - **Nutzerabnahme:** noch nicht erteilt
 - **Ziel:** `https://192.168.2.94/` mit Same-Origin-API unter `/api/v1`
 
@@ -49,13 +49,13 @@ Keine deploybare Image-Referenz verwendet `latest`; Images sind per Digest fixie
 
 ## 3. Git-, PR- und CI-Linie
 
-Der verifizierte M2-Workloadstand ist
-`1201ef407c77dff51a0d95875259ec232582cb6a`. Vor Erstellung dieses Abschlussdokuments
-waren lokales `main`, `origin/main`, Flux Source und alle sieben Kustomizations exakt auf
-diesem SHA. Die Main-CI
-[38673618863](https://github.com/t-flow-sash/coop-video-planning-dashboard/actions/runs/38673618863)
-war vollständig erfolgreich; der einzige Job `quality` hatte 40 erfolgreiche Steps und
-keine fehlgeschlagenen oder übersprungenen Produkt-Gates.
+Der finale Main-Stand **vor diesem noch ungemergten Dokumentationskandidaten** ist
+`5662e306c7d06c402f05536b92a0005f25f95da0`. Lokales `main`, `origin/main`, Flux Source
+und alle sieben Kustomizations erreichten exakt diesen SHA. Die Main-CI
+[38685912239](https://github.com/t-flow-sash/coop-video-planning-dashboard/actions/runs/38685912239)
+war im ersten Versuch vollständig erfolgreich; kein Step schlug fehl. Die drei
+Annotationen waren ausschließlich eine Node-20-Deprecation-Warnung und zwei Notices,
+ohne Retry- oder Flaky-Klassifikation.
 
 Die relevante Entwicklungslinie:
 
@@ -69,6 +69,8 @@ Die relevante Entwicklungslinie:
 | [#11](https://github.com/t-flow-sash/coop-video-planning-dashboard/pull/11) | deklarativer Rollout-Probe über PR → main → Flux                                | `9e0e52d850b31622dadf688a884b4ca508adbc98` |
 | [#12](https://github.com/t-flow-sash/coop-video-planning-dashboard/pull/12) | exakter Inhalts-Revert der Rollout-Probe                                        | `9ad6e3e746fe8668015b5467a0ced6ac9fc14d6c` |
 | [#13](https://github.com/t-flow-sash/coop-video-planning-dashboard/pull/13) | frischer Generation-/Ready-Nachweis für den selbstverwalteten Root nach Restore | `1201ef407c77dff51a0d95875259ec232582cb6a` |
+| [#14](https://github.com/t-flow-sash/coop-video-planning-dashboard/pull/14) | einmaliger datumsgebundener Zeitplan für den Controller-Backup-Nachweis         | `12bc41460ba1b2773145cef6f216c56ad3c97296` |
+| [#15](https://github.com/t-flow-sash/coop-video-planning-dashboard/pull/15) | exakter Revert des temporären Zeitplans auf den täglichen Normalbetrieb         | `5662e306c7d06c402f05536b92a0005f25f95da0` |
 
 Die bei Rollout-Prüfungen entdeckten Fehler sind behoben und Regressionstests sind in CI.
 Historische rote Zwischenläufe werden nicht verschwiegen: Der erste PR-#8-Stand scheiterte
@@ -170,29 +172,35 @@ abgenommene CA ohne kritische Issuance-Key-Usage. Die aktuelle Kette ist der rep
 
 ## 7. NetworkPolicy-Verifikation
 
-`coop-prod` erzwingt Default-Deny für Ingress und Egress. Die final erneut geprüfte Matrix:
+`coop-prod` erzwingt Default-Deny für Ingress und Egress. Am 15. Oktober 2026 ab
+04:21:06 UTC wurde jeder der sieben Fälle mit einem eigenen, bereits bei Erstellung
+vollständig gelabelten, kurzlebigen Probe-Pod wiederholt. DNS wurde bei allen
+zielnamensbasierten Fällen separat erfolgreich geprüft; erst danach wurde das jeweilige
+TCP- oder HTTP-Ergebnis klassifiziert.
 
-| Quelle/Ziel                                                                                                | Erwartung | Live-Ergebnis                    |
-| ---------------------------------------------------------------------------------------------------------- | --------- | -------------------------------- |
-| beliebiger Pod in `coop-prod` → CoreDNS UDP/TCP 53                                                         | erlaubt   | DNS-Auflösung erfolgreich        |
-| unmarkierter Pod in `coop-prod` → PostgreSQL 5432                                                          | blockiert | Verbindung nicht möglich         |
-| realistisch gelabelter Client in `coop-prod` mit `coop.example.com/postgres-client=true` → PostgreSQL 5432 | erlaubt   | `accepting connections`          |
-| gleich markierter Pod aus anderem Namespace → PostgreSQL 5432                                              | blockiert | Verbindung nicht möglich         |
-| unmarkierter Pod in `coop-prod` → externe HTTPS-Ziele                                                      | blockiert | Verbindung nicht möglich         |
-| Traefik in `kube-system` → API 8000/Web 3000                                                               | erlaubt   | beide Service-Probes erfolgreich |
+| Evidenz-ID                                 | Quelle/Ziel                                                      | Erwartung | Beobachtete Klassifikation                                 |
+| ------------------------------------------ | ---------------------------------------------------------------- | --------- | ---------------------------------------------------------- |
+| `dns_udp_tcp_allowed`                      | Pod in `coop-prod` → CoreDNS UDP-Auflösung/TCP 53                | erlaubt   | `dns_resolution_and_tcp53_allowed`                         |
+| `postgres_unlabeled_same_namespace_denied` | unmarkierter Pod in `coop-prod` → PostgreSQL 5432                | blockiert | `tcp_timeout_after_successful_dns_network_policy_denied`   |
+| `postgres_labeled_same_namespace_allowed`  | markierter Client in `coop-prod` → PostgreSQL 5432               | erlaubt   | `postgres_accepting_connections` (`accepting connections`) |
+| `postgres_labeled_cross_namespace_denied`  | gleich markierter Pod in `default` → PostgreSQL 5432             | blockiert | `tcp_timeout_after_successful_dns_network_policy_denied`   |
+| `external_https_unlabeled_denied`          | unmarkierter Pod in `coop-prod` → externe IPv4-Adresse TCP 443   | blockiert | `tcp_timeout_after_successful_dns_network_policy_denied`   |
+| `traefik_to_api_allowed`                   | Pod mit dem exakten Traefik-Selektor in `kube-system` → API 8000 | erlaubt   | `http_200_service_allowed`                                 |
+| `traefik_to_web_allowed`                   | Pod mit dem exakten Traefik-Selektor in `kube-system` → Web 3000 | erlaubt   | `http_200_service_allowed`                                 |
+
+Das root-only Artefakt `m2-final-network-policy.json` verwendet Schema
+`coop-dashboard-network-policy-live-evidence-v2`, ist 14.224 Byte groß und hat SHA-256
+`9755c5a7d13941f1c2fab9c9704aaba9deb33f18d2980d6d4705e9e6e457ad99`. Es enthält je
+Fall Podname, UID, Namespace, Labels, Image/ImageID, Quelle, Ziel und Port, den exakten
+sanitisierten Befehl, separaten DNS-Nachweis, Exitcode, bereinigte Ausgabe, UTC-Startzeit,
+Dauer, Versuchszahl und semantische Klassifikation. Alle sieben Fälle stehen auf
+`pass=true`; der abschließende Selektor-Check bewies, dass keine Probe-Pods verblieben.
 
 Migration, API, Seed, Backup und Restore tragen den PostgreSQL-Client-Selektor. Der beim
 Anlegen neuer Backup-Pods beobachtete kube-router-Policy-Start-Race wird seit PR #8 durch ein
 begrenztes `pg_isready`-Warten behandelt; ein dauerhaft nicht erreichbares PostgreSQL endet
-weiterhin fail-closed.
-
-Flux-Controller besitzen eine getrennte eingeschränkte Egress-Policy für DNS, Git SSH,
-HTTPS, k3s API und interne Controller-Kommunikation.
-
-Der Wiederholungsnachweis vom 15. Oktober 2026, 03:51 UTC, ist als
-`m2-final-network-policy.json` im root-only Evidence Store abgelegt. Alle sieben
-Erwartungen stehen dort auf `pass=true`; die eindeutig benannten temporären Probe-Pods
-wurden anschließend vollständig entfernt.
+weiterhin fail-closed. Flux-Controller besitzen eine getrennte eingeschränkte Egress-Policy
+für DNS, Git SSH, HTTPS, k3s API und interne Controller-Kommunikation.
 
 ## 8. Browser-Transition, Persistenz und Drift
 
@@ -277,6 +285,59 @@ Backup-Zeitplan: täglich `17 2 * * *`, `Europe/Berlin`, sieben Daily und vier W
 `concurrencyPolicy: Forbid`. Ein Backup auf demselben Node/PVC ist keine zweite Failure
 Domain.
 
+### Vom CronJob-Controller geplanter Lauf und Zeitplan-Revert
+
+PR #14 änderte ausschließlich den Backup-Zeitplan auf `5 7 15 10 *`; Feature-Commit
+`7aab1f28a2603199c97637565c9ee56e337d99b1` und Merge-SHA
+`12bc41460ba1b2773145cef6f216c56ad3c97296` liefen durch Push-CI
+[38681431135](https://github.com/t-flow-sash/coop-video-planning-dashboard/actions/runs/38681431135),
+PR-CI [38681436517](https://github.com/t-flow-sash/coop-video-planning-dashboard/actions/runs/38681436517)
+und Main-CI [38682065639](https://github.com/t-flow-sash/coop-video-planning-dashboard/actions/runs/38682065639).
+Alle sechs CIs dieser Probe und ihres Reverts waren im ersten Versuch erfolgreich, ohne
+fehlgeschlagenen Step und ohne Retry-/Flaky-Annotation.
+
+Am 15. Oktober 2026 wurde `postgres-backup-29867345` um 05:05:00 UTC nachweislich **vom
+CronJob-Controller geplant**. Job-UID `81c71918-79d7-4aae-8f82-2bf9254ded08`; die
+`OwnerReference` nennt `kind=CronJob`, `name=postgres-backup`, CronJob-UID
+`274d790c-c5fe-4347-936b-41d7f9bd2303` und `controller=true`. Die Annotation
+`batch.kubernetes.io/cronjob-scheduled-timestamp` ist exakt `2026-10-15T07:05:00+02:00`.
+Der Job endete um 05:05:05 UTC mit `Complete=True`, `succeeded=1`, `active=0` und
+`failed=0`.
+
+Der zugehörige Pod `postgres-backup-29867345-gvm7m` hatte UID
+`3c3c0d29-3d94-4c67-b45c-b56081724212`, lief ohne Restart und endete mit Exit 0. Seine
+ImageID war
+`docker.io/library/postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24`.
+Das bereinigte Job-Log war leer und enthielt weder Secret- noch Dump-Inhalt.
+
+Der Vorher-/Nachher-Vergleich des unveränderten Backup-PVC identifizierte exakt einen neuen
+Dump: `daily-20261015T050502Z.dump`, UID/GID `70:70`, Modus `0644`, 15.911 Byte und
+SHA-256 `26359a5cfd869ace11549c752080b95a91181c1b2627ac9542128890f0688ec0`.
+Ein kurzlebiger non-root Pod mit read-only PVC und deaktiviertem Service-Account-Token
+bestätigte reguläre Datei, Nichtleerheit und 47 erfolgreiche Zeilen aus `pg_restore --list`;
+der Validierungspod wurde anschließend entfernt.
+
+PR #15 revertierte den Feature-Commit exakt. Revert-Commit
+`da117a37c8c87679803eccf4d5424ea80045dded`, Merge-SHA
+`5662e306c7d06c402f05536b92a0005f25f95da0`; Push-CI
+[38685425590](https://github.com/t-flow-sash/coop-video-planning-dashboard/actions/runs/38685425590),
+PR-CI [38685429273](https://github.com/t-flow-sash/coop-video-planning-dashboard/actions/runs/38685429273)
+und Main-CI [38685912239](https://github.com/t-flow-sash/coop-video-planning-dashboard/actions/runs/38685912239)
+waren grün. Ein unabhängiger read-only Diff-Review fand keine Abweichung. Der finale
+Zeitplan `17 2 * * *` entspricht wieder dem täglichen Normalbetrieb; `Europe/Berlin` blieb
+unverändert.
+
+Final waren Source und 7/7 Kustomizations Ready und auf dem exakten Revert-Merge-SHA. Der
+Backup-CronJob war nicht suspendiert, der Seed-CronJob blieb suspendiert. Exakt ein
+Controller-Lauf trug die vorgesehene Scheduled-Timestamp-Annotation; es gab keinen weiteren
+Controller-Lauf sowie keine aktiven oder fehlgeschlagenen Backup-Jobs.
+
+Das root-only Artefakt `m2-controller-backup.json` verwendet Schema
+`coop-dashboard-controller-backup-evidence-v1`, ist 13.799 Byte groß und hat SHA-256
+`d0c48c4db3c99077a41182446a0f546dbc8597149b95abc513633ab0a1fcaca3`. Es enthält die
+vollständigen Job-/Pod-/Owner-/Zeitstempel-, PVC-Inventar-, CI-, Flux- und Cleanup-Felder,
+aber keine Secrets oder Dump-Inhalte.
+
 ## 11. Security, Firewall und Listener
 
 - Namespace-Pod-Security: `restricted` für enforce/audit/warn.
@@ -299,18 +360,19 @@ nicht als Teil dieser Anwendung freigegeben.
 
 ## 12. Finalinventar und Evidenz
 
-Final verifiziert: Source + 7/7 Kustomizations Ready; API 2/2, Web 2/2, PostgreSQL 1/1;
+Final verifiziert auf `5662e306c7d06c402f05536b92a0005f25f95da0`: Source + 7/7
+Kustomizations Ready; API 2/2, Web 2/2, PostgreSQL 1/1;
 keine CrashLoop-/Error-/Probe-Fehler-Pods; Backup-Cron aktiv, Seed suspendiert; alle
 fachlichen Services ClusterIP; Health live/ready über die konfigurierte CA jeweils 200;
 Repository vor der Dokumentationsänderung sauber und synchron.
 
-Die vollständige Roh- und strukturierte Evidenz bleibt im **root-only evidence store**.
-Dazu gehören die Stage-A-Gesamtevidenz, der native Chrome-Trust-Nachweis,
-PostgreSQL-Neustart, Flux-Drift, die finale NetworkPolicy-Matrix,
-Stage-B1-Rollout/Revert, Stage-B2-Backup/Restore und dessen Rohlogs. Evidenz und
-Zugangsdaten liegen ausschließlich in getrennt geschützten root-only Stores mit
-restriktiven Rechten; weder ihre privaten Ablagepfade noch Secret-Werte sind Teil dieses
-Dokuments.
+Die vollständige Roh- und strukturierte Evidenz sowie die Credential-Datei liegen im
+**gemeinsamen root-only Store**. Das root-owned Verzeichnis hat Verzeichnismodus `0700`;
+die geprüften root-owned Dateien haben Dateimodus `0600`. Dazu gehören die
+Stage-A-Gesamtevidenz, der native Chrome-Trust-Nachweis, PostgreSQL-Neustart, Flux-Drift,
+die finale NetworkPolicy-Matrix, Stage-B1-Rollout/Revert, Stage-B2-Backup/Restore und dessen
+Rohlogs sowie der Controller-Schedule-Nachweis. Eine physische Trennung wird nicht
+behauptet. Private Ablagepfade und Secret-Werte sind nicht Teil dieses Dokuments.
 
 ## 13. Restmaßnahmen und Risikoklassifikation
 
@@ -319,8 +381,9 @@ Dokuments.
 1. Sascha bzw. jeder Client muss `docs/certificates/coop-local-ca.crt` als vertrauenswürdige
    lokale CA installieren und den oben angegebenen Fingerprint über einen unabhängigen Kanal
    vergleichen. TLS-Warnungen dürfen nicht umgangen werden.
-2. Der konfigurierte Benutzername ist `sascha`; das Secret bleibt ausschließlich im
-   root-only Credential Store und wird getrennt übergeben.
+2. Der konfigurierte Benutzername ist `sascha`; das Secret bleibt ausschließlich als
+   Credential-Datei im oben beschriebenen gemeinsamen root-only Store und wird über einen
+   getrennten Kommunikationskanal übergeben.
 
 ### Akzeptierte betriebliche Restrisiken
 
