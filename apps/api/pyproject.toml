@@ -27,7 +27,11 @@ addopts = "-ra --strict-markers"
 filterwarnings = [
   "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
 ]
-markers = ["integration: requires PostgreSQL"]
+markers = [
+  "integration: requires PostgreSQL",
+  "no_db: test must not connect to or clean a database",
+  "isolated_db: test manages an independently guarded database schema",
+]
 
 [tool.ruff]
 line-length = 100

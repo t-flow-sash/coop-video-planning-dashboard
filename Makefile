@@ -28,7 +28,7 @@ dev:
 	@echo "In zwei Terminals ausführen: make api und make web"
 
 test:
-	DATABASE_URL=$(DATABASE_URL) uv run --project apps/api pytest
+	cd apps/api && DATABASE_URL=$(DATABASE_URL) uv run pytest
 	corepack pnpm --filter web test
 
 lint:
