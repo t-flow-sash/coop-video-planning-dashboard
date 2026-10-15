@@ -245,7 +245,8 @@ try:
     expected = int(sys.argv[1])
 except (TypeError, ValueError):
     raise SystemExit(1)
-valid = observed >= expected and status.get("lastHandledReconcileAt") == sys.argv[2] and ready
+request_handled = not sys.argv[2] or status.get("lastHandledReconcileAt") == sys.argv[2]
+valid = observed >= expected and request_handled and ready
 raise SystemExit(0 if valid else 1)
 ' "$expected_generation" "$requested_at" <<<"$resource_json"
 }
@@ -256,9 +257,16 @@ resume_and_reconcile() {
   name="${resource#*/}"
   expected_generation="$(kubectl -n flux-system patch "$kind" "$name" --type=merge \
     -p '{"spec":{"suspend":false}}' -o jsonpath='{.metadata.generation}')"
-  requested_at="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
-  kubectl -n flux-system annotate --overwrite "$resource" \
-    "reconcile.fluxcd.io/requestedAt=${requested_at}" >/dev/null
+  requested_at=""
+  # coop-root manages its own manifest. A dynamic requestedAt annotation can
+  # be removed by that self-reconcile before the controller records it. Its
+  # suspend transition still increments generation, so fresh observedGeneration
+  # plus Ready is the strict, race-free completion proof for this one resource.
+  if [[ "$resource" != kustomization/coop-root ]]; then
+    requested_at="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)"
+    kubectl -n flux-system annotate --overwrite "$resource" \
+      "reconcile.fluxcd.io/requestedAt=${requested_at}" >/dev/null
+  fi
   for ((attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt++)); do
     resource_json="$(kubectl -n flux-system get "$kind" "$name" -o json)"
     if fresh_reconcile_observed "$resource_json" "$expected_generation" "$requested_at"; then
