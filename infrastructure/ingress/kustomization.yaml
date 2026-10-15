@@ -4,4 +4,5 @@ namespace: coop-prod
 resources:
   - middleware.yaml
   - ingressroute.yaml
+  - tlsstore.yaml
   - ingress-secrets.secret.sops.yaml

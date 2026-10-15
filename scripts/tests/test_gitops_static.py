@@ -282,6 +282,25 @@ class RenderedSecurityContractTests(unittest.TestCase):
         self.assertEqual(objects[("Secret", "coop-basic-auth")]["type"], "Opaque")
         self.assertEqual(objects[("Secret", "coop-tls")]["type"], "kubernetes.io/tls")
 
+    def test_ingress_configures_coop_tls_as_the_single_default_certificate(self) -> None:
+        objects = self.by_kind_name("infrastructure/ingress")
+        stores = [
+            item
+            for (kind, _name), item in objects.items()
+            if kind == "TLSStore"
+        ]
+        self.assertEqual(len(stores), 1)
+        self.assertEqual(stores[0]["apiVersion"], "traefik.io/v1alpha1")
+        self.assertEqual(stores[0]["metadata"], {"name": "default", "namespace": "coop-prod"})
+        self.assertEqual(
+            stores[0]["spec"],
+            {"defaultCertificate": {"secretName": "coop-tls"}},
+        )
+        self.assertEqual(
+            objects[("IngressRoute", "coop-https")]["spec"]["tls"],
+            {"secretName": "coop-tls"},
+        )
+
     def test_apps_render_all_three_http_probes(self) -> None:
         objects = self.by_kind_name("infrastructure/apps")
         expected = {
