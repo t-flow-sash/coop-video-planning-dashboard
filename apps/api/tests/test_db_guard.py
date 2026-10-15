@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 from sqlalchemy import create_engine
 
-from app.test_safety import assert_safe_test_database, assert_safe_test_engine
+from app.test_safety import (
+    assert_safe_test_connection,
+    assert_safe_test_database,
+    assert_safe_test_engine,
+)
 
 pytestmark = pytest.mark.no_db
 
@@ -78,3 +84,36 @@ def test_guard_rejects_engine_bound_before_environment_mutation(
             )
     finally:
         unsafe_engine.dispose()
+
+
+def test_container_nat_requires_exact_attested_server_address() -> None:
+    url = "postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test"
+    engine = create_engine(url)
+    connection = MagicMock()
+    connection.engine = engine
+    connection.execute.return_value.mappings.return_value.one.return_value = {
+        "database_name": "coop_test",
+        "session_user": "coop",
+        "current_user": "coop",
+        "server_address": "172.17.0.2",
+        "server_port": 5432,
+    }
+    try:
+        with pytest.raises(RuntimeError, match="connected database identity differs"):
+            assert_safe_test_connection(connection, url, "test")
+        assert_safe_test_connection(
+            connection,
+            url,
+            "test",
+            expected_server_address="172.17.0.2",
+        )
+        for unexpected_address in ("172.17.0.3", "10.200.0.15", "203.0.113.77", "8.8.8.8"):
+            with pytest.raises(RuntimeError, match="connected database identity differs"):
+                assert_safe_test_connection(
+                    connection,
+                    url,
+                    "test",
+                    expected_server_address=unexpected_address,
+                )
+    finally:
+        engine.dispose()

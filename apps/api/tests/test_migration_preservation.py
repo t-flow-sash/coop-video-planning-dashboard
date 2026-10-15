@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, text
 from app.test_safety import assert_safe_test_connection
 
 BASE_DATABASE_URL = "postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test"
+EXPECTED_SERVER_ADDRESS = os.environ.get("TEST_DATABASE_EXPECTED_SERVER_ADDRESS")
 API_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -37,7 +38,12 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
     schema = f"m3_preserve_{uuid.uuid4().hex}"
     admin = create_engine(BASE_DATABASE_URL)
     with admin.begin() as connection:
-        assert_safe_test_connection(connection, BASE_DATABASE_URL, "test")
+        assert_safe_test_connection(
+            connection,
+            BASE_DATABASE_URL,
+            "test",
+            expected_server_address=EXPECTED_SERVER_ADDRESS,
+        )
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
     isolated_url = f"{BASE_DATABASE_URL}?options={quote(f'-csearch_path={schema}')}"
     isolated = create_engine(isolated_url)
@@ -126,6 +132,11 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
     finally:
         isolated.dispose()
         with admin.begin() as connection:
-            assert_safe_test_connection(connection, BASE_DATABASE_URL, "test")
+            assert_safe_test_connection(
+                connection,
+                BASE_DATABASE_URL,
+                "test",
+                expected_server_address=EXPECTED_SERVER_ADDRESS,
+            )
             connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
         admin.dispose()

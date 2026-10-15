@@ -51,6 +51,22 @@ jobs:
       - run: cd apps/api && uv run ruff format --check app tests alembic
       - run: cd apps/api && uv run ruff check app tests alembic
       - run: cd apps/api && uv run mypy app
+      - name: Attest PostgreSQL service address
+        env:
+          POSTGRES_SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$POSTGRES_SERVICE_ID"
+          service_ip="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$POSTGRES_SERVICE_ID")"
+          python3 - "$service_ip" <<'PY'
+          import ipaddress
+          import sys
+
+          address = ipaddress.ip_address(sys.argv[1])
+          if not address.is_private or address.is_loopback:
+              raise SystemExit("PostgreSQL service address must be private and non-loopback")
+          PY
+          printf 'TEST_DATABASE_EXPECTED_SERVER_ADDRESS=%s\n' "$service_ip" >> "$GITHUB_ENV"
       - run: cd apps/api && uv run pytest
       - run: uv run --project apps/api alembic check
       - run: pnpm format:check

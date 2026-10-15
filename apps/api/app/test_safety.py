@@ -51,7 +51,13 @@ def assert_safe_test_engine(engine: Engine, expected_url: str, app_env: str) -> 
         raise RuntimeError("Refusing destructive test cleanup: bound test engine differs")
 
 
-def assert_safe_test_connection(connection: Connection, expected_url: str, app_env: str) -> None:
+def assert_safe_test_connection(
+    connection: Connection,
+    expected_url: str,
+    app_env: str,
+    *,
+    expected_server_address: str | None = None,
+) -> None:
     """Attest the connected PostgreSQL target immediately before destructive SQL."""
     assert_safe_test_engine(connection.engine, expected_url, app_env)
     expected = make_url(expected_url)
@@ -67,6 +73,11 @@ def assert_safe_test_connection(connection: Connection, expected_url: str, app_e
             .one()
         )
         server_address = ipaddress.ip_address(identity["server_address"])
+        required_server_address = (
+            ipaddress.ip_address(expected_server_address)
+            if expected_server_address is not None
+            else None
+        )
     except Exception as error:
         raise RuntimeError(
             "Refusing destructive test cleanup: connected database identity unavailable"
@@ -75,7 +86,11 @@ def assert_safe_test_connection(connection: Connection, expected_url: str, app_e
         identity["database_name"] != expected.database
         or identity["session_user"] != expected.username
         or identity["current_user"] != expected.username
-        or not server_address.is_loopback
+        or (
+            server_address != required_server_address
+            if required_server_address is not None
+            else not server_address.is_loopback
+        )
         or identity["server_port"] != expected.port
     ):
         raise RuntimeError("Refusing destructive test cleanup: connected database identity differs")
