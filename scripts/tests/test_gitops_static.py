@@ -572,6 +572,37 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("milestone-2-verification.md", runbook)
         self.assertIn("SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU", runbook)
 
+    def test_m2_verification_contract_is_complete_and_nonaccepting(self) -> None:
+        verification_path = ROOT / "docs/milestone-2-verification.md"
+        self.assertTrue(verification_path.is_file())
+        verification = verification_path.read_text(encoding="utf-8")
+
+        required_sections = (
+            "## 1. Zweck, Scope und Architektur",
+            "## 2. Verifizierte Versionen und unveränderliche Artefakte",
+            "## 3. Git-, PR- und CI-Linie",
+            "## 4. Flux-Bootstrap, Verschlüsselung und aktueller Graph",
+            "## 5. Workloads, Daten, Migration und Storage",
+            "## 6. HTTPS, Authentifizierung, CORS und TLS",
+            "## 7. NetworkPolicy-Verifikation",
+            "## 8. Browser-Transition, Persistenz und Drift",
+            "## 9. Deklarativer PR-Rollout und Revert",
+            "## 10. Backup- und Restore-Nachweis",
+            "## 11. Security, Firewall und Listener",
+            "## 12. Finalinventar und Evidenz",
+            "## 13. Restmaßnahmen und Risikoklassifikation",
+            "## 14. Nutzerabnahme",
+        )
+        for section in required_sections:
+            self.assertIn(section, verification)
+
+        self.assertIn("m2-final-network-policy.json", verification)
+        self.assertIn("**Nutzerabnahme:** noch nicht erteilt", verification)
+        self.assertIn("- [ ] Ich, Sascha", verification)
+        self.assertNotIn("- [x]", verification.lower())
+        self.assertNotIn("/root/", verification)
+        self.assertNotIn("/var/lib/rancher/", verification)
+
     def test_retained_pv_namespace_loss_runbook_is_fail_closed_and_identity_checked(self) -> None:
         runbook = (ROOT / "docs/gitops-m2.md").read_text(encoding="utf-8")
         heading = "## Retained-PV-Recovery nach Namespaceverlust"

@@ -160,7 +160,9 @@ Google Chrome `155.0.8059.79` wurde mit einer temporären Benutzer-NSS-Datenbank
 importierter öffentlicher CA geprüft. Root und API luden über HTTP/2/TLS 1.3, die UI war
 vollständig, und es gab weder Zertifikats-, Console- noch Page-Fehler. Es wurden **keine**
 Bypässe wie `--ignore-certificate-errors`, `ignoreHTTPSErrors`, SPKI-Ausnahmen oder
-`--allow-insecure-localhost` verwendet. Temporäre Profile wurden entfernt.
+`--allow-insecure-localhost` verwendet. Das native Trust-Profil wurde entfernt. Ein bei der Abschlussprüfung zusätzlich gefundener
+älterer, root-only Chrome-Debugprofilrest wurde ebenfalls entfernt; im Finalinventar sind
+keine bekannten temporären Browserprofile mehr vorhanden.
 
 Die früheren TLS-Befunde sind **keine aktuellen Einschränkungen**: PR #9 reparierte die
 Default-Zertifikatsauswahl und Leaf-Kompatibilität; PR #10 ersetzte die noch nicht
@@ -186,6 +188,11 @@ weiterhin fail-closed.
 
 Flux-Controller besitzen eine getrennte eingeschränkte Egress-Policy für DNS, Git SSH,
 HTTPS, k3s API und interne Controller-Kommunikation.
+
+Der Wiederholungsnachweis vom 15. Oktober 2026, 03:51 UTC, ist als
+`m2-final-network-policy.json` im root-only Evidence Store abgelegt. Alle sieben
+Erwartungen stehen dort auf `pass=true`; die eindeutig benannten temporären Probe-Pods
+wurden anschließend vollständig entfernt.
 
 ## 8. Browser-Transition, Persistenz und Drift
 
@@ -299,9 +306,10 @@ Repository vor der Dokumentationsänderung sauber und synchron.
 
 Die vollständige Roh- und strukturierte Evidenz bleibt im **root-only evidence store**.
 Dazu gehören die Stage-A-Gesamtevidenz, der native Chrome-Trust-Nachweis,
-PostgreSQL-Neustart, Flux-Drift, Stage-B1-Rollout/Revert, Stage-B2-Backup/Restore und dessen
-Rohlogs. Zugangsdaten liegen unter der generischen, dokumentierten root-only Location
-`/root/.config/coop-dashboard/` mit restriktiven Rechten; Secret-Werte sind nicht Teil dieses
+PostgreSQL-Neustart, Flux-Drift, die finale NetworkPolicy-Matrix,
+Stage-B1-Rollout/Revert, Stage-B2-Backup/Restore und dessen Rohlogs. Evidenz und
+Zugangsdaten liegen ausschließlich in getrennt geschützten root-only Stores mit
+restriktiven Rechten; weder ihre privaten Ablagepfade noch Secret-Werte sind Teil dieses
 Dokuments.
 
 ## 13. Restmaßnahmen und Risikoklassifikation
