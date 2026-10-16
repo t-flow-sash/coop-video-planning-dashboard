@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +18,7 @@ from typing import Any, Protocol
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
@@ -32,6 +35,8 @@ from app.models import (
 SOURCE_KEY = "gmail-open-coops-v1"
 LOCK_KEY = 764239817
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+EXPECTED_QUERY_SHA256 = "e362825c8b3be3c500d6da685c7e0b2043641fa2136fd801acf57395154f967d"
+EXPECTED_ACCOUNT_SHA256 = "d260486537baa3f006b0e0e3168df3ba58b784b56f0846e150690af7457b14bb"
 IDENTITY_SCOPES = frozenset(
     {
         "openid",
@@ -50,6 +55,7 @@ TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 MESSAGE_FIELDS = "id,threadId,historyId,internalDate,labelIds"
 DECIMAL_INTEGER_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class GmailError(RuntimeError):
@@ -76,15 +82,64 @@ class ImportDisabledError(RuntimeError):
     pass
 
 
+class PilotConsumedError(RuntimeError):
+    pass
+
+
 def canonical_hash(value: Any) -> str:
     payload = json.dumps(jsonable_encoder(value), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def account_fingerprint(account: str) -> str:
+    return hashlib.sha256(account.strip().casefold().encode()).hexdigest()
+
+
+def execution_query_from_env() -> str:
+    """Require an explicit one-shot arm signal and an immutable query contract."""
+    if os.environ.get("GMAIL_IMPORT_ARMED") != "true":
+        raise GmailConfigError("execution_not_armed")
+    query = os.environ.get("GMAIL_IMPORT_QUERY", DEFAULT_IMPORT_QUERY).strip()
+    expected_hash = os.environ.get("GMAIL_IMPORT_QUERY_SHA256", "")
+    if (
+        not query
+        or expected_hash != EXPECTED_QUERY_SHA256
+        or not hmac.compare_digest(canonical_hash(query), expected_hash)
+    ):
+        raise GmailConfigError("query_contract_invalid")
+    return query
 
 
 def acquire_import_lock(session: Session) -> None:
     locked = session.scalar(text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": LOCK_KEY})
     if not locked:
         raise ImportBusyError("another ingestion operation holds the advisory lock")
+
+
+def attest_collector_database(session: Session) -> None:
+    raw_url = os.getenv("DATABASE_URL", "")
+    try:
+        url = make_url(raw_url)
+    except Exception as error:  # SQLAlchemy exposes multiple URL parse errors
+        raise GmailError("collector database identity invalid") from error
+    if url.username != "coop_evidence_collector" or not url.database or not url.host:
+        raise GmailError("collector database identity invalid")
+    row = session.execute(
+        text(
+            "SELECT session_user, current_user, current_database(), "
+            "inet_server_addr()::text, inet_server_port()"
+        )
+    ).one()
+    if (
+        len(row) != 5
+        or row[0] != "coop_evidence_collector"
+        or row[1] != "coop_evidence_collector"
+        or row[2] != url.database
+        or not isinstance(row[3], str)
+        or not row[3]
+        or row[4] != (url.port or 5432)
+    ):
+        raise GmailError("collector database identity invalid")
 
 
 class HttpTransport(Protocol):
@@ -163,6 +218,11 @@ class GmailConfig:
         values = {name: os.environ.get(name, "").strip() for name in names}
         if any(not value for value in values.values()):
             raise GmailConfigError("configuration_missing")
+        expected_account_hash = os.environ.get("GMAIL_ACCOUNT_SHA256", "")
+        if expected_account_hash != EXPECTED_ACCOUNT_SHA256 or not hmac.compare_digest(
+            account_fingerprint(values["GMAIL_ACCOUNT"]), expected_account_hash
+        ):
+            raise GmailConfigError("account_contract_invalid")
         return cls(
             values["GMAIL_CLIENT_ID"],
             values["GMAIL_CLIENT_SECRET"],
@@ -274,10 +334,10 @@ class GmailClient:
             raise GmailAuthError("tokeninfo_failed")
         raw_scope = self._required_text(tokeninfo, "scope", "scope_missing")
         scopes = set(raw_scope.split())
-        gmail_scopes = {
-            scope for scope in scopes if "gmail" in scope or scope == "https://mail.google.com/"
-        }
-        if gmail_scopes != {GMAIL_READONLY_SCOPE} or scopes - gmail_scopes - IDENTITY_SCOPES:
+        # The production token is deliberately reused from the Influencer agent and
+        # therefore has additional grants. Runtime capability stays read-only: this
+        # adapter only implements GETs and still requires gmail.readonly explicitly.
+        if GMAIL_READONLY_SCOPE not in scopes:
             raise GmailAuthError("scope_invalid")
         if "email" in tokeninfo:
             token_email = tokeninfo["email"]
@@ -379,12 +439,39 @@ class GmailClient:
 def _source(session: Session) -> IngestionSource:
     source = session.scalar(select(IngestionSource).where(IngestionSource.source_key == SOURCE_KEY))
     if source is None:
-        source = IngestionSource(source_key=SOURCE_KEY, kind="GMAIL")
-        session.add(source)
-        session.flush()
+        raise ImportDisabledError("ingestion source is not provisioned")
     if not source.enabled:
         raise ImportDisabledError("ingestion source is disabled")
     return source
+
+
+PILOT_SLOT = "gmail-full-pilot-v1"
+PILOT_RUN_ID = uuid.uuid5(uuid.NAMESPACE_URL, f"coop-video-planning:{PILOT_SLOT}")
+
+
+def claim_pilot_slot(session: Session, source: IngestionSource) -> uuid.UUID:
+    """Persist the one-shot claim before any OAuth or Gmail network access."""
+    if session.get(IngestionRun, PILOT_RUN_ID) is not None:
+        raise PilotConsumedError("gmail pilot slot already consumed")
+    run = IngestionRun(
+        id=PILOT_RUN_ID,
+        source_id=source.id,
+        mode="FULL",
+        status="RUNNING",
+        summary={"pilot_slot": PILOT_SLOT},
+    )
+    session.add(run)
+    session.flush()
+    return run.id
+
+
+def load_claimed_pilot_run(
+    session: Session, source: IngestionSource, run_id: uuid.UUID
+) -> IngestionRun:
+    run = session.get(IngestionRun, run_id)
+    if run is None or run.source_id != source.id or run.status != "RUNNING":
+        raise PilotConsumedError("gmail pilot claim is not executable")
+    return run
 
 
 def _record(
@@ -464,6 +551,7 @@ def persist_full_snapshot(
     *,
     query: str,
     source: IngestionSource | None = None,
+    run: IngestionRun | None = None,
 ) -> GmailRunReport:
     if (
         not isinstance(query, str)
@@ -495,9 +583,12 @@ def persist_full_snapshot(
     if source is None:
         acquire_import_lock(session)
         source = _source(session)
-    run = IngestionRun(source_id=source.id, mode="FULL", status="RUNNING", summary={})
-    session.add(run)
-    session.flush()
+    if run is None:
+        run = IngestionRun(source_id=source.id, mode="FULL", status="RUNNING", summary={})
+        session.add(run)
+        session.flush()
+    elif run.source_id != source.id or run.status != "RUNNING":
+        raise PilotConsumedError("gmail pilot claim is not executable")
     by_thread: dict[str, list[MessageEvidence]] = defaultdict(list)
     for message in snapshot.messages:
         by_thread[message.thread_id].append(message)
@@ -563,16 +654,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=("full",))
     parser.parse_args(argv)
     try:
+        query = execution_query_from_env()
         gmail_config = GmailConfig.from_env()
         client = GmailClient(gmail_config)
-        query = os.environ.get("GMAIL_IMPORT_QUERY", DEFAULT_IMPORT_QUERY).strip()
-        if not query:
-            raise GmailConfigError("query_missing")
         with SessionLocal.begin() as session:
+            attest_collector_database(session)
             acquire_import_lock(session)
             source = _source(session)
+            run_id = claim_pilot_slot(session, source)
+        with SessionLocal.begin() as session:
+            attest_collector_database(session)
+            acquire_import_lock(session)
+            source = _source(session)
+            run = load_claimed_pilot_run(session, source, run_id)
             snapshot = client.full_snapshot(query)
-            report = persist_full_snapshot(session, snapshot, query=query, source=source)
+            report = persist_full_snapshot(session, snapshot, query=query, source=source, run=run)
     except Exception:
         _print({"error": "gmail_import_failed", "ok": False, "status": "FAILED"})
         return 1

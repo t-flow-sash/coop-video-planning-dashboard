@@ -18,6 +18,7 @@ EVIDENCE_TABLES = (
     "ingestion_item",
     "source_record_observation",
 )
+INSERT_TABLES = tuple(table for table in EVIDENCE_TABLES if table != "ingestion_source")
 UPDATE_COLUMNS = {
     "ingestion_run": ("status", "summary", "finished_at", "error_code"),
     "ingestion_checkpoint": (
@@ -214,8 +215,16 @@ def reconcile_collector_access(admin_url: str) -> None:
             sql.Identifier(evidence_schema, table) for table in EVIDENCE_TABLES
         )
         cursor.execute(
-            sql.SQL("GRANT SELECT, INSERT ON {} TO {}").format(
+            sql.SQL("GRANT SELECT ON {} TO {}").format(
                 evidence_relations, sql.Identifier(COLLECTOR_ROLE)
+            )
+        )
+        insert_relations = sql.SQL(", ").join(
+            sql.Identifier(evidence_schema, table) for table in INSERT_TABLES
+        )
+        cursor.execute(
+            sql.SQL("GRANT INSERT ON {} TO {}").format(
+                insert_relations, sql.Identifier(COLLECTOR_ROLE)
             )
         )
         for table, columns in UPDATE_COLUMNS.items():
@@ -251,7 +260,9 @@ def reconcile_collector_access(admin_url: str) -> None:
                 expected = (
                     schema == evidence_schema
                     and table in EVIDENCE_TABLES
-                    and privilege in {"SELECT", "INSERT"}
+                    and (
+                        privilege == "SELECT" or (privilege == "INSERT" and table in INSERT_TABLES)
+                    )
                 )
                 if actual != expected:
                     raise RuntimeError("collector table ACL attestation failed")

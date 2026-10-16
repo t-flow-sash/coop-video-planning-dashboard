@@ -94,6 +94,8 @@ spec:
   template:
     metadata:
       labels: *labels
+      annotations:
+        coop.example.com/proxy-config-sha256: f0eacb17a77630828b66b8801370209d6a27fd5417a2b6ff5c701040d0441279
     spec:
       automountServiceAccountToken: false
       securityContext:

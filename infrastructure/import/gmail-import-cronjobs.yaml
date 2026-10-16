@@ -2,6 +2,8 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: gmail-import-full
+  annotations:
+    coop.example.com/image-source-revision: "0000000000000000000000000000000000000000"
   labels: &full-labels
     app.kubernetes.io/name: gmail-import-full
     app.kubernetes.io/part-of: coop-video-planning
@@ -19,14 +21,16 @@ spec:
     metadata:
       labels: *full-labels
     spec:
-      backoffLimit: 1
+      backoffLimit: 0
       activeDeadlineSeconds: 3600
       template:
         metadata:
           labels: *full-labels
         spec: &pod-spec
           restartPolicy: Never
+          serviceAccountName: gmail-full-pilot-runtime
           automountServiceAccountToken: false
+          enableServiceLinks: false
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
@@ -43,11 +47,15 @@ spec:
                 - {name: HTTPS_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: HTTP_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: NO_PROXY, value: "postgres,postgres.coop-prod.svc,gmail-egress-proxy,127.0.0.1,localhost"}
+                - {name: GMAIL_IMPORT_ARMED, value: "false"}
                 - name: GMAIL_IMPORT_QUERY
                   value: "in:anywhere -in:chats after:2026/01/01 {label:Legal to:legal@tsh-social.com from:legal@tsh-social.com}"
+                - {name: GMAIL_IMPORT_QUERY_SHA256, value: "e362825c8b3be3c500d6da685c7e0b2043641fa2136fd801acf57395154f967d"}
+                # Independently approved normalized Gmail account fingerprint.
+                - {name: GMAIL_ACCOUNT_SHA256, value: "d260486537baa3f006b0e0e3168df3ba58b784b56f0846e150690af7457b14bb"}
                 - name: DATABASE_URL
                   valueFrom:
-                    secretKeyRef: {name: coop-runtime, key: COLLECTOR_DATABASE_URL}
+                    secretKeyRef: {name: gmail-collector-db, key: COLLECTOR_DATABASE_URL}
                 - name: GMAIL_CLIENT_ID
                   valueFrom:
                     secretKeyRef: {name: gmail-oauth, key: GMAIL_CLIENT_ID}

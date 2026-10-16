@@ -75,7 +75,7 @@ def test_collector_role_is_evidence_only(test_engine: Engine) -> None:
         for table in tables:
             if table in EVIDENCE_TABLES:
                 assert _privilege(connection, table, "SELECT")
-                assert _privilege(connection, table, "INSERT")
+                assert _privilege(connection, table, "INSERT") is (table != "ingestion_source")
                 assert not _privilege(connection, table, "DELETE")
                 assert not _privilege(connection, table, "TRUNCATE")
             else:
@@ -203,10 +203,39 @@ def test_collector_role_cannot_mutate_business_tables(test_engine: Engine) -> No
 
 
 @pytest.mark.integration
+def test_collector_role_cannot_create_or_activate_source(test_engine: Engine) -> None:
+    collector_engine = create_engine(_collector_test_url(test_engine))
+    try:
+        with (
+            collector_engine.connect() as connection,
+            connection.begin(),
+            pytest.raises(DBAPIError),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO ingestion_source (id, source_key, kind, enabled) "
+                    "VALUES (:id, 'forbidden-source', 'GMAIL', true)"
+                ),
+                {"id": uuid.uuid4()},
+            )
+    finally:
+        collector_engine.dispose()
+
+
+@pytest.mark.integration
 def test_collector_role_can_persist_evidence_snapshot(test_engine: Engine) -> None:
     from sqlalchemy.orm import sessionmaker
 
-    from app.ingestion.gmail import FullSnapshot, persist_full_snapshot
+    from app.ingestion.gmail import SOURCE_KEY, FullSnapshot, persist_full_snapshot
+
+    with test_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ingestion_source (id, source_key, kind, enabled) "
+                "VALUES (:id, :source_key, 'GMAIL', true)"
+            ),
+            {"id": uuid.uuid4(), "source_key": SOURCE_KEY},
+        )
 
     collector_engine = create_engine(_collector_test_url(test_engine))
     collector_sessions = sessionmaker(bind=collector_engine, expire_on_commit=False)

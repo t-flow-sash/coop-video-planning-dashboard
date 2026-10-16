@@ -66,6 +66,61 @@ def config() -> GmailConfig:
     return GmailConfig("client-id", "client-secret", "refresh-token", "legal@example.com")
 
 
+def arm_main(monkeypatch: pytest.MonkeyPatch, query: str | None = None) -> None:
+    effective_query = query or gmail_module.DEFAULT_IMPORT_QUERY
+    monkeypatch.setenv("GMAIL_IMPORT_ARMED", "true")
+    monkeypatch.setenv("GMAIL_IMPORT_QUERY", effective_query)
+    monkeypatch.setenv("GMAIL_IMPORT_QUERY_SHA256", canonical_hash(effective_query))
+    account_hash = gmail_module.account_fingerprint("legal@example.com")
+    monkeypatch.setattr(gmail_module, "EXPECTED_ACCOUNT_SHA256", account_hash)
+    monkeypatch.setenv("GMAIL_ACCOUNT_SHA256", account_hash)
+
+
+@pytest.mark.no_db
+def test_release_account_pin_matches_approved_production_address() -> None:
+    assert gmail_module.account_fingerprint("tsh_admin@tsh-social.com") == (
+        gmail_module.EXPECTED_ACCOUNT_SHA256
+    )
+
+
+@pytest.mark.no_db
+def test_collector_database_attestation_rejects_admin_identity_before_sql(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoSqlSession:
+        def execute(self, statement: object) -> object:
+            raise AssertionError("SQL must not run for an admin URL")
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://coop_app:secret@postgres:5432/coop")
+    with pytest.raises(gmail_module.GmailError, match="identity invalid"):
+        gmail_module.attest_collector_database(NoSqlSession())  # type: ignore[arg-type]
+
+
+@pytest.mark.no_db
+def test_collector_database_attestation_binds_runtime_role_database_and_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Result:
+        def one(self) -> tuple[str, str, str, str, int]:
+            return (
+                "coop_evidence_collector",
+                "coop_evidence_collector",
+                "coop",
+                "10.0.0.10",
+                5432,
+            )
+
+    class Session:
+        def execute(self, statement: object) -> Result:
+            return Result()
+
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        "postgresql+psycopg://coop_evidence_collector:secret@postgres:5432/coop",
+    )
+    gmail_module.attest_collector_database(Session())  # type: ignore[arg-type]
+
+
 def authorized_responses(
     *, scope: str = GMAIL_READONLY_SCOPE, email: str = "legal@example.com"
 ) -> dict[str, list[tuple[int, dict[str, Any]]]]:
@@ -214,16 +269,33 @@ def test_authorize_accepts_google_tokeninfo_identity_scope_urls() -> None:
     "scope",
     [
         "https://www.googleapis.com/auth/gmail.modify",
-        f"{GMAIL_READONLY_SCOPE} https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.send",
         "https://mail.google.com/",
-        f"{GMAIL_READONLY_SCOPE} https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
     ],
 )
-def test_authorize_rejects_broad_or_unrelated_scopes(scope: str) -> None:
+def test_authorize_rejects_tokens_without_gmail_readonly(scope: str) -> None:
     client = GmailClient(config(), FakeTransport(authorized_responses(scope=scope)))
 
     with pytest.raises(GmailAuthError, match="scope_invalid"):
         client.authorize()
+
+
+@pytest.mark.no_db
+def test_authorize_accepts_explicitly_approved_broad_influencer_token() -> None:
+    scope = " ".join(
+        [
+            GMAIL_READONLY_SCOPE,
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/calendar",
+        ]
+    )
+
+    authorized = GmailClient(config(), FakeTransport(authorized_responses(scope=scope))).authorize()
+
+    assert authorized.history_id == "100"
 
 
 @pytest.mark.no_db
@@ -442,43 +514,161 @@ def test_full_persistence_rejects_noncanonical_numeric_metadata_without_writes(
 
 
 @pytest.mark.no_db
-def test_main_acquires_lock_and_checks_source_before_first_provider_call(
+def test_main_rejects_unarmed_execution_before_credentials_database_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accesses: list[str] = []
+
+    def credentials_accessed() -> GmailConfig:
+        accesses.append("credentials")
+        raise AssertionError("credentials accessed")
+
+    def database_accessed() -> object:
+        accesses.append("database")
+        raise AssertionError("database accessed")
+
+    monkeypatch.delenv("GMAIL_IMPORT_ARMED", raising=False)
+    monkeypatch.setattr(gmail_module.GmailConfig, "from_env", credentials_accessed)
+    monkeypatch.setattr(gmail_module.SessionLocal, "begin", database_accessed)
+
+    assert gmail_module.main(["full"]) == 1
+    assert accesses == []
+
+
+@pytest.mark.no_db
+def test_main_rejects_self_consistent_query_drift_before_credentials_database_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    accesses: list[str] = []
+
+    def credentials_accessed() -> GmailConfig:
+        accesses.append("credentials")
+        raise AssertionError("credentials accessed")
+
+    def database_accessed() -> object:
+        accesses.append("database")
+        raise AssertionError("database accessed")
+
+    monkeypatch.setenv("GMAIL_IMPORT_ARMED", "true")
+    monkeypatch.setenv("GMAIL_IMPORT_QUERY", "tampered query")
+    monkeypatch.setenv("GMAIL_IMPORT_QUERY_SHA256", canonical_hash("tampered query"))
+    monkeypatch.setattr(gmail_module.GmailConfig, "from_env", credentials_accessed)
+    monkeypatch.setattr(gmail_module.SessionLocal, "begin", database_accessed)
+
+    assert gmail_module.main(["full"]) == 1
+    assert accesses == []
+
+
+@pytest.mark.no_db
+def test_account_fingerprint_mismatch_fails_before_database_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    arm_main(monkeypatch)
+    monkeypatch.setenv("GMAIL_CLIENT_ID", "client-id")
+    monkeypatch.setenv("GMAIL_CLIENT_SECRET", "client-secret")
+    monkeypatch.setenv("GMAIL_REFRESH_TOKEN", "refresh-token")
+    monkeypatch.setenv("GMAIL_ACCOUNT", "other@example.com")
+    database_accessed = False
+
+    def database_begin() -> object:
+        nonlocal database_accessed
+        database_accessed = True
+        raise AssertionError("database accessed")
+
+    monkeypatch.setattr(gmail_module.SessionLocal, "begin", database_begin)
+    assert gmail_module.main(["full"]) == 1
+    assert database_accessed is False
+
+
+@pytest.mark.no_db
+def test_main_commits_durable_pilot_claim_before_first_provider_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
     source = object()
+    claimed_run = object()
 
     class FakeClient:
         def __init__(self, config: GmailConfig) -> None:
             pass
 
         def full_snapshot(self, query: str) -> FullSnapshot:
-            assert events == ["lock", "source"]
+            assert events == [
+                "transaction-1-enter",
+                "database_identity",
+                "lock",
+                "source",
+                "claim",
+                "transaction-1-commit",
+                "transaction-2-enter",
+                "database_identity",
+                "lock",
+                "source",
+                "load-claim",
+            ]
             events.append("network")
             return FullSnapshot("100", "100", ())
 
     class Transaction:
+        count = 0
+
         def __enter__(self) -> object:
+            type(self).count += 1
+            self.number = type(self).count
+            events.append(f"transaction-{self.number}-enter")
             return object()
 
         def __exit__(self, *args: object) -> None:
-            pass
+            events.append(f"transaction-{self.number}-commit")
 
+    arm_main(monkeypatch)
     monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
     monkeypatch.setattr(gmail_module, "GmailClient", FakeClient)
     monkeypatch.setattr(gmail_module.SessionLocal, "begin", lambda: Transaction())
+    monkeypatch.setattr(
+        gmail_module,
+        "attest_collector_database",
+        lambda session: events.append("database_identity"),
+    )
     monkeypatch.setattr(gmail_module, "acquire_import_lock", lambda session: events.append("lock"))
     monkeypatch.setattr(gmail_module, "_source", lambda session: events.append("source") or source)
     monkeypatch.setattr(
         gmail_module,
+        "claim_pilot_slot",
+        lambda session, claimed_source: events.append("claim") or claimed_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gmail_module,
+        "load_claimed_pilot_run",
+        lambda session, claimed_source, run_id: events.append("load-claim") or claimed_run,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        gmail_module,
         "persist_full_snapshot",
-        lambda session, snapshot, *, query, source=None: (
+        lambda session, snapshot, *, query, source=None, run=None: (
             events.append("persist") or GmailRunReport("SUCCEEDED", 0)
         ),
     )
 
     assert gmail_module.main(["full"]) == 0
-    assert events == ["lock", "source", "network", "persist"]
+    assert events == [
+        "transaction-1-enter",
+        "database_identity",
+        "lock",
+        "source",
+        "claim",
+        "transaction-1-commit",
+        "transaction-2-enter",
+        "database_identity",
+        "lock",
+        "source",
+        "load-claim",
+        "network",
+        "persist",
+        "transaction-2-commit",
+    ]
 
 
 @pytest.mark.no_db
@@ -506,13 +696,45 @@ def test_main_never_scans_when_another_full_run_holds_the_lock(
     def reject_lock(session: object) -> None:
         raise ImportBusyError("busy")
 
+    arm_main(monkeypatch)
     monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
     monkeypatch.setattr(gmail_module, "GmailClient", FakeClient)
     monkeypatch.setattr(gmail_module.SessionLocal, "begin", lambda: Transaction())
+    monkeypatch.setattr(gmail_module, "attest_collector_database", lambda session: None)
     monkeypatch.setattr(gmail_module, "acquire_import_lock", reject_lock)
 
     assert gmail_module.main(["full"]) == 1
     assert provider_calls == 0
+
+
+@pytest.mark.no_db
+def test_missing_source_fails_closed_without_implicit_creation() -> None:
+    class MissingSourceSession:
+        def scalar(self, statement: object) -> None:
+            return None
+
+        def add(self, value: object) -> None:
+            raise AssertionError("missing source must not be created implicitly")
+
+    with pytest.raises(ImportDisabledError, match="not provisioned"):
+        gmail_module._source(MissingSourceSession())  # type: ignore[arg-type]
+
+
+def test_durable_pilot_claim_can_only_be_created_once() -> None:
+    with SessionLocal.begin() as session:
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        first_run_id = gmail_module.claim_pilot_slot(session, source)
+
+    with pytest.raises(gmail_module.PilotConsumedError), SessionLocal.begin() as session:
+        source = gmail_module._source(session)
+        gmail_module.claim_pilot_slot(session, source)
+
+    with SessionLocal() as session:
+        persisted = session.get(IngestionRun, first_run_id)
+        assert persisted is not None
+        assert persisted.status == "RUNNING"
 
 
 @pytest.mark.no_db
@@ -540,9 +762,11 @@ def test_main_never_scans_when_the_source_kill_switch_is_disabled(
     def disabled_source(session: object) -> object:
         raise ImportDisabledError("disabled")
 
+    arm_main(monkeypatch)
     monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
     monkeypatch.setattr(gmail_module, "GmailClient", FakeClient)
     monkeypatch.setattr(gmail_module.SessionLocal, "begin", lambda: Transaction())
+    monkeypatch.setattr(gmail_module, "attest_collector_database", lambda session: None)
     monkeypatch.setattr(gmail_module, "acquire_import_lock", lambda session: None)
     monkeypatch.setattr(gmail_module, "_source", disabled_source)
 
@@ -558,7 +782,10 @@ def test_full_persistence_binds_checkpoint_to_canonical_query_hash() -> None:
     )
 
     with SessionLocal.begin() as session:
-        persist_full_snapshot(session, snapshot, query="  exact query  ")
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        persist_full_snapshot(session, snapshot, query="  exact query  ", source=source)
 
     with SessionLocal() as session:
         checkpoint = session.scalar(select(IngestionCheckpoint))
@@ -598,7 +825,10 @@ def test_full_persistence_is_evidence_only_advances_to_h0_and_replay_is_idempote
     )
 
     with SessionLocal.begin() as session:
-        first = persist_full_snapshot(session, snapshot, query="query")
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        first = persist_full_snapshot(session, snapshot, query="query", source=source)
     with SessionLocal.begin() as session:
         second = persist_full_snapshot(session, snapshot, query="query")
 
