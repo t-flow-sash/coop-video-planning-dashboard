@@ -74,6 +74,10 @@ def cronjob() -> dict[str, object]:
                         "spec": {
                             "restartPolicy": "Never",
                             "serviceAccountName": "gmail-full-pilot-runtime",
+                            "serviceAccount": "gmail-full-pilot-runtime",
+                            "schedulerName": "default-scheduler",
+                            "dnsPolicy": "ClusterFirst",
+                            "terminationGracePeriodSeconds": 30,
                             "automountServiceAccountToken": False,
                             "enableServiceLinks": False,
                             "securityContext": {
@@ -513,6 +517,126 @@ class FakeKubectl:
 
 
 class PilotContractTests(unittest.TestCase):
+    def test_permission_check_requires_canonical_kubectl_result(self) -> None:
+        kubectl = pilot.Kubectl("production-context")
+        for returncode, stdout in ((0, "yes\n"), (1, "no\n")):
+            with (
+                self.subTest(returncode=returncode, stdout=stdout),
+                patch.object(
+                    pilot.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        args=["kubectl"],
+                        returncode=returncode,
+                        stdout=stdout,
+                        stderr="",
+                    ),
+                ),
+            ):
+                self.assertEqual(
+                    kubectl._run(
+                        ["auth", "can-i", "delete", "secrets"],
+                        namespace="coop-prod",
+                        operation="permission_check",
+                    ),
+                    stdout,
+                )
+
+        cluster_scope_warning = (
+            "Warning: resource 'validatingadmissionpolicies' is not namespace "
+            "scoped in group 'admissionregistration.k8s.io'\n\n"
+        )
+        cluster_resource = (
+            "validatingadmissionpolicies.admissionregistration.k8s.io/"
+            "gmail-full-pilot-operator"
+        )
+        with patch.object(
+            pilot.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                args=["kubectl"],
+                returncode=0,
+                stdout="yes\n",
+                stderr=cluster_scope_warning,
+            ),
+        ):
+            self.assertEqual(
+                kubectl._run(
+                    ["auth", "can-i", "get", cluster_resource],
+                    namespace="",
+                    operation="permission_check",
+                ),
+                "yes\n",
+            )
+
+        invalid_cluster_targets = (
+            "validatingadmissionpolicies.admissionregistration.k8s.io",
+            "validatingadmissionpolicies.admissionregistration.k8s.io/",
+            "validatingadmissionpolicies.admissionregistration.k8s.io/name/extra",
+            "validatingadmissionpolicies.admissionregistration.k8s.io/foreign",
+            "validatingadmissionpolicybindings.admissionregistration.k8s.io",
+            "validatingadmissionpolicybindings.admissionregistration.k8s.io/",
+            "validatingadmissionpolicybindings.admissionregistration.k8s.io/name/extra",
+            "validatingadmissionpolicybindings.admissionregistration.k8s.io/foreign",
+        )
+        for invalid_target in invalid_cluster_targets:
+            short_name = invalid_target.split(".", 1)[0]
+            exact_warning = (
+                f"Warning: resource '{short_name}' is not namespace scoped in "
+                "group 'admissionregistration.k8s.io'\n\n"
+            )
+            with (
+                self.subTest(invalid_target=invalid_target),
+                patch.object(
+                    pilot.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        args=["kubectl"],
+                        returncode=0,
+                        stdout="yes\n",
+                        stderr=exact_warning,
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    pilot.PilotError, "kubectl_permission_check_failed"
+                ),
+            ):
+                kubectl._run(
+                    ["auth", "can-i", "get", invalid_target],
+                    namespace="",
+                    operation="permission_check",
+                )
+
+        malformed = (
+            (1, "yes\n", ""),
+            (0, "no\n", ""),
+            (1, "yes\n", "transport error\n"),
+            (0, "no\n", "protocol warning\n"),
+            (1, "", "transport error"),
+        )
+        for returncode, stdout, stderr in malformed:
+            with (
+                self.subTest(returncode=returncode, stdout=stdout, stderr=stderr),
+                patch.object(
+                    pilot.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        args=["kubectl"],
+                        returncode=returncode,
+                        stdout=stdout,
+                        stderr=stderr,
+                    ),
+                ),
+                self.assertRaisesRegex(
+                    pilot.PilotError, "kubectl_permission_check_failed"
+                ),
+            ):
+                kubectl._run(
+                    ["auth", "can-i", "delete", "secrets"],
+                    namespace="coop-prod",
+                    operation="permission_check",
+                )
+
     def test_permission_preflight_uses_resource_names_for_scoped_gets(self) -> None:
         kubectl = pilot.Kubectl("production-context")
         calls: list[tuple[tuple[str, ...], str]] = []
@@ -550,8 +674,7 @@ class PilotContractTests(unittest.TestCase):
                 "auth",
                 "can-i",
                 "delete",
-                "configmap",
-                pilot.PILOT_MARKER_NAME,
+                f"configmap/{pilot.PILOT_MARKER_NAME}",
             ]:
                 return "no\n"
             return "yes\n"
