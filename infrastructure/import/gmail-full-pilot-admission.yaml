@@ -21,6 +21,8 @@ spec:
     kind: ConfigMap
   matchConstraints:
     matchPolicy: Equivalent
+    namespaceSelector: {}
+    objectSelector: {}
     resourceRules:
       - apiGroups: ["batch"]
         apiVersions: ["v1"]
@@ -240,6 +242,8 @@ spec:
     kind: ConfigMap
   matchConstraints:
     matchPolicy: Equivalent
+    namespaceSelector: {}
+    objectSelector: {}
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]

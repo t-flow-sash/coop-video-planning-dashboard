@@ -55,7 +55,7 @@ ADMISSION_SPEC_SHA256 = {
     (
         "validatingadmissionpolicy",
         "gmail-full-pilot-operator",
-    ): "9e71ccd8c9a019b3279e4f29b73658f95d1aaf6d3517792c456d01a7709e8990",
+    ): "6065d6ff16fc8df38f6e25bf78916ac5e80af25a4c80d80654a476ea896ebccd",
     (
         "validatingadmissionpolicybinding",
         "gmail-full-pilot-operator",
@@ -63,7 +63,7 @@ ADMISSION_SPEC_SHA256 = {
     (
         "validatingadmissionpolicy",
         "gmail-full-pilot-slot",
-    ): "82e232508576ab1a719e3453c048da4317c2d3cdd229e76fda7700f73908855b",
+    ): "6024567b91027569834c2f23571a67bb94f76a17cb555b3e3fa05d5c30bd0b23",
     (
         "validatingadmissionpolicybinding",
         "gmail-full-pilot-slot",
@@ -211,6 +211,46 @@ class Kubectl:
             if operation in {"create", "consume_slot", "create_snapshot"}:
                 raise PilotCreateUncertain("kubectl_create_uncertain") from error
             raise PilotError(f"kubectl_{operation}_failed") from error
+        if operation == "permission_check":
+            answer = completed.stdout.strip()
+            allowed_stderr = {""}
+            if (
+                namespace == ""
+                and len(arguments) == 4
+                and arguments[:3] == ["auth", "can-i", "get"]
+            ):
+                resource_and_name = arguments[3]
+                cluster_scoped_targets = {
+                    "validatingadmissionpolicies.admissionregistration.k8s.io": {
+                        "gmail-full-pilot-operator",
+                        "gmail-full-pilot-slot",
+                    },
+                    "validatingadmissionpolicybindings.admissionregistration.k8s.io": {
+                        "gmail-full-pilot-operator",
+                        "gmail-full-pilot-slot",
+                    },
+                }
+                if resource_and_name.count("/") == 1:
+                    resource, resource_name = resource_and_name.split("/", 1)
+                    allowed_names = cluster_scoped_targets.get(resource, set())
+                    if resource_name in allowed_names:
+                        short_name = resource.split(".", 1)[0]
+                        allowed_stderr.add(
+                            f"Warning: resource '{short_name}' is not namespace scoped in "
+                            "group 'admissionregistration.k8s.io'\n\n"
+                        )
+            canonical = (
+                completed.returncode == 0
+                and answer == "yes"
+                and completed.stderr in allowed_stderr
+            ) or (
+                completed.returncode == 1
+                and answer == "no"
+                and completed.stderr in allowed_stderr
+            )
+            if canonical:
+                return completed.stdout
+            raise PilotError("kubectl_permission_check_failed")
         if completed.returncode != 0:
             diagnostic = f"{completed.stdout}\n{completed.stderr}"
             if operation in {"create", "consume_slot", "create_snapshot"}:
@@ -494,13 +534,13 @@ class Kubectl:
             (
                 "get",
                 "validatingadmissionpolicies.admissionregistration.k8s.io",
-                namespace,
+                "",
                 ("gmail-full-pilot-operator", "gmail-full-pilot-slot"),
             ),
             (
                 "get",
                 "validatingadmissionpolicybindings.admissionregistration.k8s.io",
-                namespace,
+                "",
                 ("gmail-full-pilot-operator", "gmail-full-pilot-slot"),
             ),
         )
@@ -549,7 +589,7 @@ class Kubectl:
                 raise PilotError("pilot_permissions_overbroad")
         # The execution identity must be unable to remove the durable slot marker.
         answer = self._run(
-            ["auth", "can-i", "delete", "configmap", PILOT_MARKER_NAME],
+            ["auth", "can-i", "delete", f"configmap/{PILOT_MARKER_NAME}"],
             namespace=namespace,
             operation="permission_check",
         ).strip()
@@ -1215,8 +1255,7 @@ def validate_cronjob(cronjob: dict[str, object]) -> PilotContract:
         or pod_spec.get("hostPID", False) is not False
         or pod_spec.get("hostIPC", False) is not False
         or pod_spec.get("initContainers", []) != []
-        or set(pod_spec)
-        != {
+        or not {
             "automountServiceAccountToken",
             "containers",
             "enableServiceLinks",
@@ -1224,8 +1263,27 @@ def validate_cronjob(cronjob: dict[str, object]) -> PilotContract:
             "securityContext",
             "serviceAccountName",
             "volumes",
+        }.issubset(pod_spec)
+        or set(pod_spec)
+        - {
+            "automountServiceAccountToken",
+            "containers",
+            "dnsPolicy",
+            "enableServiceLinks",
+            "restartPolicy",
+            "schedulerName",
+            "securityContext",
+            "serviceAccount",
+            "serviceAccountName",
+            "terminationGracePeriodSeconds",
+            "volumes",
         }
         or pod_spec.get("serviceAccountName") != "gmail-full-pilot-runtime"
+        or pod_spec.get("serviceAccount", "gmail-full-pilot-runtime")
+        != "gmail-full-pilot-runtime"
+        or pod_spec.get("schedulerName", "default-scheduler") != "default-scheduler"
+        or pod_spec.get("dnsPolicy", "ClusterFirst") != "ClusterFirst"
+        or pod_spec.get("terminationGracePeriodSeconds", 30) != 30
         or pod_spec.get("volumes")
         != [{"name": "tmp", "emptyDir": {"sizeLimit": "64Mi"}}]
         or pod_security.get("runAsNonRoot") is not True
