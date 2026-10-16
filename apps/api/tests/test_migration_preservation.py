@@ -95,6 +95,15 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
                 )
             ).all()
 
+        _run_alembic(isolated_url, "9e31c2b8a4f0")
+        with isolated.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO ingestion_source (id, source_key, kind, enabled) "
+                    "VALUES (:id, 'gmail-open-coops-v1', 'GMAIL', true)"
+                ),
+                {"id": uuid.uuid4()},
+            )
         _run_alembic(isolated_url, "head")
 
         with isolated.connect() as connection:
@@ -109,7 +118,14 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
             ).all()
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("9e31c2b8a4f0")
+            ).scalar_one() == ("b6a4d9e2f170")
+            source = connection.execute(
+                text(
+                    "SELECT source_key, kind, enabled FROM ingestion_source "
+                    "WHERE source_key = 'gmail-open-coops-v1'"
+                )
+            ).one()
+            assert source == ("gmail-open-coops-v1", "GMAIL", False)
             constraints = set(
                 connection.execute(
                     text(

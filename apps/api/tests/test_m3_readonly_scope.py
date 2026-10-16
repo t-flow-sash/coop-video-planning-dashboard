@@ -12,8 +12,12 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 ALLOWED_INGESTION_MODULES = {"__init__.py", "gmail.py"}
 ALLOWED_IMPORT_RESOURCES = {
+    "gmail-collector-db.secret.sops.yaml",
     "gmail-egress-proxy.yaml",
+    "gmail-full-pilot-admission.yaml",
+    "gmail-full-pilot-rbac.yaml",
     "gmail-import-cronjobs.yaml",
+    "gmail-oauth.secret.sops.yaml",
     "network-policy.yaml",
 }
 ALLOWED_API_ROUTES = {

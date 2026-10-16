@@ -1,0 +1,277 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gmail-full-pilot-admission-params
+  namespace: coop-prod
+data:
+  image: "127.0.0.1:5000/coop-api:git-f0399306b774@sha256:ddea2e861eb81a017aabf7d3e926179d582a2ff543bb6e9e90abe2afcee59508"
+  imageSourceRevision: "f0399306b7745413d6d3560d5dea7c68f6e23cd9"
+  query: "in:anywhere -in:chats after:2026/01/01 {label:Legal to:legal@tsh-social.com from:legal@tsh-social.com}"
+  querySha256: "e362825c8b3be3c500d6da685c7e0b2043641fa2136fd801acf57395154f967d"
+  accountSha256: "d260486537baa3f006b0e0e3168df3ba58b784b56f0846e150690af7457b14bb"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gmail-full-pilot-operator
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["jobs"]
+        scope: Namespaced
+  matchConditions:
+    - name: pilot-operator-only
+      expression: request.userInfo.username == 'system:serviceaccount:coop-prod:gmail-full-pilot-operator'
+  validations:
+    - expression: request.namespace == 'coop-prod' && request.name == 'gmail-import-full-pilot'
+      message: Pilot operator may only manage the reserved pilot Job.
+    - expression: >-
+        request.operation == 'DELETE' ||
+        (object.metadata.labels == {
+          'coop.example.com/gmail-import-pilot': 'true',
+          'coop.example.com/gmail-import': 'true'
+        } &&
+        object.metadata.annotations.size() == 4 &&
+        object.metadata.annotations['coop.example.com/gmail-import-query-sha256'] == params.data.querySha256 &&
+        object.metadata.annotations['coop.example.com/gmail-import-image'] == params.data.image &&
+        object.metadata.annotations['coop.example.com/image-source-revision'] == params.data.imageSourceRevision &&
+        object.metadata.annotations['coop.example.com/pilot-ownership-token'].matches('^[0-9a-f]{64}$'))
+      message: Pilot Job metadata does not match the authorized release contract.
+    - expression: >-
+        request.operation != 'CREATE' ||
+        (object.spec.suspend == true &&
+        object.spec.parallelism == 1 &&
+        object.spec.completions == 1 &&
+        object.spec.backoffLimit == 0 &&
+        object.spec.activeDeadlineSeconds == 3600 &&
+        object.spec.ttlSecondsAfterFinished == 86400 &&
+        object.spec.podReplacementPolicy == 'Failed' &&
+        !has(object.spec.podFailurePolicy) &&
+        !has(object.spec.backoffLimitPerIndex) &&
+        !has(object.spec.maxFailedIndexes) &&
+        !has(object.spec.successPolicy) &&
+        !has(object.spec.managedBy))
+      message: Pilot Job retry and suspension contract is invalid.
+
+    - expression: >-
+        request.operation != 'CREATE' ||
+        (object.spec.template.metadata.labels.size() == 9 &&
+        object.spec.template.metadata.labels['app.kubernetes.io/name'] == 'gmail-import-full' &&
+        object.spec.template.metadata.labels['app.kubernetes.io/part-of'] == 'coop-video-planning' &&
+        object.spec.template.metadata.labels['coop.example.com/gmail-import-pilot'] == 'true' &&
+        object.spec.template.metadata.labels['coop.example.com/gmail-import'] == 'true' &&
+        object.spec.template.metadata.labels['coop.example.com/postgres-client'] == 'true' &&
+        object.spec.template.metadata.labels['batch.kubernetes.io/job-name'] == 'gmail-import-full-pilot' &&
+        object.spec.template.metadata.labels['job-name'] == 'gmail-import-full-pilot' &&
+        object.spec.template.metadata.labels['batch.kubernetes.io/controller-uid'] == object.spec.template.metadata.labels['controller-uid'] &&
+        object.spec.template.metadata.labels['controller-uid'] != '' &&
+        (!has(object.spec.template.metadata.annotations) || object.spec.template.metadata.annotations.size() == 0) &&
+        object.spec.template.spec.restartPolicy == 'Never' &&
+        object.spec.template.spec.automountServiceAccountToken == false &&
+        object.spec.template.spec.enableServiceLinks == false &&
+        object.spec.template.spec.serviceAccountName == 'gmail-full-pilot-runtime' &&
+        object.spec.template.spec.serviceAccount == 'gmail-full-pilot-runtime' &&
+        !has(object.spec.template.spec.initContainers) &&
+        !has(object.spec.template.spec.ephemeralContainers) &&
+        !has(object.spec.template.spec.hostNetwork) &&
+        !has(object.spec.template.spec.hostPID) &&
+        !has(object.spec.template.spec.hostIPC) &&
+        !has(object.spec.template.spec.nodeName) &&
+        (!has(object.spec.template.spec.shareProcessNamespace) || object.spec.template.spec.shareProcessNamespace == false) &&
+        !has(object.spec.template.spec.nodeSelector) &&
+        !has(object.spec.template.spec.affinity) &&
+        !has(object.spec.template.spec.tolerations) &&
+        !has(object.spec.template.spec.priorityClassName) &&
+        !has(object.spec.template.spec.priority) &&
+        !has(object.spec.template.spec.preemptionPolicy) &&
+        !has(object.spec.template.spec.activeDeadlineSeconds) &&
+        !has(object.spec.template.spec.hostUsers) &&
+        !has(object.spec.template.spec.os) &&
+        !has(object.spec.template.spec.topologySpreadConstraints) &&
+        !has(object.spec.template.spec.readinessGates) &&
+        !has(object.spec.template.spec.schedulingGates) &&
+        !has(object.spec.template.spec.resourceClaims) &&
+        !has(object.spec.template.spec.hostname) &&
+        !has(object.spec.template.spec.hostnameOverride) &&
+        !has(object.spec.template.spec.subdomain) &&
+        !has(object.spec.template.spec.overhead) &&
+        !has(object.spec.template.spec.resources) &&
+        !has(object.spec.template.spec.schedulingGroup) &&
+        (!has(object.spec.template.spec.setHostnameAsFQDN) || object.spec.template.spec.setHostnameAsFQDN == false) &&
+        !has(object.spec.template.spec.hostAliases) &&
+        !has(object.spec.template.spec.imagePullSecrets) &&
+        !has(object.spec.template.spec.runtimeClassName) &&
+        !has(object.spec.template.spec.priorityClassName) &&
+        (!has(object.spec.template.spec.schedulerName) || object.spec.template.spec.schedulerName == 'default-scheduler') &&
+        (!has(object.spec.template.spec.dnsPolicy) || object.spec.template.spec.dnsPolicy == 'ClusterFirst') &&
+        !has(object.spec.template.spec.dnsConfig) &&
+        (!has(object.spec.template.spec.terminationGracePeriodSeconds) || object.spec.template.spec.terminationGracePeriodSeconds == 30) &&
+        (!has(object.spec.template.spec.shareProcessNamespace) || object.spec.template.spec.shareProcessNamespace == false) &&
+        object.spec.template.spec.securityContext.runAsNonRoot == true &&
+        object.spec.template.spec.securityContext.runAsUser == 10001 &&
+        object.spec.template.spec.securityContext.runAsGroup == 10001 &&
+        object.spec.template.spec.securityContext.fsGroup == 10001 &&
+        object.spec.template.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+        object.spec.template.spec.containers.size() == 1)
+      message: Pilot Pod containment contract is invalid.
+    - expression: >-
+        request.operation != 'CREATE' ||
+        (object.spec.template.spec.containers[0].name == 'gmail-import' &&
+        object.spec.template.spec.containers[0].image == params.data.image &&
+        object.spec.template.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
+        object.spec.template.spec.containers[0].command == ['python', '-m', 'app.ingestion.gmail'] &&
+        object.spec.template.spec.containers[0].args == ['full'] &&
+        object.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+        object.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
+        object.spec.template.spec.containers[0].securityContext.capabilities.drop == ['ALL'] &&
+        !has(object.spec.template.spec.containers[0].securityContext.capabilities.add) &&
+        !has(object.spec.template.spec.containers[0].securityContext.runAsNonRoot) &&
+        !has(object.spec.template.spec.containers[0].securityContext.runAsUser) &&
+        !has(object.spec.template.spec.containers[0].securityContext.runAsGroup) &&
+        (!has(object.spec.template.spec.containers[0].securityContext.privileged) || object.spec.template.spec.containers[0].securityContext.privileged == false) &&
+        !has(object.spec.template.spec.containers[0].securityContext.procMount) &&
+        !has(object.spec.template.spec.containers[0].securityContext.seLinuxOptions) &&
+        !has(object.spec.template.spec.containers[0].securityContext.windowsOptions) &&
+        !has(object.spec.template.spec.containers[0].securityContext.seccompProfile) &&
+        !has(object.spec.template.spec.containers[0].securityContext.appArmorProfile) &&
+        !has(object.spec.template.spec.containers[0].lifecycle) &&
+        !has(object.spec.template.spec.containers[0].ports) &&
+        !has(object.spec.template.spec.containers[0].livenessProbe) &&
+        !has(object.spec.template.spec.containers[0].readinessProbe) &&
+        !has(object.spec.template.spec.containers[0].startupProbe) &&
+        !has(object.spec.template.spec.containers[0].workingDir) &&
+        !has(object.spec.template.spec.containers[0].restartPolicy) &&
+        !has(object.spec.template.spec.containers[0].restartPolicyRules) &&
+        !has(object.spec.template.spec.containers[0].resizePolicy) &&
+        object.spec.template.spec.containers[0].terminationMessagePath == '/dev/termination-log' &&
+        object.spec.template.spec.containers[0].terminationMessagePolicy == 'File' &&
+        object.spec.template.spec.containers[0].resources.requests['cpu'] == '50m' &&
+        object.spec.template.spec.containers[0].resources.requests['memory'] == '128Mi' &&
+        object.spec.template.spec.containers[0].resources.limits['cpu'] == '500m' &&
+        object.spec.template.spec.containers[0].resources.limits['memory'] == '512Mi' &&
+        size(object.spec.template.spec.containers[0].resources.requests) == 2 &&
+        size(object.spec.template.spec.containers[0].resources.limits) == 2 &&
+        (!has(object.spec.template.spec.containers[0].stdin) || object.spec.template.spec.containers[0].stdin == false) &&
+        (!has(object.spec.template.spec.containers[0].stdinOnce) || object.spec.template.spec.containers[0].stdinOnce == false) &&
+        (!has(object.spec.template.spec.containers[0].tty) || object.spec.template.spec.containers[0].tty == false))
+      message: Pilot container contract is invalid.
+    - expression: >-
+        request.operation != 'CREATE' ||
+        (object.spec.template.spec.containers[0].env.size() == 12 &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'HTTPS_PROXY' && e.value == 'http://gmail-egress-proxy:10000') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'HTTP_PROXY' && e.value == 'http://gmail-egress-proxy:10000') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'NO_PROXY' && e.value == 'postgres,postgres.coop-prod.svc,gmail-egress-proxy,127.0.0.1,localhost') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'GMAIL_IMPORT_ARMED' && e.value == 'true') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'GMAIL_IMPORT_QUERY' && e.value == params.data.query) &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'GMAIL_IMPORT_QUERY_SHA256' && e.value == params.data.querySha256) &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'GMAIL_ACCOUNT_SHA256' && e.value == params.data.accountSha256) &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'DATABASE_URL' && e.valueFrom.secretKeyRef.name == 'gmail-collector-db' && e.valueFrom.secretKeyRef.key == 'COLLECTOR_DATABASE_URL') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'GMAIL_CLIENT_ID' && e.valueFrom.secretKeyRef.name == 'gmail-oauth' && e.valueFrom.secretKeyRef.key == 'GMAIL_CLIENT_ID') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'GMAIL_CLIENT_SECRET' && e.valueFrom.secretKeyRef.name == 'gmail-oauth' && e.valueFrom.secretKeyRef.key == 'GMAIL_CLIENT_SECRET') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'GMAIL_REFRESH_TOKEN' && e.valueFrom.secretKeyRef.name == 'gmail-oauth' && e.valueFrom.secretKeyRef.key == 'GMAIL_REFRESH_TOKEN') &&
+        object.spec.template.spec.containers[0].env.exists_one(e, e.name == 'GMAIL_ACCOUNT' && e.valueFrom.secretKeyRef.name == 'gmail-oauth' && e.valueFrom.secretKeyRef.key == 'GMAIL_ACCOUNT'))
+      message: Pilot environment and Secret reference contract is invalid.
+    - expression: >-
+        request.operation != 'CREATE' ||
+        (!has(object.spec.template.spec.containers[0].envFrom) &&
+        !has(object.spec.template.spec.containers[0].volumeDevices) &&
+        object.spec.template.spec.containers[0].volumeMounts.size() == 1 &&
+        object.spec.template.spec.containers[0].volumeMounts[0].name == 'tmp' &&
+        object.spec.template.spec.containers[0].volumeMounts[0].mountPath == '/tmp' &&
+        (!has(object.spec.template.spec.containers[0].volumeMounts[0].readOnly) || object.spec.template.spec.containers[0].volumeMounts[0].readOnly == false) &&
+        (!has(object.spec.template.spec.containers[0].volumeMounts[0].subPath) || object.spec.template.spec.containers[0].volumeMounts[0].subPath == '') &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[0].subPathExpr) &&
+        !has(object.spec.template.spec.containers[0].volumeMounts[0].mountPropagation) &&
+        (!has(object.spec.template.spec.containers[0].volumeMounts[0].recursiveReadOnly) || object.spec.template.spec.containers[0].volumeMounts[0].recursiveReadOnly == 'Disabled') &&
+        object.spec.template.spec.volumes.size() == 1 &&
+        object.spec.template.spec.volumes[0].name == 'tmp' &&
+        object.spec.template.spec.volumes[0].emptyDir.sizeLimit == '64Mi' &&
+        !has(object.spec.template.spec.volumes[0].hostPath) &&
+        !has(object.spec.template.spec.volumes[0].persistentVolumeClaim) &&
+        !has(object.spec.template.spec.volumes[0].secret) &&
+        !has(object.spec.template.spec.volumes[0].configMap))
+      message: Pilot resources and writable storage are fixed to the bounded tmpfs.
+    - expression: >-
+        request.operation != 'UPDATE' ||
+        (oldObject.metadata.uid == object.metadata.uid &&
+        oldObject.metadata.labels == object.metadata.labels &&
+        oldObject.metadata.annotations == object.metadata.annotations &&
+        oldObject.spec.suspend == true && object.spec.suspend == false &&
+        oldObject.spec.template == object.spec.template &&
+        oldObject.spec.parallelism == object.spec.parallelism &&
+        oldObject.spec.completions == object.spec.completions &&
+        oldObject.spec.backoffLimit == object.spec.backoffLimit &&
+        oldObject.spec.activeDeadlineSeconds == object.spec.activeDeadlineSeconds &&
+        oldObject.spec.ttlSecondsAfterFinished == object.spec.ttlSecondsAfterFinished &&
+        oldObject.spec.podReplacementPolicy == object.spec.podReplacementPolicy &&
+        oldObject.spec.selector == object.spec.selector &&
+        oldObject.spec.manualSelector == object.spec.manualSelector &&
+        oldObject.spec.completionMode == object.spec.completionMode)
+      message: Pilot activation may only transition suspend from true to false.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gmail-full-pilot-operator
+spec:
+  policyName: gmail-full-pilot-operator
+  validationActions: [Deny]
+  paramRef:
+    name: gmail-full-pilot-admission-params
+    namespace: coop-prod
+    parameterNotFoundAction: Deny
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gmail-full-pilot-slot
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    matchPolicy: Equivalent
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["configmaps"]
+        scope: Namespaced
+  matchConditions:
+    - name: pilot-operator-only
+      expression: request.userInfo.username == 'system:serviceaccount:coop-prod:gmail-full-pilot-operator'
+  validations:
+    - expression: >-
+        request.namespace == 'coop-prod' &&
+        request.name == 'gmail-import-full-pilot-consumed' &&
+        object.immutable == true &&
+        object.metadata.labels == {'coop.example.com/gmail-import-pilot': 'consumed'} &&
+        object.metadata.finalizers == ['coop.example.com/gmail-full-pilot-retain'] &&
+        object.metadata.annotations.size() == 4 &&
+        object.metadata.annotations['coop.example.com/pilot-ownership-token'].matches('^[0-9a-f]{64}$') &&
+        object.metadata.annotations['coop.example.com/image-source-revision'] == params.data.imageSourceRevision &&
+        object.metadata.annotations['coop.example.com/query-sha256'] == params.data.querySha256 &&
+        object.metadata.annotations['coop.example.com/flux-revision'].matches('^[^@]+@sha1:[0-9a-f]{40}$') &&
+        object.data == {'state': 'CONSUMED'}
+      message: Pilot operator may only create the permanent consumed-slot marker.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gmail-full-pilot-slot
+spec:
+  policyName: gmail-full-pilot-slot
+  validationActions: [Deny]
+  paramRef:
+    name: gmail-full-pilot-admission-params
+    namespace: coop-prod
+    parameterNotFoundAction: Deny
