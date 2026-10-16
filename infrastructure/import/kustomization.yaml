@@ -11,5 +11,5 @@ resources:
   - network-policy.yaml
 images:
   - name: 127.0.0.1:5000/coop-api
-    newTag: git-000000000000
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    newTag: git-f0399306b774
+    digest: sha256:ddea2e861eb81a017aabf7d3e926179d582a2ff543bb6e9e90abe2afcee59508

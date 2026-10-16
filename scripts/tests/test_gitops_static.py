@@ -629,12 +629,19 @@ class RenderedSecurityContractTests(unittest.TestCase):
             )
             self.assertTrue(container["resources"]["requests"], name)
             self.assertTrue(container["resources"]["limits"], name)
-        self.assertEqual(
-            images,
-            {
-                "127.0.0.1:5000/coop-api:git-000000000000@"
-                "sha256:0000000000000000000000000000000000000000000000000000000000000000"
-            },
+        self.assertEqual(len(images), 1)
+        image = images.pop()
+        sentinel = (
+            "127.0.0.1:5000/coop-api:git-000000000000@"
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        )
+        self.assertTrue(
+            image == sentinel
+            or re.fullmatch(
+                r"127\.0\.0\.1:5000/coop-api:git-[0-9a-f]{12}@sha256:[0-9a-f]{64}",
+                image,
+            ),
+            image,
         )
 
     def test_import_egress_is_only_dns_postgres_and_controlled_proxy(self) -> None:
