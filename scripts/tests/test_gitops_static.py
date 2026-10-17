@@ -588,7 +588,20 @@ class RenderedSecurityContractTests(unittest.TestCase):
         cronjobs = {
             name: item for (kind, name), item in objects.items() if kind == "CronJob"
         }
-        self.assertEqual(set(cronjobs), {"gmail-import-full"})
+        self.assertEqual(
+            set(cronjobs),
+            {"gmail-import-full", "gmail-import-bootstrap", "gmail-import-delta"},
+        )
+        expected_commands = {
+            "gmail-import-full": ["full"],
+            "gmail-import-bootstrap": ["bootstrap"],
+            "gmail-import-delta": ["delta"],
+        }
+        expected_deadlines = {
+            "gmail-import-full": 3600,
+            "gmail-import-bootstrap": 3600,
+            "gmail-import-delta": 900,
+        }
         images = set()
         for name, cronjob in cronjobs.items():
             spec = cronjob["spec"]
@@ -596,7 +609,9 @@ class RenderedSecurityContractTests(unittest.TestCase):
             self.assertEqual(spec["concurrencyPolicy"], "Forbid", name)
             self.assertEqual(spec["jobTemplate"]["spec"]["backoffLimit"], 0, name)
             self.assertEqual(
-                spec["jobTemplate"]["spec"]["activeDeadlineSeconds"], 3600, name
+                spec["jobTemplate"]["spec"]["activeDeadlineSeconds"],
+                expected_deadlines[name],
+                name,
             )
             self.assertIn("startingDeadlineSeconds", spec, name)
             pod = spec["jobTemplate"]["spec"]["template"]["spec"]
@@ -606,6 +621,7 @@ class RenderedSecurityContractTests(unittest.TestCase):
                 pod["securityContext"]["seccompProfile"], {"type": "RuntimeDefault"}
             )
             container = pod["containers"][0]
+            self.assertEqual(container["args"], expected_commands[name], name)
             images.add(container["image"])
             env = {item["name"]: item for item in container["env"]}
             self.assertEqual(env["GMAIL_IMPORT_ARMED"]["value"], "false", name)
@@ -1050,13 +1066,15 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
 
 
 class DocumentationContractTests(unittest.TestCase):
-    def test_m3_import_trust_boundary_is_explicit_and_fail_closed(self) -> None:
+    def test_gmail_import_trust_boundary_is_explicit_and_fail_closed(self) -> None:
         runbook = (ROOT / "docs/gmail-import-operations.md").read_text(encoding="utf-8")
         for contract in (
             "PENDING_REVIEW",
             "technische Gmail-IDs",
-            "keinen** Gmail-History-Sync",
-            "keine** fachliche Manifest-Mutation",
+            "Gmail `history.list`",
+            "dormant",
+            "keine API-, Service- oder Domain-Mutationsfläche",
+            "full_required",
             "https://www.googleapis.com/auth/gmail.readonly",
             "oauth2.googleapis.com:443",
             "gmail.googleapis.com:443",

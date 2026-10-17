@@ -1,16 +1,18 @@
-# Gmail-FULL-Evidence: Trust Boundary und Betrieb
+# Gmail-Evidence-Import: Trust Boundary und Betrieb
 
-## Gelieferter M3-Scope
+## Gelieferter Evidence-Scope
 
-M3 liefert ausschließlich einen read-only FULL-Evidence-Unterbau. Der einzige operative Befehl ist:
+Der read-only Collector besitzt drei strikt getrennte Befehle:
 
 ```text
-python -m app.ingestion.gmail full
+python -m app.ingestion.gmail full       # verbrauchter Exactly-once-Pilotpfad
+python -m app.ingestion.gmail bootstrap  # einmaliger operativer Baseline-Scan
+python -m app.ingestion.gmail delta      # wiederkehrender Gmail-History-Lauf
 ```
 
 Der Collector listet die vollständige Ergebnismenge mit unveränderter effektiver `GMAIL_IMPORT_QUERY`, lädt jede Nachricht über `messages.get(format=metadata)` und persistiert ausschließlich technische Gmail-IDs sowie `historyId`, `internalDate` und `labelIds`. Body, Header, Betreff, Teilnehmer und Anhänge werden weder angefordert noch protokolliert. Source Records, revisionsgenaue Metadaten-Hashes, Observations, der bereits durable beanspruchte FULL-Run, `PENDING_REVIEW`-Threadkandidaten und Checkpoint plus Query-Hash werden in einer Transaktion geschrieben. Ein Fehler verwirft den gesamten Lauf.
 
-Dieser Meilenstein liefert **keinen** Gmail-History-Sync und **keine** fachliche Manifest-Mutation. Delta-Collection, Planning, Dry-run und Apply sind spätere, separat zu entwerfende Meilensteine. Es gibt dafür in M3 weder CLI/API/Service-Symbole noch Jobs oder Kustomize-Ressourcen. FULL mutiert niemals `Coop`, Organisationen, Kontakte oder fachliche Audit-Events.
+Der operative Bootstrap- und Delta-Pfad existiert zunächst **dormant**. Er mutiert wie FULL niemals `Coop`, Organisationen, Kontakte oder fachliche Audit-Events. Planning, Dry-run und Apply bleiben nicht verfügbar; es gibt weiterhin keine API-, Service- oder Domain-Mutationsfläche.
 
 ## OAuth- und Account-Gates
 
@@ -26,7 +28,17 @@ Die sichere Default-Query ist:
 in:anywhere -in:chats after:2026/01/01 {label:Legal to:legal@tsh-social.com from:legal@tsh-social.com}
 ```
 
-Sie liegt nicht im Secret, sondern als `GMAIL_IMPORT_QUERY` in der CronJob-Konfiguration. Jede `messages.list`-Seite erhält exakt dieselbe effektive Query. FULL liest vor dem paginierten Scan `historyId=H0` und nach dem Scan `H1`. Bei vollständigem Erfolg werden H0 und der kanonische Hash der effektiven Query atomar mit dem erfolgreichen Run gebunden. Diese Bindung ist lediglich eine sichere Grundlage für einen späteren Delta-Entwurf und behauptet keine gelieferte Delta-Funktion.
+Sie liegt nicht im Secret, sondern als `GMAIL_IMPORT_QUERY` in der CronJob-Konfiguration. Jede `messages.list`-Seite erhält exakt dieselbe effektive Query. FULL beziehungsweise Bootstrap liest vor dem paginierten Scan `historyId=H0` und nach dem Scan `H1`. Bei vollständigem Erfolg werden H0 und der kanonische Hash der effektiven Query atomar mit dem erfolgreichen Run gebunden.
+
+### Operativer Bootstrap und Delta
+
+`bootstrap` ist vom Pilotpfad getrennt. Er verwendet weder dessen deterministische Run-ID noch den immutable Consumed-Marker und verändert den historischen Claim nicht. Unter demselben PostgreSQL-Advisory-Lock verlangt er eine aktivierte Source und das vollständige Fehlen eines Checkpoints. Der query-beschränkte FULL-Scan und der Evidence-Commit erfolgen in einer Transaktion; ein vorhandener Checkpoint blockiert mit `bootstrap_consumed`.
+
+`delta` verlangt einen vorhandenen Checkpoint, exakt passenden Query-Hash und `snapshot.start_history_id == checkpoint_value`. Gmail `history.list` wird ab diesem Cursor vollständig paginiert; `messages`, `messagesAdded`, `messagesDeleted`, `labelsAdded` und `labelsRemoved` werden dedupliziert. Anschließend wird die unveränderte fachliche Query erneut über `messages.list(q=...)` ausgewertet. Nur die Schnittmenge aus History-Änderungen und aktuell query-passenden IDs wird mit `messages.get(format=metadata)` geladen. Abwesenheit oder Label-Entfernung erzeugt keine Löschung und keine fachliche Mutation.
+
+Erst Evidence, Observations, Review-Kandidaten, erfolgreicher Run und der terminale Gmail-`historyId` werden atomar committet. Provider-, Parse-, Query- oder DB-Fehler lassen den Checkpoint unverändert und erzeugen höchstens einen separaten terminalen `FAILED`-Run mit allowlist-basiertem Fehlercode. Ein von Gmail verworfener Cursor (`404`) wird ausschließlich als `full_required` behandelt: Delta bleibt suspendiert, und ein neuer Baseline-Plan benötigt eine eigene Review- und Aktivierungsfreigabe.
+
+Operative Runs sind wiederholbare GET-only Läufe. Sie halten den Advisory Lock während Providerzugriff und Commit und werden erst atomar als `SUCCEEDED` sichtbar; dadurch koexistieren sie mit dem unveränderten historischen `RUNNING`-Pilotclaim, ohne dessen Exactly-once-Vertrag oder den Unique-Index aufzuweichen.
 
 Der `IngestionSource.enabled` Kill-Switch wird unter einem PostgreSQL-Transaction-Advisory-Lock geprüft. Die Migration provisioniert `gmail-open-coops-v1` einmalig mit `enabled=false`; eine fehlende Source wird niemals implizit angelegt und ist ebenso blockierend. Aktivierung und erneute Deaktivierung sind separate, read-back-verifizierte Adminvorgänge. Identische Source-Revisionen und `PENDING_REVIEW`-Kandidaten werden durch Constraints beziehungsweise Hashvergleiche dedupliziert.
 

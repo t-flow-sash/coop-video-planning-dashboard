@@ -58,8 +58,10 @@ fail_closed() {
     -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
   kubectl -n "$NAMESPACE" patch cronjob coop-seed --type=merge \
     -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
-  kubectl -n "$NAMESPACE" patch cronjob gmail-import-full --type=merge \
-    -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
+  for cronjob in gmail-import-full gmail-import-bootstrap gmail-import-delta; do
+    kubectl -n "$NAMESPACE" patch cronjob "$cronjob" --type=merge \
+      -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
+  done
   kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas=0 >/dev/null 2>&1 || true
 }
 
@@ -118,8 +120,8 @@ for resource in "${suspend_order[@]}"; do
 done
 # CronJobs remain live objects after their owning Flux Kustomization is
 # suspended. Close every schedule race explicitly before the first writer
-# query; seed and the Gmail FULL collector are never resumed here.
-for cronjob in postgres-backup coop-seed gmail-import-full; do
+# query; seed and every Gmail collector are never resumed here.
+for cronjob in postgres-backup coop-seed gmail-import-full gmail-import-bootstrap gmail-import-delta; do
   kubectl -n "$NAMESPACE" patch cronjob "$cronjob" --type=merge \
     -p '{"spec":{"suspend":true}}' >/dev/null
   [[ "$(kubectl -n "$NAMESPACE" get cronjob "$cronjob" -o jsonpath='{.spec.suspend}')" == true ]] || {

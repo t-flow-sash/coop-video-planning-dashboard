@@ -53,14 +53,24 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 MESSAGE_FIELDS = "id,threadId,historyId,internalDate,labelIds"
+HISTORY_FIELDS = (
+    "history(id,messages/id,messagesAdded/message/id,messagesDeleted/message/id,"
+    "labelsAdded/message/id,labelsRemoved/message/id),nextPageToken,historyId"
+)
 DECIMAL_INTEGER_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
 SANITIZED_ERROR_CODES = frozenset(
     {
         "account_contract_invalid",
         "account_invalid",
         "account_mismatch",
+        "bootstrap_consumed",
         "configuration_missing",
         "execution_not_armed",
+        "full_required",
+        "history_list_failed",
+        "history_response_invalid",
+        "history_unavailable",
+        "checkpoint_mismatch",
         "import_busy",
         "import_disabled",
         "message_fetch_failed",
@@ -273,6 +283,13 @@ class FullSnapshot:
 
 
 @dataclass(frozen=True)
+class DeltaSnapshot:
+    start_history_id: str
+    end_history_id: str
+    messages: tuple[MessageEvidence, ...]
+
+
+@dataclass(frozen=True)
 class GmailRunReport:
     status: str
     pending_review: int
@@ -410,6 +427,91 @@ class GmailClient:
         if end_email.casefold() != self._config.account.casefold():
             raise GmailAuthError("account_mismatch")
         return FullSnapshot(authorized.history_id, end_history_id, evidence)
+
+    @classmethod
+    def _history_message_ids(cls, payload: dict[str, Any]) -> set[str]:
+        history = payload.get("history", [])
+        if not isinstance(history, list):
+            raise GmailHttpError("history_response_invalid")
+        message_ids: set[str] = set()
+        for entry in history:
+            if not isinstance(entry, dict):
+                raise GmailHttpError("history_response_invalid")
+            cls._required_decimal(entry, "id", "history_response_invalid")
+            direct_messages = entry.get("messages", [])
+            if not isinstance(direct_messages, list):
+                raise GmailHttpError("history_response_invalid")
+            for message in direct_messages:
+                if not isinstance(message, dict):
+                    raise GmailHttpError("history_response_invalid")
+                message_ids.add(cls._required_text(message, "id", "history_response_invalid"))
+            for event_key in (
+                "messagesAdded",
+                "messagesDeleted",
+                "labelsAdded",
+                "labelsRemoved",
+            ):
+                events = entry.get(event_key, [])
+                if not isinstance(events, list):
+                    raise GmailHttpError("history_response_invalid")
+                for event in events:
+                    if not isinstance(event, dict) or not isinstance(event.get("message"), dict):
+                        raise GmailHttpError("history_response_invalid")
+                    message_ids.add(
+                        cls._required_text(
+                            event["message"], "id", "history_response_invalid"
+                        )
+                    )
+        return message_ids
+
+    def delta_snapshot(self, start_history_id: str, query: str) -> DeltaSnapshot:
+        if DECIMAL_INTEGER_PATTERN.fullmatch(start_history_id) is None:
+            raise GmailHttpError("history_response_invalid")
+        authorized = self.authorize()
+        changed_message_ids: set[str] = set()
+        page_token: str | None = None
+        seen_page_tokens: set[str] = set()
+        end_history_id = start_history_id
+        while True:
+            params = {
+                "startHistoryId": start_history_id,
+                "maxResults": "500",
+                "fields": HISTORY_FIELDS,
+            }
+            if page_token is not None:
+                params["pageToken"] = page_token
+            status, payload = self._get("history", params, authorized.access_token)
+            if status == 404:
+                raise GmailHttpError("full_required")
+            if status == 429 or status >= 500:
+                raise GmailHttpError("history_unavailable")
+            if status != 200:
+                raise GmailHttpError("history_list_failed")
+            changed_message_ids.update(self._history_message_ids(payload))
+            end_history_id = self._required_decimal(
+                payload, "historyId", "history_response_invalid"
+            )
+            raw_next = payload.get("nextPageToken")
+            if raw_next is None:
+                break
+            if (
+                not isinstance(raw_next, str)
+                or not raw_next.strip()
+                or raw_next in seen_page_tokens
+            ):
+                raise GmailHttpError("history_response_invalid")
+            seen_page_tokens.add(raw_next)
+            page_token = raw_next
+        matching_ids = (
+            self._query_message_ids(query, authorized.access_token)
+            if changed_message_ids
+            else set()
+        )
+        evidence = tuple(
+            self._message(message_id, authorized.access_token)
+            for message_id in sorted(changed_message_ids & matching_ids)
+        )
+        return DeltaSnapshot(start_history_id, end_history_id, evidence)
 
     def _query_message_ids(self, query: str, token: str) -> set[str]:
         message_ids: set[str] = set()
@@ -632,7 +734,10 @@ def persist_full_snapshot(
         acquire_import_lock(session)
         source = _source(session)
     if run is None:
-        run = IngestionRun(source_id=source.id, mode="FULL", status="RUNNING", summary={})
+        # Operational runs are built inside one transaction under the shared
+        # advisory lock. They become visible only at commit, already terminal.
+        # The separately supplied RUNNING run is reserved for the one-shot pilot.
+        run = IngestionRun(source_id=source.id, mode="FULL", status="SUCCEEDED", summary={})
         session.add(run)
         session.flush()
     elif run.source_id != source.id or run.status != "RUNNING":
@@ -693,6 +798,97 @@ def persist_full_snapshot(
     return GmailRunReport("SUCCEEDED", pending)
 
 
+def persist_delta_snapshot(
+    session: Session,
+    snapshot: DeltaSnapshot,
+    *,
+    query: str,
+    source: IngestionSource | None = None,
+) -> GmailRunReport:
+    if (
+        not isinstance(query, str)
+        or not query.strip()
+        or not isinstance(snapshot.start_history_id, str)
+        or DECIMAL_INTEGER_PATTERN.fullmatch(snapshot.start_history_id) is None
+        or not isinstance(snapshot.end_history_id, str)
+        or DECIMAL_INTEGER_PATTERN.fullmatch(snapshot.end_history_id) is None
+    ):
+        raise GmailHttpError("snapshot_invalid")
+    seen_message_ids: set[str] = set()
+    for message in snapshot.messages:
+        if (
+            not isinstance(message, MessageEvidence)
+            or not isinstance(message.message_id, str)
+            or not message.message_id.strip()
+            or not isinstance(message.thread_id, str)
+            or not message.thread_id.strip()
+            or not isinstance(message.history_id, str)
+            or DECIMAL_INTEGER_PATTERN.fullmatch(message.history_id) is None
+            or not isinstance(message.internal_date, str)
+            or DECIMAL_INTEGER_PATTERN.fullmatch(message.internal_date) is None
+            or not isinstance(message.label_ids, tuple)
+            or any(not isinstance(label, str) or not label.strip() for label in message.label_ids)
+            or message.message_id in seen_message_ids
+        ):
+            raise GmailHttpError("snapshot_invalid")
+        seen_message_ids.add(message.message_id)
+    if source is None:
+        acquire_import_lock(session)
+        source = _source(session)
+    query_hash = canonical_hash(query.strip())
+    checkpoint = session.get(IngestionCheckpoint, (source.id, "gmail_history_id"))
+    if checkpoint is None:
+        raise GmailHttpError("full_required")
+    if checkpoint.query_hash != query_hash:
+        raise GmailConfigError("query_contract_invalid")
+    if checkpoint.checkpoint_value != snapshot.start_history_id:
+        raise GmailHttpError("checkpoint_mismatch")
+    run = IngestionRun(source_id=source.id, mode="DELTA", status="SUCCEEDED", summary={})
+    session.add(run)
+    session.flush()
+    by_thread: dict[str, list[MessageEvidence]] = defaultdict(list)
+    for message in snapshot.messages:
+        by_thread[message.thread_id].append(message)
+        revision = _record(session, source, "GMAIL_MESSAGE", message.message_id, message.metadata())
+        session.add(
+            SourceRecordObservation(
+                source_id=source.id,
+                run_id=run.id,
+                source_record_revision_id=revision.id,
+            )
+        )
+    pending = 0
+    for thread_id, messages in sorted(by_thread.items()):
+        metadata = {
+            "evidence_only": True,
+            "message_ids": sorted({message.message_id for message in messages}),
+            "thread_id": thread_id,
+        }
+        revision = _record(session, source, "GMAIL_THREAD", thread_id, metadata)
+        session.add(
+            SourceRecordObservation(
+                source_id=source.id,
+                run_id=run.id,
+                source_record_revision_id=revision.id,
+            )
+        )
+        pending += _pending_item(session, source, run, thread_id, metadata)
+    run.status = "SUCCEEDED"
+    run.finished_at = datetime.now(UTC)
+    run.summary = {
+        "end_history_id": snapshot.end_history_id,
+        "messages": len(snapshot.messages),
+        "pending_review": pending,
+        "start_history_id": snapshot.start_history_id,
+        "threads": len(by_thread),
+    }
+    checkpoint.checkpoint_value = snapshot.end_history_id
+    checkpoint.succeeded_run_id = run.id
+    checkpoint.updated_at = datetime.now(UTC)
+    session.flush()
+    return GmailRunReport("SUCCEEDED", pending)
+
+
 def _print(value: dict[str, Any]) -> None:
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
@@ -709,10 +905,81 @@ def sanitized_error_code(error: Exception) -> str:
     return "unexpected_error"
 
 
+def _operational_report(command: str, client: GmailClient, query: str) -> GmailRunReport:
+    with SessionLocal.begin() as session:
+        attest_collector_database(session)
+        acquire_import_lock(session)
+        source = _source(session)
+        checkpoint = session.get(IngestionCheckpoint, (source.id, "gmail_history_id"))
+        query_hash = canonical_hash(query.strip())
+        if command == "bootstrap":
+            if checkpoint is not None:
+                raise GmailConfigError("bootstrap_consumed")
+            full_snapshot = client.full_snapshot(query)
+            return persist_full_snapshot(session, full_snapshot, query=query, source=source)
+        if checkpoint is None:
+            raise GmailHttpError("full_required")
+        if checkpoint.query_hash != query_hash:
+            raise GmailConfigError("query_contract_invalid")
+        delta_snapshot = client.delta_snapshot(checkpoint.checkpoint_value, query)
+        return persist_delta_snapshot(session, delta_snapshot, query=query, source=source)
+
+
+def record_operational_failure(mode: str, error_code: str) -> bool:
+    sanitized_code = error_code if error_code in SANITIZED_ERROR_CODES else "unexpected_error"
+    try:
+        with SessionLocal.begin() as session:
+            attest_collector_database(session)
+            source = session.scalar(
+                select(IngestionSource).where(IngestionSource.source_key == SOURCE_KEY)
+            )
+            if source is None:
+                return False
+            now = datetime.now(UTC)
+            session.add(
+                IngestionRun(
+                    source_id=source.id,
+                    mode=mode,
+                    status="FAILED",
+                    summary={"operation": mode.casefold()},
+                    error_code=sanitized_code,
+                    finished_at=now,
+                )
+            )
+        return True
+    except Exception:
+        return False
+
+
+def _main_operational(command: str) -> int:
+    mode = "FULL" if command == "bootstrap" else "DELTA"
+    try:
+        query = execution_query_from_env()
+        client = GmailClient(GmailConfig.from_env())
+        report = _operational_report(command, client, query)
+    except Exception as error:
+        error_code = sanitized_error_code(error)
+        run_status = "FAILED" if record_operational_failure(mode, error_code) else "UNKNOWN"
+        _print(
+            {
+                "error": "gmail_import_failed",
+                "error_code": error_code,
+                "ok": False,
+                "run_status": run_status,
+                "status": "FAILED",
+            }
+        )
+        return 1
+    _print({"ok": True, "pending_review": report.pending_review, "status": report.status})
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.ingestion.gmail")
-    parser.add_argument("command", choices=("full",))
-    parser.parse_args(argv)
+    parser.add_argument("command", choices=("full", "bootstrap", "delta"))
+    arguments = parser.parse_args(argv)
+    if arguments.command != "full":
+        return _main_operational(arguments.command)
     run_id: uuid.UUID | None = None
     try:
         query = execution_query_from_env()

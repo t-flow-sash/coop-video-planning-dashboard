@@ -24,6 +24,7 @@ promotion_targets=(
   infrastructure/migration/kustomization.yaml
   infrastructure/import/kustomization.yaml
   infrastructure/import/gmail-import-cronjobs.yaml
+  infrastructure/import/gmail-recurring-cronjobs.yaml
   infrastructure/import/gmail-full-pilot-admission.yaml
   infrastructure/migration/migration-job.yaml
 )
@@ -92,16 +93,22 @@ update_image("infrastructure/apps/kustomization.yaml", "127.0.0.1:5000/coop-web"
 update_image("infrastructure/migration/kustomization.yaml", "127.0.0.1:5000/coop-api", api_digest)
 update_image("infrastructure/import/kustomization.yaml", "127.0.0.1:5000/coop-api", api_digest)
 
-cronjob = Path("infrastructure/import/gmail-import-cronjobs.yaml")
-text = cronjob.read_text()
-updated, count = re.subn(
-    r'(?m)^(    coop\.example\.com/image-source-revision: ")[0-9a-f]{40}("$)',
-    rf"\g<1>{git_sha}\g<2>",
-    text,
-)
-if count != 1:
-    raise SystemExit(f"expected exactly one Gmail image source revision, got {count}")
-cronjob.write_text(updated)
+for path, expected_count in (
+    ("infrastructure/import/gmail-import-cronjobs.yaml", 1),
+    ("infrastructure/import/gmail-recurring-cronjobs.yaml", 2),
+):
+    cronjob = Path(path)
+    text = cronjob.read_text()
+    updated, count = re.subn(
+        r'(?m)^(    coop\.example\.com/image-source-revision: ")[0-9a-f]{40}("$)',
+        rf"\g<1>{git_sha}\g<2>",
+        text,
+    )
+    if count != expected_count:
+        raise SystemExit(
+            f"expected {expected_count} Gmail image source revisions in {path}, got {count}"
+        )
+    cronjob.write_text(updated)
 
 admission = Path("infrastructure/import/gmail-full-pilot-admission.yaml")
 text = admission.read_text()

@@ -181,7 +181,7 @@ class IngestionSource(Base):
 class IngestionRun(Base):
     __tablename__ = "ingestion_run"
     __table_args__ = (
-        CheckConstraint("mode = 'FULL'", name="ck_ingestion_run_mode"),
+        CheckConstraint("mode IN ('FULL','DELTA')", name="ck_ingestion_run_mode"),
         CheckConstraint(
             "status IN ('RUNNING','SUCCEEDED','FAILED')", name="ck_ingestion_run_status"
         ),
