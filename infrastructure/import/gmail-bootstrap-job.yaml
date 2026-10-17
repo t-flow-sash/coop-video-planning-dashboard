@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gmail-import-bootstrap-000000000000
+  annotations:
+    coop.example.com/image-source-revision: "5c31a21e79e2481826d7f33a4d70903f65d40c96"
+  labels: &labels
+    app.kubernetes.io/name: gmail-import-bootstrap-once
+    app.kubernetes.io/part-of: coop-video-planning
+    coop.example.com/gmail-import: "true"
+    coop.example.com/postgres-client: "true"
+spec:
+  backoffLimit: 0
+  parallelism: 1
+  completions: 1
+  activeDeadlineSeconds: 3600
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      restartPolicy: Never
+      serviceAccountName: gmail-full-pilot-runtime
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: gmail-import
+          image: 127.0.0.1:5000/coop-api:git-000000000000@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "app.ingestion.gmail"]
+          args: ["bootstrap"]
+          env:
+            - {name: HTTPS_PROXY, value: "http://gmail-egress-proxy:10000"}
+            - {name: HTTP_PROXY, value: "http://gmail-egress-proxy:10000"}
+            - {name: NO_PROXY, value: "postgres,postgres.coop-prod.svc,gmail-egress-proxy,127.0.0.1,localhost"}
+            - {name: GMAIL_IMPORT_ARMED, value: "true"}
+            - name: GMAIL_IMPORT_QUERY
+              value: "in:anywhere -in:chats after:2026/01/01 {label:Legal to:legal@tsh-social.com from:legal@tsh-social.com}"
+            - {name: GMAIL_IMPORT_QUERY_SHA256, value: "e362825c8b3be3c500d6da685c7e0b2043641fa2136fd801acf57395154f967d"}
+            - {name: GMAIL_ACCOUNT_SHA256, value: "d260486537baa3f006b0e0e3168df3ba58b784b56f0846e150690af7457b14bb"}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: gmail-collector-db, key: COLLECTOR_DATABASE_URL}
+            - name: GMAIL_CLIENT_ID
+              valueFrom:
+                secretKeyRef: {name: gmail-oauth, key: GMAIL_CLIENT_ID}
+            - name: GMAIL_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: {name: gmail-oauth, key: GMAIL_CLIENT_SECRET}
+            - name: GMAIL_REFRESH_TOKEN
+              valueFrom:
+                secretKeyRef: {name: gmail-oauth, key: GMAIL_REFRESH_TOKEN}
+            - name: GMAIL_ACCOUNT
+              valueFrom:
+                secretKeyRef: {name: gmail-oauth, key: GMAIL_ACCOUNT}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}

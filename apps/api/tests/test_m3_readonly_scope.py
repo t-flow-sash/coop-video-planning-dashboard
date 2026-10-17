@@ -12,6 +12,7 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 ALLOWED_INGESTION_MODULES = {"__init__.py", "gmail.py"}
 ALLOWED_IMPORT_RESOURCES = {
+    "gmail-bootstrap-job.yaml",
     "gmail-collector-db.secret.sops.yaml",
     "gmail-egress-proxy.yaml",
     "gmail-full-pilot-admission.yaml",
@@ -275,7 +276,13 @@ def readonly_scope_violations(root: Path) -> list[str]:
             if kind not in {"Job", "CronJob"} or INGESTION_CONTEXT.search(document) is None:
                 continue
             workload = (path.relative_to(root).as_posix(), kind, _metadata_name(document))
-            if workload not in allowed_gmail_workloads:
+            operational_bootstrap = (
+                workload[0] == "infrastructure/import/gmail-bootstrap-job.yaml"
+                and kind == "Job"
+                and workload[2] is not None
+                and re.fullmatch(r"gmail-import-bootstrap-[0-9a-f]{12}", workload[2])
+            )
+            if workload not in allowed_gmail_workloads and not operational_bootstrap:
                 violations.append(f"unexpected repository Gmail/import workload: {workload}")
     return violations
 

@@ -24,6 +24,7 @@ promotion_targets=(
   infrastructure/apps/kustomization.yaml
   infrastructure/migration/kustomization.yaml
   infrastructure/import/kustomization.yaml
+  infrastructure/import/gmail-bootstrap-job.yaml
   infrastructure/import/gmail-import-cronjobs.yaml
   infrastructure/import/gmail-recurring-cronjobs.yaml
   infrastructure/import/gmail-full-pilot-admission.yaml
@@ -128,6 +129,7 @@ update_image("infrastructure/migration/kustomization.yaml", "127.0.0.1:5000/coop
 update_image("infrastructure/import/kustomization.yaml", "127.0.0.1:5000/coop-api", api_digest)
 
 for path, expected_count in (
+    ("infrastructure/import/gmail-bootstrap-job.yaml", 1),
     ("infrastructure/import/gmail-import-cronjobs.yaml", 1),
     ("infrastructure/import/gmail-recurring-cronjobs.yaml", 2),
 ):
@@ -163,6 +165,17 @@ if image_count != 1 or revision_count != 1:
         f"got image={image_count}, revision={revision_count}"
     )
 admission.write_text(updated)
+
+bootstrap = staged("infrastructure/import/gmail-bootstrap-job.yaml")
+text = bootstrap.read_text()
+updated, count = re.subn(
+    r"(?m)^  name: gmail-import-bootstrap-[0-9a-f]{12}$",
+    f"  name: gmail-import-bootstrap-{short_sha}",
+    text,
+)
+if count != 1:
+    raise SystemExit(f"expected exactly one operational bootstrap release name, got {count}")
+bootstrap.write_text(updated)
 
 job = staged("infrastructure/migration/migration-job.yaml")
 text = job.read_text()
