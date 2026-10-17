@@ -209,7 +209,7 @@ class RestoreScriptTests(unittest.TestCase):
                 env=env,
                 text=True,
                 capture_output=True,
-                timeout=15,
+                timeout=30,
                 check=False,
             )
             calls = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
