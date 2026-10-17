@@ -130,6 +130,32 @@ for cronjob in postgres-backup coop-seed gmail-import-full gmail-import-bootstra
   }
 done
 
+verify_delta_quarantine() {
+  local delta_json
+  delta_json="$(kubectl -n "$NAMESPACE" get cronjob gmail-import-delta -o json)"
+  python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+annotations = obj.get("metadata", {}).get("annotations") or {}
+valid = (
+    obj.get("spec", {}).get("suspend") is True
+    and annotations.get("kustomize.toolkit.fluxcd.io/reconcile") == "disabled"
+)
+raise SystemExit(0 if valid else 1)
+' <<<"$delta_json"
+}
+
+# The reviewed desired state normally keeps Delta active. During restore the
+# live CronJob must remain suspended while coop-import is reconciled. Flux's
+# resource-level quarantine prevents both apply and prune until a separately
+# reviewed post-restore recovery removes this annotation.
+kubectl -n "$NAMESPACE" patch cronjob gmail-import-delta --type=merge \
+  -p '{"metadata":{"annotations":{"kustomize.toolkit.fluxcd.io/reconcile":"disabled"}},"spec":{"suspend":true}}' >/dev/null
+verify_delta_quarantine || {
+  echo "Failed to establish Flux quarantine for cronjob/gmail-import-delta." >&2
+  exit 5
+}
+
 assert_no_active_writers() {
   local jobs_json dangerous_jobs
   if ! jobs_json="$(kubectl -n "$NAMESPACE" get jobs \
@@ -298,5 +324,9 @@ else
 fi
 kubectl -n "$NAMESPACE" patch cronjob postgres-backup --type=merge \
   -p "{\"spec\":{\"suspend\":${cron_suspend}}}" >/dev/null
+verify_delta_quarantine || {
+  echo "Flux quarantine for cronjob/gmail-import-delta did not survive reconciliation." >&2
+  exit 5
+}
 restore_succeeded=true
 echo "Restore completed from ${DUMP}; API replicas restored to ${replicas}."

@@ -62,6 +62,7 @@ class RestoreScriptTests(unittest.TestCase):
                 json.dumps(
                     {
                         "suspended": suspended,
+                        "annotations": {},
                         "replicas": 2,
                         "generation": {item: 1 for item in self.flux_objects},
                         "observed_generation": {item: 1 for item in self.flux_objects},
@@ -102,11 +103,15 @@ class RestoreScriptTests(unittest.TestCase):
                         resource = f"{kind}/{name}"
                         if "-o" in args and args[args.index("-o") + 1] == "json":
                             print(json.dumps({
-                                "metadata": {"generation": state["generation"][resource]},
+                                "metadata": {
+                                    "generation": state["generation"].get(resource, 1),
+                                    "annotations": state["annotations"].get(resource, {}),
+                                },
+                                "spec": {"suspend": state["suspended"][resource]},
                                 "status": {
-                                    "observedGeneration": state["observed_generation"][resource],
-                                    "lastHandledReconcileAt": state["last_handled"][resource],
-                                    "conditions": [{"type": "Ready", "status": "True" if state["ready"][resource] else "False"}],
+                                    "observedGeneration": state["observed_generation"].get(resource, 1),
+                                    "lastHandledReconcileAt": state["last_handled"].get(resource, ""),
+                                    "conditions": [{"type": "Ready", "status": "True" if state["ready"].get(resource, True) else "False"}],
                                 },
                             }))
                         else:
@@ -121,10 +126,16 @@ class RestoreScriptTests(unittest.TestCase):
                         name = args[args.index(kind) + 1]
                         resource = f"{kind}/{name}"
                         payload = args[args.index("-p") + 1]
-                        new_suspend = json.loads(payload)["spec"]["suspend"]
-                        if kind != "cronjob" and state["suspended"][resource] != new_suspend:
-                            state["generation"][resource] += 1
-                        state["suspended"][resource] = new_suspend
+                        patch = json.loads(payload)
+                        new_suspend = state["suspended"][resource]
+                        if "suspend" in patch.get("spec", {}):
+                            new_suspend = patch["spec"]["suspend"]
+                            if kind != "cronjob" and state["suspended"][resource] != new_suspend:
+                                state["generation"][resource] += 1
+                            state["suspended"][resource] = new_suspend
+                        state["annotations"].setdefault(resource, {}).update(
+                            patch.get("metadata", {}).get("annotations", {})
+                        )
                         if (
                             resource == "kustomization/coop-root"
                             and not new_suspend
@@ -304,6 +315,39 @@ class RestoreScriptTests(unittest.TestCase):
                 any(f"patch cronjob {name}" in call and '\"suspend\":false' in call for call in rendered)
             )
             self.assertTrue(state["suspended"][f"cronjob/{name}"])
+
+    def test_success_quarantines_delta_from_flux_before_import_reconcile(self) -> None:
+        result, calls, state = self.run_restore()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = [self.operation(call) for call in calls]
+        quarantine = next(
+            index
+            for index, call in enumerate(rendered)
+            if "patch cronjob gmail-import-delta" in call
+            and "kustomize.toolkit.fluxcd.io/reconcile" in call
+        )
+        verification = next(
+            index
+            for index, call in enumerate(rendered)
+            if index > quarantine and "get cronjob gmail-import-delta -o json" in call
+        )
+        writer_check = next(
+            index for index, call in enumerate(rendered) if " get jobs " in f" {call} "
+        )
+        import_resume = next(
+            index
+            for index, call in enumerate(rendered)
+            if "patch kustomization coop-import" in call and '"suspend":false' in call
+        )
+        self.assertLess(verification, writer_check)
+        self.assertLess(verification, import_resume)
+        self.assertTrue(state["suspended"]["cronjob/gmail-import-delta"])
+        self.assertEqual(
+            state["annotations"]["cronjob/gmail-import-delta"][
+                "kustomize.toolkit.fluxcd.io/reconcile"
+            ],
+            "disabled",
+        )
 
     def test_seed_remains_suspended_on_restore_failure(self) -> None:
         result, _, state = self.run_restore(fail_exec=True)

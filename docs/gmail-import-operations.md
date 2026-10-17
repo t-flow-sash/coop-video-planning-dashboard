@@ -276,5 +276,10 @@ Recovery-Pfad. Ein Alembic-Downgrade des Markers ist nur als separat
 freigegebener, getesteter Datenbankeingriff erlaubt.
 
 Der Restore-Ablauf suspendiert und read-back-verifiziert alle drei
-Gmail-CronJobs unabhängig von deklarativem Soll oder Live-Drift und lässt sie
-nach erfolgreichem Restore suspendiert und unbewaffnet.
+Gmail-CronJobs unabhängig von deklarativem Soll oder Live-Drift. Für den
+deklarativ aktiven Delta-CronJob setzt er zusätzlich
+`kustomize.toolkit.fluxcd.io/reconcile=disabled` und verifiziert die Flux-Quarantäne
+vor dem ersten Writer-Check sowie nach allen Reconciles. Delta bleibt dadurch
+suspendiert; die Quarantäne darf erst in einem separat reviewten Post-Restore-Schritt
+nach DB-, Checkpoint- und Evidence-Attestation entfernt werden. Full und Bootstrap
+bleiben suspendiert und unbewaffnet.
