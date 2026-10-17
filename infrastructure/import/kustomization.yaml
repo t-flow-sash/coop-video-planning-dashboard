@@ -7,7 +7,6 @@ resources:
   - gmail-egress-proxy.yaml
   - gmail-full-pilot-admission.yaml
   - gmail-full-pilot-rbac.yaml
-  - gmail-bootstrap-job.yaml
   - gmail-import-cronjobs.yaml
   - gmail-recurring-cronjobs.yaml
   - network-policy.yaml

@@ -12,7 +12,6 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 ALLOWED_INGESTION_MODULES = {"__init__.py", "gmail.py"}
 ALLOWED_IMPORT_RESOURCES = {
-    "gmail-bootstrap-job.yaml",
     "gmail-collector-db.secret.sops.yaml",
     "gmail-egress-proxy.yaml",
     "gmail-full-pilot-admission.yaml",
@@ -242,21 +241,24 @@ def readonly_scope_violations(root: Path) -> list[str]:
             if kind in {"Job", "CronJob"}:
                 workloads.append((kind, _metadata_name(document), document))
     expected_workloads = {
-        "gmail-import-full": "full",
-        "gmail-import-bootstrap": "bootstrap",
-        "gmail-import-delta": "delta",
+        "gmail-import-full": ("full", True, "false"),
+        "gmail-import-bootstrap": ("bootstrap", True, "false"),
+        "gmail-import-delta": ("delta", False, "true"),
     }
     actual_workloads = {
         name: document for kind, name, document in workloads if kind == "CronJob" and name
     }
     if set(actual_workloads) != set(expected_workloads):
         violations.append(f"import workload inventory differs: {sorted(actual_workloads)}")
-    for name, command in expected_workloads.items():
+    for name, (command, suspended, armed) in expected_workloads.items():
         cronjob = actual_workloads.get(name, "")
-        if re.search(r"(?m)^  suspend:\s*true\s*$", cronjob) is None:
-            violations.append(f"{name} must remain suspended")
+        expected_suspend = str(suspended).lower()
+        if re.search(rf"(?m)^  suspend:\s*{expected_suspend}\s*$", cronjob) is None:
+            violations.append(f"{name} suspend state must be {expected_suspend}")
         if f'args: ["{command}"]' not in cronjob:
             violations.append(f"{name} must expose only the {command} command")
+        if f'{{name: GMAIL_IMPORT_ARMED, value: "{armed}"}}' not in cronjob:
+            violations.append(f"{name} armed state must be {armed}")
 
     allowed_gmail_workloads = {
         ("infrastructure/import/gmail-import-cronjobs.yaml", "CronJob", "gmail-import-full"),
@@ -276,13 +278,7 @@ def readonly_scope_violations(root: Path) -> list[str]:
             if kind not in {"Job", "CronJob"} or INGESTION_CONTEXT.search(document) is None:
                 continue
             workload = (path.relative_to(root).as_posix(), kind, _metadata_name(document))
-            operational_bootstrap = (
-                workload[0] == "infrastructure/import/gmail-bootstrap-job.yaml"
-                and kind == "Job"
-                and workload[2] is not None
-                and re.fullmatch(r"gmail-import-bootstrap-[0-9a-f]{12}", workload[2])
-            )
-            if workload not in allowed_gmail_workloads and not operational_bootstrap:
+            if workload not in allowed_gmail_workloads:
                 violations.append(f"unexpected repository Gmail/import workload: {workload}")
     return violations
 
