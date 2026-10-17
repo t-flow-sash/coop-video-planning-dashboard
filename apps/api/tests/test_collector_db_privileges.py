@@ -250,3 +250,57 @@ def test_collector_role_can_persist_evidence_snapshot(test_engine: Engine) -> No
             session.rollback()
     finally:
         collector_engine.dispose()
+
+
+@pytest.mark.integration
+def test_collector_role_can_terminalize_committed_pilot_failure(test_engine: Engine) -> None:
+    from sqlalchemy.orm import sessionmaker
+
+    from app.ingestion.gmail import (
+        PILOT_RUN_ID,
+        SOURCE_KEY,
+        claim_pilot_slot,
+        mark_claimed_pilot_failed,
+    )
+    from app.models import IngestionSource
+
+    source_id = uuid.uuid4()
+    with test_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ingestion_source (id, source_key, kind, enabled) "
+                "VALUES (:id, :source_key, 'GMAIL', true)"
+            ),
+            {"id": source_id, "source_key": SOURCE_KEY},
+        )
+
+    collector_engine = create_engine(_collector_test_url(test_engine))
+    collector_sessions = sessionmaker(bind=collector_engine, expire_on_commit=False)
+    try:
+        with collector_sessions.begin() as session:
+            source = session.get(IngestionSource, source_id)
+            assert source is not None
+            run_id = claim_pilot_slot(session, source)
+
+        with test_engine.begin() as connection:
+            connection.execute(
+                text("UPDATE ingestion_source SET enabled = false WHERE id = :id"),
+                {"id": source_id},
+            )
+
+        with collector_sessions.begin() as session:
+            mark_claimed_pilot_failed(session, run_id, "transport_unavailable")
+    finally:
+        collector_engine.dispose()
+
+    with test_engine.connect() as connection:
+        run = connection.execute(
+            text(
+                "SELECT status, error_code, finished_at, summary FROM ingestion_run WHERE id = :id"
+            ),
+            {"id": PILOT_RUN_ID},
+        ).one()
+        assert run.status == "FAILED"
+        assert run.error_code == "transport_unavailable"
+        assert run.finished_at is not None
+        assert run.summary == {"pilot_slot": "gmail-full-pilot-v1"}
