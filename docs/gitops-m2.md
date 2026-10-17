@@ -168,7 +168,7 @@ Restore ist destruktiv und benötigt ein Wartungsfenster.
    kubectl -n coop-prod exec statefulset/postgres -- pg_isready
    curl https://192.168.2.94/api/v1/health/ready
    ```
-7. Bei Fehlern bleiben API auf null, Root/Source/Kinder sowie Backup-, Seed- und der Gmail-FULL-CronJob suspendiert. Logs und den automatisch erzeugten Pre-Restore-Dump sichern, Ursache beheben und erst danach Flux bewusst in Abhängigkeitsreihenfolge fortsetzen; nicht blind erneut migrieren.
+7. Bei Fehlern bleiben API auf null, Root/Source/Kinder sowie Backup-, Seed- und alle drei Gmail-CronJobs suspendiert. Logs und den automatisch erzeugten Pre-Restore-Dump sichern, Ursache beheben und erst danach Flux bewusst in Abhängigkeitsreihenfolge fortsetzen; nicht blind erneut migrieren.
 
 ## Retained-PV-Recovery nach Namespaceverlust
 
