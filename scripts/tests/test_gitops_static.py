@@ -1080,6 +1080,8 @@ class DocumentationContractTests(unittest.TestCase):
             "gmail.googleapis.com:443",
             "BLOCKED_REQUIRES_EVIDENCE_ENRICHMENT",
             "GMAIL_IMPORT_ARMED=false",
+            "alle drei",
+            "Gmail-CronJobs",
             "scripts/gmail_full_pilot.py",
             "--yes",
             "entsuspendiert den CronJob nie",

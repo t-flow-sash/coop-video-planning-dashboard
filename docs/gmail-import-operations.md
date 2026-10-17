@@ -273,6 +273,6 @@ würde an einem unbekannten Datenbank-Head scheitern und ist kein zulässiger
 Recovery-Pfad. Ein Alembic-Downgrade des Markers ist nur als separat
 freigegebener, getesteter Datenbankeingriff erlaubt.
 
-Der Restore-Ablauf suspendiert und read-back-verifiziert den FULL-CronJob
-unabhängig von deklarativem Soll oder Live-Drift und lässt ihn nach
-erfolgreichem Restore suspendiert und unbewaffnet.
+Der Restore-Ablauf suspendiert und read-back-verifiziert alle drei
+Gmail-CronJobs unabhängig von deklarativem Soll oder Live-Drift und lässt sie
+nach erfolgreichem Restore suspendiert und unbewaffnet.
