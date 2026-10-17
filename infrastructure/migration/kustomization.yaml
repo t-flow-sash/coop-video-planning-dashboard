@@ -6,5 +6,5 @@ resources:
   - seed-cronjob.yaml
 images:
   - name: 127.0.0.1:5000/coop-api
-    newTag: git-f0399306b774
-    digest: sha256:ddea2e861eb81a017aabf7d3e926179d582a2ff543bb6e9e90abe2afcee59508
+    newTag: git-71cbf84468af
+    digest: sha256:7181f19357b7f0dad6be258e4cea2840a32500bb778505d9cfa205460dbd6b13
