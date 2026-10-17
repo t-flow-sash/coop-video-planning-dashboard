@@ -1297,6 +1297,34 @@ def test_operational_delta_failure_is_terminal_sanitized_and_preserves_checkpoin
 
 
 @pytest.mark.no_db
+@pytest.mark.parametrize("command", ["bootstrap", "delta"])
+def test_operational_commands_stop_before_database_when_unarmed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    touched_database = False
+
+    class ForbiddenSessionLocal:
+        @staticmethod
+        def begin() -> None:
+            nonlocal touched_database
+            touched_database = True
+            raise AssertionError("database must not be touched while unarmed")
+
+    monkeypatch.setenv("GMAIL_IMPORT_ARMED", "false")
+    monkeypatch.setattr(gmail_module, "SessionLocal", ForbiddenSessionLocal)
+
+    assert gmail_module.main([command]) == 1
+    assert touched_database is False
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "gmail_import_failed",
+        "error_code": "execution_not_armed",
+        "ok": False,
+        "run_status": "NOT_STARTED",
+        "status": "FAILED",
+    }
+
+
+@pytest.mark.no_db
 def test_http_errors_never_render_response_or_request_secrets() -> None:
     responses = authorized_responses()
     responses["oauth2.googleapis.com/token"] = [

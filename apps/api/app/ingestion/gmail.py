@@ -956,6 +956,18 @@ def _main_operational(command: str) -> int:
     try:
         query = execution_query_from_env()
         client = GmailClient(GmailConfig.from_env())
+    except Exception as error:
+        _print(
+            {
+                "error": "gmail_import_failed",
+                "error_code": sanitized_error_code(error),
+                "ok": False,
+                "run_status": "NOT_STARTED",
+                "status": "FAILED",
+            }
+        )
+        return 1
+    try:
         report = _operational_report(command, client, query)
     except Exception as error:
         error_code = sanitized_error_code(error)
