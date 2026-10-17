@@ -33,6 +33,23 @@ def _run_alembic(database_url: str, revision: str) -> None:
     )
 
 
+def _downgrade_alembic(database_url: str, revision: str) -> None:
+    environment = {
+        **os.environ,
+        "APP_ENV": "development",
+        "AUTH_MODE": "disabled",
+        "DATABASE_URL": database_url,
+    }
+    subprocess.run(
+        ["uv", "run", "alembic", "downgrade", revision],
+        cwd=API_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 @pytest.mark.isolated_db
 def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
     schema = f"m3_preserve_{uuid.uuid4().hex}"
@@ -118,14 +135,14 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
             ).all()
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("c2d7a91f4e60")
+            ).scalar_one() == ("d7f4b2a96c31")
             source = connection.execute(
                 text(
                     "SELECT source_key, kind, enabled FROM ingestion_source "
                     "WHERE source_key = 'gmail-open-coops-v1'"
                 )
             ).one()
-            assert source == ("gmail-open-coops-v1", "GMAIL", False)
+            assert source == ("gmail-open-coops-v1", "GMAIL", True)
             constraints = set(
                 connection.execute(
                     text(
@@ -145,6 +162,100 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
         assert after == before
         assert audit_after == audit_before
         assert len(after) == 6
+    finally:
+        isolated.dispose()
+        with admin.begin() as connection:
+            assert_safe_test_connection(
+                connection,
+                BASE_DATABASE_URL,
+                "test",
+                expected_server_address=EXPECTED_SERVER_ADDRESS,
+            )
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        admin.dispose()
+
+
+@pytest.mark.isolated_db
+def test_operational_source_activation_downgrade_is_consumption_safe() -> None:
+    schema = f"gmail_activation_{uuid.uuid4().hex}"
+    admin = create_engine(BASE_DATABASE_URL)
+    with admin.begin() as connection:
+        assert_safe_test_connection(
+            connection,
+            BASE_DATABASE_URL,
+            "test",
+            expected_server_address=EXPECTED_SERVER_ADDRESS,
+        )
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    isolated_url = f"{BASE_DATABASE_URL}?options={quote(f'-csearch_path={schema}')}"
+    isolated = create_engine(isolated_url)
+    try:
+        _run_alembic(isolated_url, "c2d7a91f4e60")
+        with isolated.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT enabled FROM ingestion_source "
+                        "WHERE source_key = 'gmail-open-coops-v1'"
+                    )
+                )
+                is False
+            )
+
+        _run_alembic(isolated_url, "head")
+        with isolated.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT enabled FROM ingestion_source "
+                        "WHERE source_key = 'gmail-open-coops-v1'"
+                    )
+                )
+                is True
+            )
+
+        _downgrade_alembic(isolated_url, "c2d7a91f4e60")
+        with isolated.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT enabled FROM ingestion_source "
+                        "WHERE source_key = 'gmail-open-coops-v1'"
+                    )
+                )
+                is False
+            )
+
+        _run_alembic(isolated_url, "head")
+        with isolated.begin() as connection:
+            source_id = connection.scalar(
+                text("SELECT id FROM ingestion_source WHERE source_key = 'gmail-open-coops-v1'")
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO ingestion_run "
+                    "(id, source_id, mode, status, summary, finished_at) "
+                    "VALUES (:id, :source_id, 'FULL', 'SUCCEEDED', "
+                    "'{}'::jsonb, now())"
+                ),
+                {"id": uuid.uuid4(), "source_id": source_id},
+            )
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _downgrade_alembic(isolated_url, "c2d7a91f4e60")
+        with isolated.connect() as connection:
+            assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
+                "d7f4b2a96c31"
+            )
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT enabled FROM ingestion_source "
+                        "WHERE source_key = 'gmail-open-coops-v1'"
+                    )
+                )
+                is True
+            )
     finally:
         isolated.dispose()
         with admin.begin() as connection:

@@ -660,6 +660,49 @@ class RenderedSecurityContractTests(unittest.TestCase):
             image,
         )
 
+    def test_operational_bootstrap_job_is_single_armed_commit_bound_run(self) -> None:
+        objects = self.by_kind_name("infrastructure/import")
+        jobs = {
+            name: item for (kind, name), item in objects.items() if kind == "Job"
+        }
+        self.assertEqual(len(jobs), 1)
+        name, job = next(iter(jobs.items()))
+        self.assertRegex(name, r"^gmail-import-bootstrap-[0-9a-f]{12}$")
+        self.assertNotIn("ownerReferences", job["metadata"])
+        self.assertNotIn("ttlSecondsAfterFinished", job["spec"])
+        self.assertEqual(job["spec"]["backoffLimit"], 0)
+        self.assertEqual(job["spec"]["parallelism"], 1)
+        self.assertEqual(job["spec"]["completions"], 1)
+        self.assertEqual(job["spec"]["activeDeadlineSeconds"], 3600)
+        self.assertNotIn("gmail-import-pilot", job["metadata"].get("labels", {}))
+        pod = job["spec"]["template"]["spec"]
+        self.assertEqual(pod["restartPolicy"], "Never")
+        self.assertFalse(pod["automountServiceAccountToken"])
+        container = pod["containers"][0]
+        self.assertEqual(container["args"], ["bootstrap"])
+        env = {item["name"]: item for item in container["env"]}
+        self.assertEqual(env["GMAIL_IMPORT_ARMED"]["value"], "true")
+        dormant = objects[("CronJob", "gmail-import-bootstrap")]
+        dormant_container = dormant["spec"]["jobTemplate"]["spec"]["template"][
+            "spec"
+        ]["containers"][0]
+        dormant_env = {item["name"]: item for item in dormant_container["env"]}
+        self.assertEqual(container["image"], dormant_container["image"])
+        for key in (
+            "GMAIL_IMPORT_QUERY",
+            "GMAIL_IMPORT_QUERY_SHA256",
+            "GMAIL_ACCOUNT_SHA256",
+        ):
+            self.assertEqual(env[key], dormant_env[key])
+        self.assertEqual(
+            job["metadata"]["annotations"][
+                "coop.example.com/image-source-revision"
+            ],
+            dormant["metadata"]["annotations"][
+                "coop.example.com/image-source-revision"
+            ],
+        )
+
     def test_import_egress_is_only_dns_postgres_and_controlled_proxy(self) -> None:
         objects = self.by_kind_name("infrastructure/import")
         policies = {
@@ -943,6 +986,8 @@ class RenderedSecurityContractTests(unittest.TestCase):
         self.assertIn(
             "infrastructure/import/gmail-full-pilot-admission.yaml", promotion
         )
+        self.assertIn("infrastructure/import/gmail-bootstrap-job.yaml", promotion)
+        self.assertIn("gmail-import-bootstrap-{short_sha}", promotion)
         self.assertIn("pilot_image =", promotion)
         self.assertIn("coop-image-promotion-transaction", promotion)
         self.assertIn("Recovering interrupted image-promotion transaction", promotion)
@@ -1043,8 +1088,8 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         )
         self.assertIn("import app.database_access", workflow)
         self.assertIn("SELECT version_num FROM alembic_version", workflow)
-        self.assertIn('source == ("gmail-open-coops-v1", "GMAIL", False)', workflow)
-        self.assertIn("c2d7a91f4e60", workflow)
+        self.assertIn('source == ("gmail-open-coops-v1", "GMAIL", True)', workflow)
+        self.assertIn("d7f4b2a96c31", workflow)
         self.assertIn("assert len(jobs) == 3", workflow)
 
     def test_global_render_image_gate_rejects_any_unpinned_image(self) -> None:

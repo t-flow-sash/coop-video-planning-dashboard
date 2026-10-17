@@ -40,7 +40,7 @@ Erst Evidence, Observations, Review-Kandidaten, erfolgreicher Run und der termin
 
 Operative Runs sind wiederholbare GET-only Läufe. Sie halten den Advisory Lock während Providerzugriff und Commit und werden erst atomar als `SUCCEEDED` sichtbar; dadurch koexistieren sie mit dem unveränderten historischen `RUNNING`-Pilotclaim, ohne dessen Exactly-once-Vertrag oder den Unique-Index aufzuweichen.
 
-Der `IngestionSource.enabled` Kill-Switch wird unter einem PostgreSQL-Transaction-Advisory-Lock geprüft. Die Migration provisioniert `gmail-open-coops-v1` einmalig mit `enabled=false`; eine fehlende Source wird niemals implizit angelegt und ist ebenso blockierend. Aktivierung und erneute Deaktivierung sind separate, read-back-verifizierte Adminvorgänge. Identische Source-Revisionen und `PENDING_REVIEW`-Kandidaten werden durch Constraints beziehungsweise Hashvergleiche dedupliziert.
+Der `IngestionSource.enabled` Kill-Switch wird unter einem PostgreSQL-Transaction-Advisory-Lock geprüft. Die Basismigration provisioniert `gmail-open-coops-v1` einmalig mit `enabled=false`; die separat reviewte Aktivierungsmigration `d7f4b2a96c31` sperrt und aktiviert ausschließlich diese vorhandene Source. Eine fehlende, mehrdeutige oder bereits aktivierte Source blockiert die Migration. Vor dem ersten erfolgreichen operativen Run ist der Downgrade reversibel; danach blockieren ein erfolgreicher Run oder Checkpoint jede automatische Deaktivierung. Aktivierung und spätere Recovery bleiben getrennte, read-back-verifizierte GitOps-Vorgänge. Identische Source-Revisionen und `PENDING_REVIEW`-Kandidaten werden durch Constraints beziehungsweise Hashvergleiche dedupliziert.
 
 ## PostgreSQL-Isolation
 
