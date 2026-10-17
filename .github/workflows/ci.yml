@@ -172,7 +172,7 @@ jobs:
           import sys, yaml
           docs = [doc for doc in yaml.safe_load_all(open(sys.argv[1])) if doc]
           jobs = [doc for doc in docs if doc.get("kind") == "CronJob"]
-          assert len(jobs) == 1 and all(job["spec"].get("suspend") is True for job in jobs)
+          assert len(jobs) == 3 and all(job["spec"].get("suspend") is True for job in jobs)
           ' "$output"
             fi
             ./kubeconform -strict -summary -skip CustomResourceDefinition \

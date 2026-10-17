@@ -289,9 +289,7 @@ def test_collector_role_can_commit_delta_and_advance_checkpoint(test_engine: Eng
         collector_engine.dispose()
 
     with test_engine.connect() as connection:
-        assert connection.scalar(
-            text("SELECT checkpoint_value FROM ingestion_checkpoint")
-        ) == "110"
+        assert connection.scalar(text("SELECT checkpoint_value FROM ingestion_checkpoint")) == "110"
 
 
 @pytest.mark.integration

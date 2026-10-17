@@ -186,10 +186,7 @@ def _semantic_surface_violations(path: Path, root: Path) -> list[str]:
             continue
         if forbidden_operation and FORBIDDEN_COMMAND.search(line):
             violations.append(f"shipped ingestion mutation command: {path}:{line_number}")
-        elif (
-            AFFIRMATIVE_SHIPPED_CLAIM.search(line)
-            and FUTURE_OR_ABSENT.search(line) is None
-        ):
+        elif AFFIRMATIVE_SHIPPED_CLAIM.search(line) and FUTURE_OR_ABSENT.search(line) is None:
             violations.append(f"affirmative shipped ingestion claim: {path}:{line_number}")
         elif path.suffix in {".ts", ".tsx", ".js", ".jsx"} and re.search(
             r"(?i)\b(?:function|const|let|var|class)\s+[\w$]*(?:apply|mutat|dry.?run|delta)[\w$]*",

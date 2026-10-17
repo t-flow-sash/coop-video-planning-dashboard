@@ -458,9 +458,7 @@ class GmailClient:
                     if not isinstance(event, dict) or not isinstance(event.get("message"), dict):
                         raise GmailHttpError("history_response_invalid")
                     message_ids.add(
-                        cls._required_text(
-                            event["message"], "id", "history_response_invalid"
-                        )
+                        cls._required_text(event["message"], "id", "history_response_invalid")
                     )
         return message_ids
 
@@ -502,6 +500,8 @@ class GmailClient:
                 raise GmailHttpError("history_response_invalid")
             seen_page_tokens.add(raw_next)
             page_token = raw_next
+        if int(end_history_id) < int(start_history_id):
+            raise GmailHttpError("history_response_invalid")
         matching_ids = (
             self._query_message_ids(query, authorized.access_token)
             if changed_message_ids
@@ -812,6 +812,7 @@ def persist_delta_snapshot(
         or DECIMAL_INTEGER_PATTERN.fullmatch(snapshot.start_history_id) is None
         or not isinstance(snapshot.end_history_id, str)
         or DECIMAL_INTEGER_PATTERN.fullmatch(snapshot.end_history_id) is None
+        or int(snapshot.end_history_id) < int(snapshot.start_history_id)
     ):
         raise GmailHttpError("snapshot_invalid")
     seen_message_ids: set[str] = set()

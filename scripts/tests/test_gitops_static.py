@@ -944,6 +944,10 @@ class RenderedSecurityContractTests(unittest.TestCase):
             "infrastructure/import/gmail-full-pilot-admission.yaml", promotion
         )
         self.assertIn("pilot_image =", promotion)
+        self.assertIn("coop-image-promotion-transaction", promotion)
+        self.assertIn("Recovering interrupted image-promotion transaction", promotion)
+        self.assertIn('cp -a -- infrastructure "${transaction_dir}/staged/"', promotion)
+        self.assertIn('staged_dir="${transaction_dir}/staged/${dir}"', promotion)
         self.assertIn(
             "infrastructure/import", promotion[promotion.index("for dir in") :]
         )
@@ -1038,6 +1042,7 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         self.assertIn("SELECT version_num FROM alembic_version", workflow)
         self.assertIn('source == ("gmail-open-coops-v1", "GMAIL", False)', workflow)
         self.assertIn("c2d7a91f4e60", workflow)
+        self.assertIn("assert len(jobs) == 3", workflow)
 
     def test_global_render_image_gate_rejects_any_unpinned_image(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")

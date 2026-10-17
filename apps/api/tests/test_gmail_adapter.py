@@ -423,9 +423,7 @@ def test_delta_snapshot_paginates_all_event_shapes_and_applies_query_boundary() 
         (
             200,
             {
-                "history": [
-                    {"id": "106", "messagesAdded": [{"message": {"id": "m2"}}]}
-                ],
+                "history": [{"id": "106", "messagesAdded": [{"message": {"id": "m2"}}]}],
                 "historyId": "110",
             },
         ),
@@ -470,9 +468,7 @@ def test_delta_snapshot_paginates_all_event_shapes_and_applies_query_boundary() 
     assert "pageToken=p2" in history_urls[1]
     list_urls = [url for method, url, _, _ in transport.calls if "/messages?" in url]
     assert len(list_urls) == 1
-    assert urllib.parse.parse_qs(urllib.parse.urlsplit(list_urls[0]).query)["q"] == [
-        "exact query"
-    ]
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(list_urls[0]).query)["q"] == ["exact query"]
 
 
 @pytest.mark.no_db
@@ -512,6 +508,19 @@ def test_delta_snapshot_rejects_repeated_page_token_before_followup_read() -> No
         GmailClient(config(), transport).delta_snapshot("100", "exact query")
 
     assert len([url for _, url, _, _ in transport.calls if "/history?" in url]) == 2
+    assert not any("users/me/messages" in url for _, url, _, _ in transport.calls)
+
+
+@pytest.mark.no_db
+def test_delta_snapshot_rejects_regressive_terminal_history_id() -> None:
+    responses = authorized_responses()
+    responses["users/me/history?"] = [(200, {"history": [], "historyId": "99"})]
+    responses["users/me/messages?"] = [(200, {"messages": []})]
+    transport = FakeTransport(responses)
+
+    with pytest.raises(GmailHttpError, match=r"^history_response_invalid$"):
+        GmailClient(config(), transport).delta_snapshot("100", "exact query")
+
     assert not any("users/me/messages" in url for _, url, _, _ in transport.calls)
 
 
@@ -1180,12 +1189,38 @@ def test_delta_persistence_advances_to_terminal_history_and_replay_is_idempotent
         assert session.scalar(select(func.count()).select_from(AuditEvent)) == 0
 
 
+def test_delta_persistence_rejects_regressive_checkpoint_without_writes() -> None:
+    with SessionLocal.begin() as session:
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        persist_full_snapshot(
+            session,
+            FullSnapshot("110", "110", ()),
+            query="query",
+            source=source,
+        )
+
+    with (
+        pytest.raises(GmailHttpError, match=r"^snapshot_invalid$"),
+        SessionLocal.begin() as session,
+    ):
+        gmail_module.persist_delta_snapshot(
+            session,
+            DeltaSnapshot("110", "100", ()),
+            query="query",
+        )
+
+    with SessionLocal() as session:
+        checkpoint = session.scalar(select(IngestionCheckpoint))
+        assert checkpoint is not None and checkpoint.checkpoint_value == "110"
+        assert session.scalar(select(func.count()).select_from(IngestionRun)) == 1
+
+
 def test_delta_persistence_requires_matching_existing_checkpoint() -> None:
     snapshot = DeltaSnapshot("100", "101", ())
     with SessionLocal.begin() as session:
-        session.add(
-            IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
-        )
+        session.add(IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True))
 
     with (
         pytest.raises(GmailHttpError, match=r"^full_required$"),
