@@ -253,6 +253,46 @@ def test_collector_role_can_persist_evidence_snapshot(test_engine: Engine) -> No
 
 
 @pytest.mark.integration
+def test_collector_role_can_commit_delta_and_advance_checkpoint(test_engine: Engine) -> None:
+    from sqlalchemy.orm import sessionmaker
+
+    from app.ingestion.gmail import (
+        SOURCE_KEY,
+        DeltaSnapshot,
+        FullSnapshot,
+        persist_delta_snapshot,
+        persist_full_snapshot,
+    )
+
+    with test_engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ingestion_source (id, source_key, kind, enabled) "
+                "VALUES (:id, :source_key, 'GMAIL', true)"
+            ),
+            {"id": uuid.uuid4(), "source_key": SOURCE_KEY},
+        )
+
+    collector_engine = create_engine(_collector_test_url(test_engine))
+    collector_sessions = sessionmaker(bind=collector_engine, expire_on_commit=False)
+    try:
+        with collector_sessions.begin() as session:
+            persist_full_snapshot(session, FullSnapshot("100", "100", ()), query="query")
+        with collector_sessions.begin() as session:
+            report = persist_delta_snapshot(
+                session,
+                DeltaSnapshot("100", "110", ()),
+                query="query",
+            )
+            assert report.status == "SUCCEEDED"
+    finally:
+        collector_engine.dispose()
+
+    with test_engine.connect() as connection:
+        assert connection.scalar(text("SELECT checkpoint_value FROM ingestion_checkpoint")) == "110"
+
+
+@pytest.mark.integration
 def test_collector_role_can_terminalize_committed_pilot_failure(test_engine: Engine) -> None:
     from sqlalchemy.orm import sessionmaker
 

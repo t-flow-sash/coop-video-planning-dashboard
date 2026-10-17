@@ -8,8 +8,9 @@ resources:
   - gmail-full-pilot-admission.yaml
   - gmail-full-pilot-rbac.yaml
   - gmail-import-cronjobs.yaml
+  - gmail-recurring-cronjobs.yaml
   - network-policy.yaml
 images:
   - name: 127.0.0.1:5000/coop-api
-    newTag: git-71cbf84468af
-    digest: sha256:7181f19357b7f0dad6be258e4cea2840a32500bb778505d9cfa205460dbd6b13
+    newTag: git-5c31a21e79e2
+    digest: sha256:4b324380bd9b64de62967086db92a2a787e1071feb1275bc9268170cb296bddc

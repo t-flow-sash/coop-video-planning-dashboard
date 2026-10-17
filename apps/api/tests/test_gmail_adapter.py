@@ -16,6 +16,7 @@ from app.db import SessionLocal
 from app.ingestion import gmail as gmail_module
 from app.ingestion.gmail import (
     GMAIL_READONLY_SCOPE,
+    DeltaSnapshot,
     FullSnapshot,
     GmailAuthError,
     GmailClient,
@@ -396,6 +397,131 @@ def test_full_scan_paginates_deduplicates_and_uses_metadata_fields_only() -> Non
         "fields=id%2CthreadId%2ChistoryId%2CinternalDate%2ClabelIds" in url for url in detail_urls
     )
     assert all("metadataHeaders" not in url for url in detail_urls)
+
+
+@pytest.mark.no_db
+def test_delta_snapshot_paginates_all_event_shapes_and_applies_query_boundary() -> None:
+    responses = authorized_responses()
+    responses["users/me/history?"] = [
+        (
+            200,
+            {
+                "history": [
+                    {
+                        "id": "101",
+                        "messages": [{"id": "m1"}],
+                        "messagesAdded": [{"message": {"id": "m2"}}],
+                        "messagesDeleted": [{"message": {"id": "m3"}}],
+                        "labelsAdded": [{"message": {"id": "m4"}}],
+                        "labelsRemoved": [{"message": {"id": "m5"}}],
+                    }
+                ],
+                "nextPageToken": "p2",
+                "historyId": "105",
+            },
+        ),
+        (
+            200,
+            {
+                "history": [{"id": "106", "messagesAdded": [{"message": {"id": "m2"}}]}],
+                "historyId": "110",
+            },
+        ),
+    ]
+    responses["users/me/messages?"] = [
+        (200, {"messages": [{"id": "m2"}, {"id": "m4"}, {"id": "outside"}]})
+    ]
+    responses["users/me/messages/m2?"] = [
+        (
+            200,
+            {
+                "id": "m2",
+                "threadId": "t2",
+                "historyId": "106",
+                "internalDate": "2",
+                "labelIds": ["Legal"],
+            },
+        )
+    ]
+    responses["users/me/messages/m4?"] = [
+        (
+            200,
+            {
+                "id": "m4",
+                "threadId": "t4",
+                "historyId": "104",
+                "internalDate": "4",
+                "labelIds": ["Legal"],
+            },
+        )
+    ]
+    transport = FakeTransport(responses)
+
+    snapshot = GmailClient(config(), transport).delta_snapshot("100", "exact query")
+
+    assert snapshot.start_history_id == "100"
+    assert snapshot.end_history_id == "110"
+    assert [message.message_id for message in snapshot.messages] == ["m2", "m4"]
+    history_urls = [url for method, url, _, _ in transport.calls if "/history?" in url]
+    assert len(history_urls) == 2
+    assert "startHistoryId=100" in history_urls[0]
+    assert "pageToken=p2" in history_urls[1]
+    list_urls = [url for method, url, _, _ in transport.calls if "/messages?" in url]
+    assert len(list_urls) == 1
+    assert urllib.parse.parse_qs(urllib.parse.urlsplit(list_urls[0]).query)["q"] == ["exact query"]
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (404, "full_required"),
+        (429, "history_unavailable"),
+        (500, "history_unavailable"),
+        (400, "history_list_failed"),
+    ],
+)
+def test_delta_snapshot_sanitizes_history_failures_without_followup_reads(
+    status: int, expected_code: str
+) -> None:
+    responses = authorized_responses()
+    responses["users/me/history?"] = [(status, {"provider": "must-not-escape"})]
+    transport = FakeTransport(responses)
+
+    with pytest.raises(GmailHttpError, match=rf"^{expected_code}$") as failure:
+        GmailClient(config(), transport).delta_snapshot("100", "exact query")
+
+    assert gmail_module.sanitized_error_code(failure.value) == expected_code
+    assert not any("users/me/messages" in url for _, url, _, _ in transport.calls)
+
+
+@pytest.mark.no_db
+def test_delta_snapshot_rejects_repeated_page_token_before_followup_read() -> None:
+    responses = authorized_responses()
+    responses["users/me/history?"] = [
+        (200, {"history": [], "historyId": "101", "nextPageToken": "same"}),
+        (200, {"history": [], "historyId": "102", "nextPageToken": "same"}),
+    ]
+    transport = FakeTransport(responses)
+
+    with pytest.raises(GmailHttpError, match=r"^history_response_invalid$"):
+        GmailClient(config(), transport).delta_snapshot("100", "exact query")
+
+    assert len([url for _, url, _, _ in transport.calls if "/history?" in url]) == 2
+    assert not any("users/me/messages" in url for _, url, _, _ in transport.calls)
+
+
+@pytest.mark.no_db
+def test_delta_snapshot_rejects_regressive_terminal_history_id() -> None:
+    responses = authorized_responses()
+    responses["users/me/history?"] = [(200, {"history": [], "historyId": "99"})]
+    responses["users/me/messages?"] = [(200, {"messages": []})]
+    transport = FakeTransport(responses)
+
+    with pytest.raises(GmailHttpError, match=r"^history_response_invalid$"):
+        GmailClient(config(), transport).delta_snapshot("100", "exact query")
+
+    assert not any("users/me/messages" in url for _, url, _, _ in transport.calls)
 
 
 @pytest.mark.no_db
@@ -1018,6 +1144,219 @@ def test_full_persistence_is_evidence_only_advances_to_h0_and_replay_is_idempote
         assert session.scalar(select(func.count()).select_from(IngestionRun)) == 2
         assert session.scalar(select(func.count()).select_from(Coop)) == 0
         assert session.scalar(select(func.count()).select_from(AuditEvent)) == 0
+
+
+def test_delta_persistence_advances_to_terminal_history_and_replay_is_idempotent() -> None:
+    full = FullSnapshot(
+        start_history_id="100",
+        end_history_id="105",
+        messages=(MessageEvidence("m1", "t1", "101", "1", ("INBOX",)),),
+    )
+    delta = DeltaSnapshot(
+        start_history_id="100",
+        end_history_id="110",
+        messages=(MessageEvidence("m1", "t1", "109", "1", ("INBOX", "Legal")),),
+    )
+
+    with SessionLocal.begin() as session:
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        persist_full_snapshot(session, full, query="query", source=source)
+    with SessionLocal.begin() as session:
+        first = gmail_module.persist_delta_snapshot(session, delta, query="query")
+    with SessionLocal.begin() as session:
+        second = gmail_module.persist_delta_snapshot(
+            session,
+            DeltaSnapshot("110", "110", delta.messages),
+            query="query",
+        )
+
+    assert first.pending_review == 0
+    assert second.pending_review == 0
+    with SessionLocal() as session:
+        checkpoint = session.scalar(select(IngestionCheckpoint))
+        assert checkpoint is not None and checkpoint.checkpoint_value == "110"
+        runs = session.scalars(select(IngestionRun).order_by(IngestionRun.started_at)).all()
+        assert [run.mode for run in runs] == ["FULL", "DELTA", "DELTA"]
+        assert runs[1].summary["start_history_id"] == "100"
+        assert runs[1].summary["end_history_id"] == "110"
+        assert session.scalar(select(func.count()).select_from(SourceRecord)) == 2
+        assert session.scalar(select(func.count()).select_from(SourceRecordRevision)) == 3
+        assert session.scalar(select(func.count()).select_from(SourceRecordObservation)) == 6
+        assert session.scalar(select(func.count()).select_from(IngestionItem)) == 1
+        assert session.scalar(select(func.count()).select_from(Coop)) == 0
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 0
+
+
+def test_delta_persistence_rejects_regressive_checkpoint_without_writes() -> None:
+    with SessionLocal.begin() as session:
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        persist_full_snapshot(
+            session,
+            FullSnapshot("110", "110", ()),
+            query="query",
+            source=source,
+        )
+
+    with (
+        pytest.raises(GmailHttpError, match=r"^snapshot_invalid$"),
+        SessionLocal.begin() as session,
+    ):
+        gmail_module.persist_delta_snapshot(
+            session,
+            DeltaSnapshot("110", "100", ()),
+            query="query",
+        )
+
+    with SessionLocal() as session:
+        checkpoint = session.scalar(select(IngestionCheckpoint))
+        assert checkpoint is not None and checkpoint.checkpoint_value == "110"
+        assert session.scalar(select(func.count()).select_from(IngestionRun)) == 1
+
+
+def test_delta_persistence_requires_matching_existing_checkpoint() -> None:
+    snapshot = DeltaSnapshot("100", "101", ())
+    with SessionLocal.begin() as session:
+        session.add(IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True))
+
+    with (
+        pytest.raises(GmailHttpError, match=r"^full_required$"),
+        SessionLocal.begin() as session,
+    ):
+        gmail_module.persist_delta_snapshot(session, snapshot, query="query")
+
+    with SessionLocal.begin() as session:
+        source = gmail_module._source(session)
+        persist_full_snapshot(
+            session,
+            FullSnapshot("100", "100", ()),
+            query="query",
+            source=source,
+        )
+    with (
+        pytest.raises(gmail_module.GmailConfigError, match=r"^query_contract_invalid$"),
+        SessionLocal.begin() as session,
+    ):
+        gmail_module.persist_delta_snapshot(session, snapshot, query="different")
+
+
+def test_operational_bootstrap_and_delta_coexist_with_historical_running_pilot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def __init__(self, config: GmailConfig) -> None:
+            pass
+
+        def full_snapshot(self, query: str) -> FullSnapshot:
+            return FullSnapshot("100", "105", ())
+
+        def delta_snapshot(self, start_history_id: str, query: str) -> DeltaSnapshot:
+            assert start_history_id == "100"
+            return DeltaSnapshot("100", "110", ())
+
+    with SessionLocal.begin() as session:
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        historical_run_id = gmail_module.claim_pilot_slot(session, source)
+
+    arm_main(monkeypatch)
+    monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
+    monkeypatch.setattr(gmail_module, "GmailClient", FakeClient)
+    monkeypatch.setattr(gmail_module, "attest_collector_database", lambda session: None)
+
+    assert gmail_module.main(["bootstrap"]) == 0
+    assert gmail_module.main(["delta"]) == 0
+
+    with SessionLocal() as session:
+        historical = session.get(IngestionRun, historical_run_id)
+        assert historical is not None and historical.status == "RUNNING"
+        checkpoint = session.scalar(select(IngestionCheckpoint))
+        assert checkpoint is not None and checkpoint.checkpoint_value == "110"
+        operational = session.scalars(
+            select(IngestionRun)
+            .where(IngestionRun.id != historical_run_id)
+            .order_by(IngestionRun.started_at)
+        ).all()
+        assert [(run.mode, run.status) for run in operational] == [
+            ("FULL", "SUCCEEDED"),
+            ("DELTA", "SUCCEEDED"),
+        ]
+
+
+def test_operational_delta_failure_is_terminal_sanitized_and_preserves_checkpoint(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class FailingClient:
+        def __init__(self, config: GmailConfig) -> None:
+            pass
+
+        def delta_snapshot(self, start_history_id: str, query: str) -> DeltaSnapshot:
+            raise RuntimeError("provider-secret-body")
+
+    with SessionLocal.begin() as session:
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        persist_full_snapshot(
+            session,
+            FullSnapshot("100", "100", ()),
+            query=gmail_module.DEFAULT_IMPORT_QUERY,
+            source=source,
+        )
+
+    arm_main(monkeypatch)
+    monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
+    monkeypatch.setattr(gmail_module, "GmailClient", FailingClient)
+    monkeypatch.setattr(gmail_module, "attest_collector_database", lambda session: None)
+
+    assert gmail_module.main(["delta"]) == 1
+
+    output = capsys.readouterr().out
+    assert "provider-secret-body" not in output
+    assert '"error_code":"unexpected_error"' in output
+    with SessionLocal() as session:
+        checkpoint = session.scalar(select(IngestionCheckpoint))
+        assert checkpoint is not None and checkpoint.checkpoint_value == "100"
+        failed = session.scalar(
+            select(IngestionRun).where(
+                IngestionRun.mode == "DELTA", IngestionRun.status == "FAILED"
+            )
+        )
+        assert failed is not None
+        assert failed.error_code == "unexpected_error"
+        assert "provider-secret-body" not in json.dumps(failed.summary)
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize("command", ["bootstrap", "delta"])
+def test_operational_commands_stop_before_database_when_unarmed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    touched_database = False
+
+    class ForbiddenSessionLocal:
+        @staticmethod
+        def begin() -> None:
+            nonlocal touched_database
+            touched_database = True
+            raise AssertionError("database must not be touched while unarmed")
+
+    monkeypatch.setenv("GMAIL_IMPORT_ARMED", "false")
+    monkeypatch.setattr(gmail_module, "SessionLocal", ForbiddenSessionLocal)
+
+    assert gmail_module.main([command]) == 1
+    assert touched_database is False
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "gmail_import_failed",
+        "error_code": "execution_not_armed",
+        "ok": False,
+        "run_status": "NOT_STARTED",
+        "status": "FAILED",
+    }
 
 
 @pytest.mark.no_db

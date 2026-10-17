@@ -118,7 +118,7 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
             ).all()
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("b6a4d9e2f170")
+            ).scalar_one() == ("c2d7a91f4e60")
             source = connection.execute(
                 text(
                     "SELECT source_key, kind, enabled FROM ingestion_source "

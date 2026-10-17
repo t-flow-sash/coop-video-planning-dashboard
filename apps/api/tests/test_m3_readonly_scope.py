@@ -17,6 +17,7 @@ ALLOWED_IMPORT_RESOURCES = {
     "gmail-full-pilot-admission.yaml",
     "gmail-full-pilot-rbac.yaml",
     "gmail-import-cronjobs.yaml",
+    "gmail-recurring-cronjobs.yaml",
     "gmail-oauth.secret.sops.yaml",
     "network-policy.yaml",
 }
@@ -33,10 +34,12 @@ ALLOWED_API_ROUTES = {
     ("POST", "/api/v1/coops/{coop_id}/reopen"),
     ("GET", "/api/v1/coops/{coop_id}/audit-events"),
 }
-FORBIDDEN_OPERATION = re.compile(r"(?i)\b(?:apply|dry[- ]?run|delta|history(?:-sync)?)\b")
+FORBIDDEN_OPERATION = re.compile(r"(?i)\b(?:apply|dry[- ]?run)\b")
+DELTA_OPERATION = re.compile(r"(?i)\b(?:delta|history(?:-sync)?)\b")
 FUTURE_OR_ABSENT = re.compile(
     r"(?i)\b(?:not shipped|not available|future|later|planned|"
-    r"kein(?:e|en)?|nicht|ohne|später|zukünftig|blockiert|blocked)\b"
+    r"kein(?:e|en)?|nicht|ohne|später|zukünftig|blockiert|blocked|"
+    r"dormant|suspended|suspendiert|unarmed)\b"
 )
 AFFIRMATIVE_SHIPPED_CLAIM = re.compile(
     r"(?i)\b(?:ships?|shipped|available|enabled|supports?|liefert|geliefert|"
@@ -54,7 +57,7 @@ PRODUCTION_PATH_CONTEXT = re.compile(
 )
 FORBIDDEN_COMMAND = re.compile(
     r"(?i)(?:python\s+-m\s+app\.ingestion\.[\w.]+\s+"
-    r"(?:apply|dry-run|delta|history)\b|"
+    r"(?:apply|dry-run)\b|"
     r"/api/v\d+/(?:ingestion|imports?)/[^\s`\"']*"
     r"(?:apply|dry-run|delta|history))"
 )
@@ -177,9 +180,11 @@ def _semantic_surface_violations(path: Path, root: Path) -> list[str]:
     for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not path_context and INGESTION_CONTEXT.search(line) is None:
             continue
-        if FORBIDDEN_OPERATION.search(line) is None:
+        forbidden_operation = FORBIDDEN_OPERATION.search(line) is not None
+        delta_operation = DELTA_OPERATION.search(line) is not None
+        if not forbidden_operation and not delta_operation:
             continue
-        if FORBIDDEN_COMMAND.search(line):
+        if forbidden_operation and FORBIDDEN_COMMAND.search(line):
             violations.append(f"shipped ingestion mutation command: {path}:{line_number}")
         elif AFFIRMATIVE_SHIPPED_CLAIM.search(line) and FUTURE_OR_ABSENT.search(line) is None:
             violations.append(f"affirmative shipped ingestion claim: {path}:{line_number}")
@@ -235,22 +240,32 @@ def readonly_scope_violations(root: Path) -> list[str]:
             kind = _kind(document)
             if kind in {"Job", "CronJob"}:
                 workloads.append((kind, _metadata_name(document), document))
-    if len(workloads) != 1:
-        violations.append(f"expected exactly one import workload, found {len(workloads)}")
-    elif workloads[0][0:2] != ("CronJob", "gmail-import-full"):
-        violations.append(f"unexpected import workload: {workloads[0][0:2]}")
-    else:
-        cronjob = workloads[0][2]
+    expected_workloads = {
+        "gmail-import-full": "full",
+        "gmail-import-bootstrap": "bootstrap",
+        "gmail-import-delta": "delta",
+    }
+    actual_workloads = {
+        name: document for kind, name, document in workloads if kind == "CronJob" and name
+    }
+    if set(actual_workloads) != set(expected_workloads):
+        violations.append(f"import workload inventory differs: {sorted(actual_workloads)}")
+    for name, command in expected_workloads.items():
+        cronjob = actual_workloads.get(name, "")
         if re.search(r"(?m)^  suspend:\s*true\s*$", cronjob) is None:
-            violations.append("gmail-import-full must remain suspended")
-        if 'args: ["full"]' not in cronjob:
-            violations.append("gmail-import-full must expose only the FULL command")
+            violations.append(f"{name} must remain suspended")
+        if f'args: ["{command}"]' not in cronjob:
+            violations.append(f"{name} must expose only the {command} command")
 
-    allowed_gmail_workload = (
-        "infrastructure/import/gmail-import-cronjobs.yaml",
-        "CronJob",
-        "gmail-import-full",
-    )
+    allowed_gmail_workloads = {
+        ("infrastructure/import/gmail-import-cronjobs.yaml", "CronJob", "gmail-import-full"),
+        (
+            "infrastructure/import/gmail-recurring-cronjobs.yaml",
+            "CronJob",
+            "gmail-import-bootstrap",
+        ),
+        ("infrastructure/import/gmail-recurring-cronjobs.yaml", "CronJob", "gmail-import-delta"),
+    }
     for path in _operational_files(root):
         violations.extend(_semantic_surface_violations(path, root))
         if path.suffix not in {".yml", ".yaml"}:
@@ -260,7 +275,7 @@ def readonly_scope_violations(root: Path) -> list[str]:
             if kind not in {"Job", "CronJob"} or INGESTION_CONTEXT.search(document) is None:
                 continue
             workload = (path.relative_to(root).as_posix(), kind, _metadata_name(document))
-            if workload != allowed_gmail_workload:
+            if workload not in allowed_gmail_workloads:
                 violations.append(f"unexpected repository Gmail/import workload: {workload}")
     return violations
 

@@ -96,16 +96,22 @@ class GmailEgressProxyContractTests(unittest.TestCase):
         self.assertIn("169.254.0.0/16", public_443["to"][0]["ipBlock"]["except"])
 
     def test_jobs_use_http_connect_proxy_query_config_and_stay_suspended(self) -> None:
-        cron = documents("infrastructure/import/gmail-import-cronjobs.yaml")[0]
-        self.assertTrue(cron["spec"]["suspend"])
-        container = cron["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]
-        env = {entry["name"]: entry for entry in container["env"]}
-        self.assertEqual(container["args"], ["full"])
-        self.assertEqual(env["HTTPS_PROXY"]["value"], "http://gmail-egress-proxy:10000")
-        self.assertEqual(env["HTTP_PROXY"]["value"], "http://gmail-egress-proxy:10000")
-        self.assertIn("gmail-egress-proxy", env["NO_PROXY"]["value"])
-        self.assertIn("GMAIL_IMPORT_QUERY", env)
-        self.assertNotIn("192.0.2.", yaml.safe_dump(cron))
+        cronjobs = documents("infrastructure/import/gmail-import-cronjobs.yaml") + documents(
+            "infrastructure/import/gmail-recurring-cronjobs.yaml"
+        )
+        self.assertEqual(len(cronjobs), 3)
+        for cron in cronjobs:
+            self.assertTrue(cron["spec"]["suspend"])
+            container = cron["spec"]["jobTemplate"]["spec"]["template"]["spec"][
+                "containers"
+            ][0]
+            env = {entry["name"]: entry for entry in container["env"]}
+            self.assertEqual(env["GMAIL_IMPORT_ARMED"]["value"], "false")
+            self.assertEqual(env["HTTPS_PROXY"]["value"], "http://gmail-egress-proxy:10000")
+            self.assertEqual(env["HTTP_PROXY"]["value"], "http://gmail-egress-proxy:10000")
+            self.assertIn("gmail-egress-proxy", env["NO_PROXY"]["value"])
+            self.assertIn("GMAIL_IMPORT_QUERY", env)
+            self.assertNotIn("192.0.2.", yaml.safe_dump(cron))
 
 
 if __name__ == "__main__":

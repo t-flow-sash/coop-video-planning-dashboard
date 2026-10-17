@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: coop-migration-71cbf84468af
+  name: coop-migration-5c31a21e79e2
   labels:
     app.kubernetes.io/name: coop-migration
     app.kubernetes.io/part-of: coop-video-planning

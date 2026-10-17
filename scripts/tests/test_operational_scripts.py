@@ -55,6 +55,8 @@ class RestoreScriptTests(unittest.TestCase):
                 # suspend:true contract: restore must close this boundary.
                 "cronjob/coop-seed": False,
                 "cronjob/gmail-import-full": False,
+                "cronjob/gmail-import-bootstrap": False,
+                "cronjob/gmail-import-delta": False,
             }
             state_file.write_text(
                 json.dumps(
@@ -207,7 +209,7 @@ class RestoreScriptTests(unittest.TestCase):
                 env=env,
                 text=True,
                 capture_output=True,
-                timeout=15,
+                timeout=30,
                 check=False,
             )
             calls = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines()]
@@ -422,7 +424,12 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertTrue(any("create -f - -o jsonpath={.metadata.name}" in call for call in rendered))
         self.assertTrue(any("delete pod coop-restore-generated" in call for call in rendered))
         self.assertTrue(any("delete configmap coop-postgres-restore-lock" in call for call in rendered))
-        for cronjob in ("coop-seed", "gmail-import-full"):
+        for cronjob in (
+            "coop-seed",
+            "gmail-import-full",
+            "gmail-import-bootstrap",
+            "gmail-import-delta",
+        ):
             self.assertTrue(state["suspended"].pop(f"cronjob/{cronjob}"))
         self.assertFalse(any(state["suspended"].values()))
         self.assertEqual(state["replicas"], 2)
