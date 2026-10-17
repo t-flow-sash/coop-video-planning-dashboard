@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socketserver
 import threading
 import urllib.parse
 from dataclasses import dataclass, field
@@ -21,10 +22,10 @@ from app.ingestion.gmail import (
     GmailConfig,
     GmailHttpError,
     GmailRunReport,
+    HttpxTransport,
     ImportBusyError,
     ImportDisabledError,
     MessageEvidence,
-    UrllibTransport,
     canonical_hash,
     persist_full_snapshot,
 )
@@ -137,7 +138,7 @@ def authorized_responses(
 
 @pytest.mark.no_db
 @pytest.mark.parametrize("cross_authority", [False, True], ids=["same-host", "gmail-to-oauth-host"])
-def test_urllib_transport_rejects_redirects_without_forwarding_authorization(
+def test_httpx_transport_rejects_redirects_without_forwarding_authorization(
     cross_authority: bool,
 ) -> None:
     received_authorization: list[str | None] = []
@@ -180,7 +181,7 @@ def test_urllib_transport_rejects_redirects_without_forwarding_authorization(
     redirect_thread.start()
     try:
         with pytest.raises(GmailHttpError, match="redirect_rejected"):
-            UrllibTransport().request(
+            HttpxTransport().request(
                 "GET",
                 f"http://127.0.0.1:{redirect_server.server_port}/gmail-source",
                 headers={"Authorization": "Bearer secret-token"},
@@ -191,6 +192,41 @@ def test_urllib_transport_rejects_redirects_without_forwarding_authorization(
         target_server.shutdown()
         redirect_thread.join()
         target_thread.join()
+
+
+@pytest.mark.no_db
+def test_production_transport_uses_http_11_for_https_proxy_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport_type = getattr(gmail_module, "HttpxTransport", None)
+    assert transport_type is not None
+    assert isinstance(GmailClient(config())._transport, transport_type)
+    connect_lines: list[str] = []
+
+    class ProxyHandler(socketserver.StreamRequestHandler):
+        def handle(self) -> None:
+            connect_lines.append(self.rfile.readline().decode("ascii").strip())
+            while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                pass
+            self.wfile.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+
+    proxy = socketserver.TCPServer(("127.0.0.1", 0), ProxyHandler)
+    proxy_thread = threading.Thread(target=proxy.serve_forever)
+    proxy_thread.start()
+    proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+    monkeypatch.setenv("HTTPS_PROXY", proxy_url)
+    monkeypatch.setenv("https_proxy", proxy_url)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    try:
+        with pytest.raises(GmailHttpError, match="transport_unavailable"):
+            transport_type().request("GET", "https://oauth2.googleapis.com/tokeninfo")
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+        proxy_thread.join()
+
+    assert connect_lines == ["CONNECT oauth2.googleapis.com:443 HTTP/1.1"]
 
 
 @pytest.mark.no_db
@@ -672,6 +708,113 @@ def test_main_commits_durable_pilot_claim_before_first_provider_call(
 
 
 @pytest.mark.no_db
+def test_main_persists_sanitized_failure_after_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    events: list[str] = []
+    source = object()
+    claimed_run = object()
+
+    class FakeClient:
+        def __init__(self, config: GmailConfig) -> None:
+            pass
+
+        def full_snapshot(self, query: str) -> FullSnapshot:
+            events.append("provider")
+            raise GmailHttpError("transport_unavailable")
+
+    class Transaction:
+        count = 0
+
+        def __enter__(self) -> object:
+            type(self).count += 1
+            self.number = type(self).count
+            events.append(f"transaction-{self.number}-enter")
+            return object()
+
+        def __exit__(self, *args: object) -> None:
+            outcome = "rollback" if args[0] is not None else "commit"
+            events.append(f"transaction-{self.number}-{outcome}")
+
+    arm_main(monkeypatch)
+    monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
+    monkeypatch.setattr(gmail_module, "GmailClient", FakeClient)
+    monkeypatch.setattr(gmail_module.SessionLocal, "begin", lambda: Transaction())
+    monkeypatch.setattr(
+        gmail_module,
+        "attest_collector_database",
+        lambda session: events.append("database_identity"),
+    )
+    monkeypatch.setattr(gmail_module, "acquire_import_lock", lambda session: events.append("lock"))
+    monkeypatch.setattr(gmail_module, "_source", lambda session: events.append("source") or source)
+    monkeypatch.setattr(
+        gmail_module,
+        "claim_pilot_slot",
+        lambda session, claimed_source: events.append("claim") or claimed_run,
+    )
+    monkeypatch.setattr(
+        gmail_module,
+        "load_claimed_pilot_run",
+        lambda session, claimed_source, run_id: events.append("load-claim") or claimed_run,
+    )
+    monkeypatch.setattr(
+        gmail_module,
+        "terminalize_claim_failure",
+        lambda run_id, code: events.append(f"terminalize:{code}") or True,
+    )
+
+    assert gmail_module.main(["full"]) == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "gmail_import_failed",
+        "error_code": "transport_unavailable",
+        "claim_status": "FAILED",
+        "ok": False,
+        "status": "FAILED",
+    }
+    assert events == [
+        "transaction-1-enter",
+        "database_identity",
+        "lock",
+        "source",
+        "claim",
+        "transaction-1-commit",
+        "transaction-2-enter",
+        "database_identity",
+        "lock",
+        "source",
+        "load-claim",
+        "provider",
+        "transaction-2-rollback",
+        "terminalize:transport_unavailable",
+    ]
+
+
+@pytest.mark.no_db
+def test_terminalize_claim_failure_retries_and_reports_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    class BrokenTransaction:
+        def __enter__(self) -> object:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("database secret must never be emitted")
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+    monkeypatch.setattr(gmail_module.SessionLocal, "begin", lambda: BrokenTransaction())
+
+    assert (
+        gmail_module.terminalize_claim_failure(gmail_module.PILOT_RUN_ID, "transport_unavailable")
+        is False
+    )
+    assert attempts == 3
+
+
+@pytest.mark.no_db
 def test_main_never_scans_when_another_full_run_holds_the_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -735,6 +878,37 @@ def test_durable_pilot_claim_can_only_be_created_once() -> None:
         persisted = session.get(IngestionRun, first_run_id)
         assert persisted is not None
         assert persisted.status == "RUNNING"
+
+
+def test_claimed_pilot_run_is_marked_failed_with_sanitized_provider_code() -> None:
+    with SessionLocal.begin() as session:
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        run_id = gmail_module.claim_pilot_slot(session, source)
+
+    with SessionLocal.begin() as session:
+        gmail_module.mark_claimed_pilot_failed(
+            session,
+            run_id,
+            "transport_unavailable",
+        )
+
+    with SessionLocal() as session:
+        persisted = session.get(IngestionRun, run_id)
+        assert persisted is not None
+        assert persisted.status == "FAILED"
+        assert persisted.error_code == "transport_unavailable"
+        assert persisted.finished_at is not None
+        assert persisted.summary == {"pilot_slot": gmail_module.PILOT_SLOT}
+
+
+@pytest.mark.no_db
+def test_sanitized_error_code_never_emits_unrecognized_exception_text() -> None:
+    assert (
+        gmail_module.sanitized_error_code(GmailHttpError("token_secret_value"))
+        == "unexpected_error"
+    )
 
 
 @pytest.mark.no_db

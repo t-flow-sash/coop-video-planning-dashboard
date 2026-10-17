@@ -7,15 +7,14 @@ import json
 import os
 import re
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+import httpx
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
@@ -55,6 +54,36 @@ TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 MESSAGE_FIELDS = "id,threadId,historyId,internalDate,labelIds"
 DECIMAL_INTEGER_PATTERN = re.compile(r"(?:0|[1-9][0-9]*)\Z")
+SANITIZED_ERROR_CODES = frozenset(
+    {
+        "account_contract_invalid",
+        "account_invalid",
+        "account_mismatch",
+        "configuration_missing",
+        "execution_not_armed",
+        "import_busy",
+        "import_disabled",
+        "message_fetch_failed",
+        "message_response_invalid",
+        "messages_list_failed",
+        "messages_response_invalid",
+        "messages_unavailable",
+        "oauth_refresh_failed",
+        "oauth_response_invalid",
+        "pilot_consumed",
+        "profile_failed",
+        "profile_invalid",
+        "query_contract_invalid",
+        "redirect_rejected",
+        "response_invalid",
+        "scope_invalid",
+        "scope_missing",
+        "snapshot_invalid",
+        "tokeninfo_failed",
+        "transport_unavailable",
+        "unexpected_error",
+    }
+)
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -153,21 +182,8 @@ class HttpTransport(Protocol):
     ) -> tuple[int, dict[str, Any]]: ...
 
 
-class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        req: urllib.request.Request,
-        fp: Any,
-        code: int,
-        msg: str,
-        headers: Any,
-        newurl: str,
-    ) -> None:
-        return None
-
-
-class UrllibTransport:
-    """Small JSON transport; urllib honors HTTP(S)_PROXY and NO_PROXY."""
+class HttpxTransport:
+    """JSON transport with an explicit HTTP/1.1-capable HTTPS proxy tunnel."""
 
     def request(
         self,
@@ -177,27 +193,20 @@ class UrllibTransport:
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
     ) -> tuple[int, dict[str, Any]]:
-        request = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
         try:
-            with urllib.request.build_opener(_RejectRedirectHandler()).open(
-                request, timeout=30
-            ) as response:
-                raw = response.read()
-                status = response.status
-        except urllib.error.HTTPError as error:
-            raw = error.read()
-            status = error.code
-        except (OSError, urllib.error.URLError, TimeoutError) as error:
+            with httpx.Client(timeout=30, follow_redirects=False, trust_env=True) as client:
+                response = client.request(method, url, headers=headers, content=body)
+        except httpx.HTTPError as error:
             raise GmailHttpError("transport_unavailable") from error
-        if 300 <= status < 400:
+        if 300 <= response.status_code < 400:
             raise GmailHttpError("redirect_rejected")
         try:
-            payload = json.loads(raw) if raw else {}
+            payload = response.json() if response.content else {}
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise GmailHttpError("response_invalid") from error
         if not isinstance(payload, dict):
             raise GmailHttpError("response_invalid")
-        return status, payload
+        return response.status_code, payload
 
 
 @dataclass(frozen=True)
@@ -272,7 +281,7 @@ class GmailRunReport:
 class GmailClient:
     def __init__(self, config: GmailConfig, transport: HttpTransport | None = None) -> None:
         self._config = config
-        self._transport = transport or UrllibTransport()
+        self._transport = transport or HttpxTransport()
 
     def _json(
         self,
@@ -474,6 +483,45 @@ def load_claimed_pilot_run(
     return run
 
 
+def mark_claimed_pilot_failed(
+    session: Session,
+    run_id: uuid.UUID,
+    error_code: str,
+) -> None:
+    sanitized_code = error_code if error_code in SANITIZED_ERROR_CODES else "unexpected_error"
+    run = session.scalar(
+        select(IngestionRun)
+        .join(IngestionSource, IngestionSource.id == IngestionRun.source_id)
+        .where(
+            IngestionRun.id == run_id,
+            IngestionSource.source_key == SOURCE_KEY,
+        )
+    )
+    if run is None:
+        raise PilotConsumedError("gmail pilot claim does not exist")
+    if run.status == "FAILED" and run.error_code == sanitized_code:
+        return
+    if run.status != "RUNNING":
+        raise PilotConsumedError("gmail pilot claim is not terminalizable")
+    run.status = "FAILED"
+    run.error_code = sanitized_code
+    run.finished_at = datetime.now(UTC)
+    session.flush()
+
+
+def terminalize_claim_failure(run_id: uuid.UUID, error_code: str) -> bool:
+    """Best-effort bounded retry that does not depend on source enablement or the import lock."""
+    for _ in range(3):
+        try:
+            with SessionLocal.begin() as session:
+                attest_collector_database(session)
+                mark_claimed_pilot_failed(session, run_id, error_code)
+        except Exception:
+            continue
+        return True
+    return False
+
+
 def _record(
     session: Session,
     source: IngestionSource,
@@ -649,10 +697,23 @@ def _print(value: dict[str, Any]) -> None:
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
+def sanitized_error_code(error: Exception) -> str:
+    if isinstance(error, GmailError) and str(error) in SANITIZED_ERROR_CODES:
+        return str(error)
+    if isinstance(error, ImportBusyError):
+        return "import_busy"
+    if isinstance(error, ImportDisabledError):
+        return "import_disabled"
+    if isinstance(error, PilotConsumedError):
+        return "pilot_consumed"
+    return "unexpected_error"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.ingestion.gmail")
     parser.add_argument("command", choices=("full",))
     parser.parse_args(argv)
+    run_id: uuid.UUID | None = None
     try:
         query = execution_query_from_env()
         gmail_config = GmailConfig.from_env()
@@ -669,8 +730,20 @@ def main(argv: list[str] | None = None) -> int:
             run = load_claimed_pilot_run(session, source, run_id)
             snapshot = client.full_snapshot(query)
             report = persist_full_snapshot(session, snapshot, query=query, source=source, run=run)
-    except Exception:
-        _print({"error": "gmail_import_failed", "ok": False, "status": "FAILED"})
+    except Exception as error:
+        error_code = sanitized_error_code(error)
+        claim_status = "NOT_CLAIMED"
+        if run_id is not None:
+            claim_status = "FAILED" if terminalize_claim_failure(run_id, error_code) else "UNKNOWN"
+        _print(
+            {
+                "claim_status": claim_status,
+                "error": "gmail_import_failed",
+                "error_code": error_code,
+                "ok": False,
+                "status": "FAILED",
+            }
+        )
         return 1
     ok = report.status == "SUCCEEDED"
     _print({"ok": ok, "pending_review": report.pending_review, "status": report.status})
