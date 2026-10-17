@@ -946,7 +946,10 @@ class RenderedSecurityContractTests(unittest.TestCase):
         self.assertIn("pilot_image =", promotion)
         self.assertIn("coop-image-promotion-transaction", promotion)
         self.assertIn("Recovering interrupted image-promotion transaction", promotion)
-        self.assertIn('cp -a -- infrastructure "${transaction_dir}/staged/"', promotion)
+        self.assertIn("coop-image-promotion-transaction.initializing", promotion)
+        self.assertIn("flock -n 9", promotion)
+        self.assertIn('cp -a -- infrastructure "${initializing_dir}/staged/"', promotion)
+        self.assertIn('mv -- "$initializing_dir" "$transaction_dir"', promotion)
         self.assertIn('staged_dir="${transaction_dir}/staged/${dir}"', promotion)
         self.assertIn(
             "infrastructure/import", promotion[promotion.index("for dir in") :]

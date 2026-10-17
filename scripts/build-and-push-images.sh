@@ -11,6 +11,7 @@ REGISTRY="${REGISTRY:-127.0.0.1:5000}"
 }
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 127; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 127; }
+command -v flock >/dev/null || { echo "flock is required" >&2; exit 127; }
 (command -v kustomize >/dev/null || command -v kubectl >/dev/null) || { echo "kustomize or kubectl is required" >&2; exit 127; }
 
 git_sha="$(git rev-parse HEAD)"
@@ -30,6 +31,12 @@ promotion_targets=(
 )
 transaction_dir="$(git rev-parse --git-path coop-image-promotion-transaction)"
 [[ "$transaction_dir" == /* ]] || transaction_dir="${ROOT}/${transaction_dir}"
+initializing_dir="$(git rev-parse --git-path coop-image-promotion-transaction.initializing)"
+[[ "$initializing_dir" == /* ]] || initializing_dir="${ROOT}/${initializing_dir}"
+lock_file="$(git rev-parse --git-path coop-image-promotion.lock)"
+[[ "$lock_file" == /* ]] || lock_file="${ROOT}/${lock_file}"
+exec 9>"$lock_file"
+flock -n 9 || { echo "Another image promotion is already running" >&2; exit 4; }
 restore_transaction() {
   local target
   for target in "${promotion_targets[@]}"; do
@@ -43,6 +50,10 @@ restore_transaction() {
   done
   rm -rf -- "$transaction_dir"
 }
+if [[ -d "$initializing_dir" ]]; then
+  echo "Discarding incomplete image-promotion initialization" >&2
+  rm -rf -- "$initializing_dir"
+fi
 if [[ -d "$transaction_dir" ]]; then
   echo "Recovering interrupted image-promotion transaction" >&2
   restore_transaction
@@ -73,12 +84,13 @@ resolve_digest() {
 api_digest="$(resolve_digest "${api_image}:${tag}")"
 web_digest="$(resolve_digest "${web_image}:${tag}")"
 
-mkdir -p "${transaction_dir}/backup" "${transaction_dir}/staged"
+mkdir -p "${initializing_dir}/backup" "${initializing_dir}/staged"
 for target in "${promotion_targets[@]}"; do
-  mkdir -p "${transaction_dir}/backup/$(dirname "$target")"
-  cp -- "$target" "${transaction_dir}/backup/${target}"
+  mkdir -p "${initializing_dir}/backup/$(dirname "$target")"
+  cp -- "$target" "${initializing_dir}/backup/${target}"
 done
-cp -a -- infrastructure "${transaction_dir}/staged/"
+cp -a -- infrastructure "${initializing_dir}/staged/"
+mv -- "$initializing_dir" "$transaction_dir"
 rollback_manifests() {
   local status=$?
   trap - ERR INT TERM
