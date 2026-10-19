@@ -85,6 +85,9 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
     ).json()
     manifest_hash = "a" * 64
     embedded_uuid = "b97f3b09-1514-4511-a84b-75a1f9832ab4"
+    embedded_uuid_v7 = "019a01b0-7abc-7def-8abc-0123456789ab"
+    nil_uuid = "00000000-0000-0000-0000-000000000000"
+    provider_marker = "provider-ref-SYNTHETIC-LEAK-92471"
     internal_request_id = f"manual-import-{manifest_hash[:24]}"
     with Session(test_engine) as session, session.begin():
         coop = session.scalar(select(Coop).where(Coop.record_key == "audit-redaction"))
@@ -94,13 +97,23 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
                 coop_id=coop.id,
                 action="MANUAL_IMPORT_UPDATED",
                 actor_type="SYSTEM",
-                actor_id="manual-coop-import-v1",
+                actor_id=f"manual-import:{provider_marker}",
                 source="MANUAL_IMPORT",
                 changes={
                     "external_id": {"old": None, "new": "provider-19"},
-                    "metadata": {"message": f"correlation={manifest_hash} object={embedded_uuid}"},
+                    "metadata": {
+                        "message": (
+                            f"correlation={manifest_hash} object={embedded_uuid} "
+                            f"new={embedded_uuid_v7} nil={nil_uuid}"
+                        ),
+                        "Provider_ID": provider_marker,
+                        "providerId": provider_marker,
+                    },
                 },
-                reason=f"retry {manifest_hash} for {embedded_uuid}",
+                reason=(
+                    f"retry {manifest_hash} for {embedded_uuid} "
+                    f"new={embedded_uuid_v7} nil={nil_uuid}"
+                ),
                 request_id=internal_request_id,
                 source_reference=manifest_hash,
             )
@@ -117,6 +130,10 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
     assert "source_reference" not in import_event
     assert manifest_hash not in serialized
     assert embedded_uuid not in serialized
+    assert embedded_uuid_v7 not in serialized
+    assert nil_uuid not in serialized
+    assert provider_marker not in serialized
+    assert "actor_id" not in import_event
     assert "provider-19" not in serialized
     _assert_no_provider_or_import_ids(import_event)
     assert internal_request_id not in serialized
@@ -127,6 +144,7 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
         assert stored is not None
         assert stored.request_id == internal_request_id
         assert stored.source_reference == manifest_hash
+        assert stored.actor_id == f"manual-import:{provider_marker}"
 
 
 def test_list_filters_priority_review_and_deadline_and_sorts_priority_first(

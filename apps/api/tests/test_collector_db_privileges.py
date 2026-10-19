@@ -168,6 +168,12 @@ def test_acl_reconciler_preserves_existing_function_access_for_unrelated_roles(
             text("SELECT has_function_privilege(:role, 'public.similarity(text,text)', 'EXECUTE')"),
             {"role": role},
         )
+        assert connection.scalar(
+            text(
+                "SELECT has_function_privilege('pg_monitor', "
+                "'public.similarity(text,text)', 'EXECUTE')"
+            )
+        )
     try:
         database_access.reconcile_collector_access(
             test_engine.url.render_as_string(hide_password=False)
@@ -180,10 +186,39 @@ def test_acl_reconciler_preserves_existing_function_access_for_unrelated_roles(
                 ),
                 {"role": role},
             )
+            assert connection.scalar(
+                text(
+                    "SELECT has_function_privilege('pg_monitor', "
+                    "'public.similarity(text,text)', 'EXECUTE')"
+                )
+            )
     finally:
         with test_engine.begin() as connection:
             connection.exec_driver_sql(f'DROP OWNED BY "{role}"')
             connection.exec_driver_sql(f'DROP ROLE IF EXISTS "{role}"')
+
+
+@pytest.mark.integration
+def test_acl_reconciler_denies_collector_execute_on_future_functions(
+    test_engine: Engine,
+) -> None:
+    function_name = f"acl_future_probe_{uuid.uuid4().hex}"
+    database_access.reconcile_collector_access(
+        test_engine.url.render_as_string(hide_password=False)
+    )
+    try:
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(
+                f'CREATE FUNCTION public."{function_name}"() RETURNS integer '
+                "LANGUAGE sql IMMUTABLE AS 'SELECT 42'"
+            )
+            assert not connection.scalar(
+                text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                {"role": COLLECTOR_ROLE, "function": f"public.{function_name}()"},
+            )
+    finally:
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(f'DROP FUNCTION IF EXISTS public."{function_name}"()')
 
 
 @pytest.mark.integration

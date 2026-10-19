@@ -20,15 +20,18 @@ INTERNAL_REFERENCE_KEYS = {
 }
 _UUID_PATTERN = re.compile(
     r"(?<![0-9A-Fa-f])"
-    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-"
-    r"[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}"
+    r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
     r"(?![0-9A-Fa-f])"
 )
 _SHA256_PATTERN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 
 
 def _is_internal_key(key: str) -> bool:
-    return key in INTERNAL_REFERENCE_KEYS or key.endswith("_id")
+    snake_case = re.sub(r"(?<!^)(?=[A-Z])", "_", key).replace("-", "_").lower()
+    compact = re.sub(r"[^a-z0-9]", "", snake_case)
+    internal_compact = {re.sub(r"[^a-z0-9]", "", item) for item in INTERNAL_REFERENCE_KEYS}
+    return compact in internal_compact or snake_case.endswith("_id")
 
 
 def _redact_text(value: str) -> str:
@@ -54,3 +57,14 @@ def redact_internal_references(value: Any, *, drop_internal_keys: bool = False) 
     if isinstance(value, str):
         return _redact_text(value)
     return value
+
+
+def redact_mapping(value: dict[str, Any], *, drop_internal_keys: bool = False) -> dict[str, Any]:
+    redacted = redact_internal_references(value, drop_internal_keys=drop_internal_keys)
+    if not isinstance(redacted, dict):  # pragma: no cover - type invariant
+        raise TypeError("redacted mapping changed type")
+    return redacted
+
+
+def redact_optional_text(value: str | None) -> str | None:
+    return None if value is None else _redact_text(value)

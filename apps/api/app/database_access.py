@@ -155,6 +155,13 @@ def reconcile_collector_access(admin_url: str) -> None:
             "WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY nspname"
         )
         schemas = [row[0] for row in cursor.fetchall()]
+        cursor.execute("SELECT current_user")
+        function_owner = _required_row(cursor)[0]
+        cursor.execute(
+            sql.SQL(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
+            ).format(sql.Identifier(function_owner))
+        )
         for schema in schemas:
             schema_id = sql.Identifier(schema)
             role_id = sql.Identifier(COLLECTOR_ROLE)
@@ -184,7 +191,6 @@ def reconcile_collector_access(admin_url: str) -> None:
                 "FROM pg_roles role CROSS JOIN pg_proc function "
                 "JOIN pg_namespace namespace ON namespace.oid = function.pronamespace "
                 "WHERE namespace.nspname = %s AND role.rolname <> %s "
-                "AND role.rolname !~ '^pg_' "
                 "AND has_function_privilege(role.oid, function.oid, 'EXECUTE') "
                 "ORDER BY role.rolname, function.oid",
                 (schema, COLLECTOR_ROLE),
