@@ -40,6 +40,12 @@ class Organization(TimestampVersionMixin, Base):
     __table_args__ = (
         CheckConstraint("kind IN ('BRAND','AGENCY','OTHER')", name="ck_organization_kind"),
         Index("ix_organization_normalized_name", "normalized_name"),
+        Index(
+            "ix_organization_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -63,6 +69,30 @@ class Contact(TimestampVersionMixin, Base):
             "normalized_email",
             unique=True,
             postgresql_where=text("normalized_email IS NOT NULL"),
+        ),
+        Index(
+            "ix_contact_display_name_trgm",
+            "display_name",
+            postgresql_using="gin",
+            postgresql_ops={"display_name": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_contact_first_name_trgm",
+            "first_name",
+            postgresql_using="gin",
+            postgresql_ops={"first_name": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_contact_last_name_trgm",
+            "last_name",
+            postgresql_using="gin",
+            postgresql_ops={"last_name": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_contact_email_trgm",
+            "email",
+            postgresql_using="gin",
+            postgresql_ops={"email": "gin_trgm_ops"},
         ),
     )
 
@@ -109,6 +139,30 @@ class Coop(TimestampVersionMixin, Base):
         Index("ix_coop_brand", "brand_organization_id"),
         Index("ix_coop_agency", "agency_organization_id"),
         Index("ix_coop_priority_deadline", "priority", "deadline"),
+        Index(
+            "ix_coop_title_trgm",
+            "title",
+            postgresql_using="gin",
+            postgresql_ops={"title": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_coop_summary_trgm",
+            "summary",
+            postgresql_using="gin",
+            postgresql_ops={"summary": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_coop_owner_trgm",
+            "owner",
+            postgresql_using="gin",
+            postgresql_ops={"owner": "gin_trgm_ops"},
+        ),
+        Index(
+            "ix_coop_next_action_trgm",
+            "next_action",
+            postgresql_using="gin",
+            postgresql_ops={"next_action": "gin_trgm_ops"},
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

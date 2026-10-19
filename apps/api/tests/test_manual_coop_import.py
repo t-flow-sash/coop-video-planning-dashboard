@@ -322,6 +322,7 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
     synthetic_ids = {UUID(row[0]) for row in SYNTHETIC_SEED_COOPS}
     genuine_id = uuid4()
     internal_organization_id = uuid4()
+    embedded_hash = "a" * 64
     with Session(test_engine) as session, session.begin():
         _seed(session)
         session.add(
@@ -334,8 +335,11 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
                     "brand_organization_id": {
                         "old": None,
                         "new": str(internal_organization_id),
-                    }
+                    },
+                    "note": f"correlation={embedded_hash}",
+                    "message": f"org {internal_organization_id}",
                 },
+                reason=f"retry {embedded_hash} for {internal_organization_id}",
                 request_id="internal-request-id",
             )
         )
@@ -382,6 +386,7 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
         serialized_summary = json.dumps(batch.summary, sort_keys=True)
         assert not any(str(seed_id) in serialized_summary for seed_id in synthetic_ids)
         assert str(internal_organization_id) not in serialized_summary
+        assert embedded_hash not in serialized_summary
         assert "internal-request-id" not in serialized_summary
         assert "seed-00000000" not in serialized_summary
 

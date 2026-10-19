@@ -1108,6 +1108,7 @@ function DetailPanel({
   onTransition: (coop: Coop, target: CoopStatus) => void;
   demoMode: boolean;
 }) {
+  const panel = useRef<HTMLElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const trapFocus = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== "Tab") return;
@@ -1136,11 +1137,12 @@ function DetailPanel({
     }
   };
   useEffect(() => {
-    heading.current?.focus();
-  }, [coop?.id]);
+    (heading.current ?? panel.current)?.focus();
+  }, [coop?.id, error, loading]);
   if (loading && !coop)
     return (
       <aside
+        ref={panel}
         className="detail-panel"
         role="dialog"
         aria-modal="true"
@@ -1155,6 +1157,7 @@ function DetailPanel({
   if (!coop)
     return (
       <aside
+        ref={panel}
         className="detail-panel"
         role="dialog"
         aria-modal="true"
@@ -1179,6 +1182,7 @@ function DetailPanel({
   );
   return (
     <aside
+      ref={panel}
       className="detail-panel"
       role="dialog"
       aria-modal="true"

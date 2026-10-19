@@ -155,6 +155,38 @@ def test_acl_reconciler_fails_closed_on_public_business_privilege(test_engine: E
 
 
 @pytest.mark.integration
+def test_acl_reconciler_preserves_existing_function_access_for_unrelated_roles(
+    test_engine: Engine,
+) -> None:
+    role = f"unrelated_reader_{uuid.uuid4().hex}"
+    with test_engine.begin() as connection:
+        connection.exec_driver_sql(f'CREATE ROLE "{role}"')
+        connection.execute(
+            text("GRANT EXECUTE ON FUNCTION public.similarity(text, text) TO PUBLIC")
+        )
+        assert connection.scalar(
+            text("SELECT has_function_privilege(:role, 'public.similarity(text,text)', 'EXECUTE')"),
+            {"role": role},
+        )
+    try:
+        database_access.reconcile_collector_access(
+            test_engine.url.render_as_string(hide_password=False)
+        )
+        with test_engine.connect() as connection:
+            assert connection.scalar(
+                text(
+                    "SELECT has_function_privilege(:role, "
+                    "'public.similarity(text,text)', 'EXECUTE')"
+                ),
+                {"role": role},
+            )
+    finally:
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(f'DROP OWNED BY "{role}"')
+            connection.exec_driver_sql(f'DROP ROLE IF EXISTS "{role}"')
+
+
+@pytest.mark.integration
 def test_acl_reconciler_fails_closed_on_collector_owned_schema(test_engine: Engine) -> None:
     database_name = test_engine.url.database
     assert database_name is not None

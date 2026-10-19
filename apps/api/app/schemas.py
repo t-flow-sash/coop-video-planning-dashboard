@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from app.domain import CoopStatus, Deliverable, MoneyFields
+from app.redaction import redact_internal_references
 
 RecordKey = str
 Priority = Literal["P0", "P1", "P2"]
@@ -234,6 +235,16 @@ class AuditEventRead(BaseModel):
     changes: dict[str, Any]
     reason: str | None
     created_at: datetime
+
+    @field_validator("changes", mode="before")
+    @classmethod
+    def redact_changes(cls, value: Any) -> dict[str, Any]:
+        return redact_internal_references(value, drop_internal_keys=True)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def redact_reason(cls, value: Any) -> str | None:
+        return redact_internal_references(value, drop_internal_keys=True)
 
 
 class CoopPage(BaseModel):

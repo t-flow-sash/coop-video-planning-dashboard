@@ -25,6 +25,7 @@ from app.models import (
     ManualImportBatch,
     Organization,
 )
+from app.redaction import redact_internal_references
 from app.synthetic_seeds import SYNTHETIC_SEED_COOP_IDS, SYNTHETIC_SEED_KEYS
 
 PROVIDER_KEYS = {
@@ -37,31 +38,6 @@ PROVIDER_KEYS = {
     "history_id",
     "source_reference",
 }
-INTERNAL_AUDIT_KEYS = {"id", "request_id", "source_reference", "manifest_hash"}
-
-
-def _redact_internal_audit_references(value: Any, *, key: str | None = None) -> Any:
-    """Retain useful seed history while removing DB/import identifiers."""
-    if key in INTERNAL_AUDIT_KEYS or (key is not None and key.endswith("_id")):
-        return "[redacted]"
-    if isinstance(value, dict):
-        return {
-            item_key: _redact_internal_audit_references(item_value, key=item_key)
-            for item_key, item_value in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_internal_audit_references(item) for item in value]
-    if isinstance(value, str):
-        try:
-            UUID(value)
-        except ValueError:
-            if len(value) == 64 and all(
-                character in "0123456789abcdefABCDEF" for character in value
-            ):
-                return "[redacted]"
-            return value
-        return "[redacted]"
-    return value
 
 
 class ManualImportError(ValueError):
@@ -355,8 +331,8 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
                         "action": event.action,
                         "actor_type": event.actor_type,
                         "source": event.source,
-                        "changes": _redact_internal_audit_references(event.changes),
-                        "reason": event.reason,
+                        "changes": redact_internal_references(event.changes),
+                        "reason": redact_internal_references(event.reason),
                         "created_at": event.created_at,
                     }
                 )

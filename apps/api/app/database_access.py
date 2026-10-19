@@ -173,14 +173,37 @@ def reconcile_collector_access(admin_url: str) -> None:
                     schema_id, role_id
                 )
             )
-            # Function EXECUTE is granted to PUBLIC by default. Without removing
-            # that ambient grant, the collector still inherits execution rights
-            # for extension functions such as pg_trgm despite the direct revoke.
+            # EXECUTE is granted to PUBLIC by default. Snapshot each existing
+            # non-collector role/function entitlement before removing that
+            # ambient grant, then restore those exact effective entitlements as
+            # explicit grants. This denies the collector without changing the
+            # capabilities of unrelated runtime or reporting roles.
+            cursor.execute(
+                "SELECT role.rolname, function.proname, "
+                "pg_get_function_identity_arguments(function.oid) "
+                "FROM pg_roles role CROSS JOIN pg_proc function "
+                "JOIN pg_namespace namespace ON namespace.oid = function.pronamespace "
+                "WHERE namespace.nspname = %s AND role.rolname <> %s "
+                "AND role.rolname !~ '^pg_' "
+                "AND has_function_privilege(role.oid, function.oid, 'EXECUTE') "
+                "ORDER BY role.rolname, function.oid",
+                (schema, COLLECTOR_ROLE),
+            )
+            preserved_function_grants = cursor.fetchall()
             cursor.execute(
                 sql.SQL("REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {} FROM PUBLIC").format(
                     schema_id
                 )
             )
+            for role, function_name, identity_arguments in preserved_function_grants:
+                cursor.execute(
+                    sql.SQL("GRANT EXECUTE ON FUNCTION {}.{}({}) TO {}").format(
+                        schema_id,
+                        sql.Identifier(function_name),
+                        sql.SQL(identity_arguments),
+                        sql.Identifier(role),
+                    )
+                )
             cursor.execute(
                 "SELECT type.typname FROM pg_type type "
                 "JOIN pg_namespace namespace ON namespace.oid = type.typnamespace "

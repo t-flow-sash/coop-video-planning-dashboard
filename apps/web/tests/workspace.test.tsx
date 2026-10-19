@@ -150,6 +150,29 @@ describe("CoopWorkspace", () => {
     expect(container.querySelector(".mobile-topbar")).toHaveAttribute("inert");
   });
 
+  it("fokussiert den Fehlerdialog bei einem ungültigen Deep-Link", async () => {
+    window.history.replaceState({}, "", "/coops?coop=missing-record");
+    const failedDetailRepository = {
+      ...repository,
+      detail: vi.fn(async () => {
+        throw new Error("missing");
+      }),
+      audit: vi.fn(async () => []),
+    };
+    render(
+      <CoopWorkspace
+        repository={failedDetailRepository}
+        initialCoops={coops}
+      />,
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Coop-Details",
+    });
+    await waitFor(() => expect(dialog).toHaveFocus());
+    window.history.replaceState({}, "", "/coops");
+  });
+
   it("hält den Tastaturfokus im Detaildialog", async () => {
     const user = userEvent.setup();
     render(<CoopWorkspace repository={repository} initialCoops={coops} />);
