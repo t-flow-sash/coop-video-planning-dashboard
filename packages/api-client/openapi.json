@@ -231,6 +231,38 @@
             }
           },
           {
+            "name": "contact_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Contact Key"
+            }
+          },
+          {
+            "name": "organization_key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Organization Key"
+            }
+          },
+          {
             "name": "release_from",
             "in": "query",
             "required": false,
@@ -279,6 +311,60 @@
                 }
               ],
               "title": "Query"
+            }
+          },
+          {
+            "name": "priority",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "P0",
+                    "P1",
+                    "P2"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Priority"
+            }
+          },
+          {
+            "name": "needs_review",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Needs Review"
+            }
+          },
+          {
+            "name": "deadline_to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Deadline To"
             }
           },
           {
@@ -345,7 +431,6 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "title": "Coop Id"
             }
           }
@@ -383,7 +468,6 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "title": "Coop Id"
             }
           }
@@ -433,7 +517,6 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "title": "Coop Id"
             }
           }
@@ -483,7 +566,6 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "title": "Coop Id"
             }
           }
@@ -533,7 +615,6 @@
             "required": true,
             "schema": {
               "type": "string",
-              "format": "uuid",
               "title": "Coop Id"
             }
           },
@@ -716,6 +797,20 @@
       },
       "ContactCreate": {
         "properties": {
+          "record_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160,
+                "minLength": 3,
+                "pattern": "^[a-z0-9][a-z0-9._-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Record Key"
+          },
           "organization_id": {
             "anyOf": [
               {
@@ -727,6 +822,18 @@
               }
             ],
             "title": "Organization Id"
+          },
+          "organization_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Key"
           },
           "first_name": {
             "anyOf": [
@@ -820,6 +927,15 @@
       },
       "ContactRead": {
         "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "record_key": {
+            "type": "string",
+            "title": "Record Key"
+          },
           "organization_id": {
             "anyOf": [
               {
@@ -835,8 +951,7 @@
           "first_name": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 100
+                "type": "string"
               },
               {
                 "type": "null"
@@ -847,8 +962,7 @@
           "last_name": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 100
+                "type": "string"
               },
               {
                 "type": "null"
@@ -858,15 +972,12 @@
           },
           "display_name": {
             "type": "string",
-            "maxLength": 200,
-            "minLength": 1,
             "title": "Display Name"
           },
           "email": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 320
+                "type": "string"
               },
               {
                 "type": "null"
@@ -874,11 +985,21 @@
             ],
             "title": "Email"
           },
+          "normalized_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Normalized Email"
+          },
           "phone": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 50
+                "type": "string"
               },
               {
                 "type": "null"
@@ -897,22 +1018,6 @@
             ],
             "title": "Notes"
           },
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id"
-          },
-          "normalized_email": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Normalized Email"
-          },
           "version": {
             "type": "integer",
             "title": "Version"
@@ -928,12 +1033,18 @@
             "title": "Updated At"
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
-          "display_name",
           "id",
+          "record_key",
+          "organization_id",
+          "first_name",
+          "last_name",
+          "display_name",
+          "email",
           "normalized_email",
+          "phone",
+          "notes",
           "version",
           "created_at",
           "updated_at"
@@ -965,11 +1076,35 @@
             ],
             "title": "Fee Currency"
           },
+          "record_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160,
+                "minLength": 3,
+                "pattern": "^[a-z0-9][a-z0-9._-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Record Key"
+          },
           "title": {
             "type": "string",
             "maxLength": 240,
             "minLength": 1,
             "title": "Title"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2"
+            ],
+            "title": "Priority",
+            "default": "P2"
           },
           "summary": {
             "anyOf": [
@@ -996,6 +1131,18 @@
             ],
             "title": "Deliverables"
           },
+          "last_contact_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Contact Date"
+          },
           "next_action": {
             "anyOf": [
               {
@@ -1006,6 +1153,30 @@
               }
             ],
             "title": "Next Action"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline"
           },
           "release_at": {
             "anyOf": [
@@ -1018,6 +1189,35 @@
               }
             ],
             "title": "Release At"
+          },
+          "fee_status": {
+            "type": "string",
+            "enum": [
+              "UNKNOWN",
+              "PROPOSED",
+              "AGREED",
+              "INVOICED",
+              "PAID",
+              "NOT_APPLICABLE"
+            ],
+            "title": "Fee Status",
+            "default": "UNKNOWN"
+          },
+          "needs_review": {
+            "type": "boolean",
+            "title": "Needs Review",
+            "default": false
+          },
+          "uncertainty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncertainty"
           },
           "brand_organization_id": {
             "anyOf": [
@@ -1043,6 +1243,30 @@
             ],
             "title": "Agency Organization Id"
           },
+          "brand_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Key"
+          },
+          "agency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agency Key"
+          },
           "status": {
             "$ref": "#/components/schemas/CoopStatus",
             "default": "NEW"
@@ -1054,6 +1278,13 @@
             },
             "type": "array",
             "title": "Contact Ids"
+          },
+          "contact_keys": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Contact Keys"
           }
         },
         "additionalProperties": false,
@@ -1070,9 +1301,22 @@
             "format": "uuid",
             "title": "Id"
           },
+          "record_key": {
+            "type": "string",
+            "title": "Record Key"
+          },
           "title": {
             "type": "string",
             "title": "Title"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2"
+            ],
+            "title": "Priority"
           },
           "status": {
             "$ref": "#/components/schemas/CoopStatus"
@@ -1103,6 +1347,18 @@
             ],
             "title": "Deliverables"
           },
+          "last_contact_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Contact Date"
+          },
           "next_action": {
             "anyOf": [
               {
@@ -1113,6 +1369,29 @@
               }
             ],
             "title": "Next Action"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline"
           },
           "release_at": {
             "anyOf": [
@@ -1147,6 +1426,33 @@
               }
             ],
             "title": "Fee Currency"
+          },
+          "fee_status": {
+            "type": "string",
+            "enum": [
+              "UNKNOWN",
+              "PROPOSED",
+              "AGREED",
+              "INVOICED",
+              "PAID",
+              "NOT_APPLICABLE"
+            ],
+            "title": "Fee Status"
+          },
+          "needs_review": {
+            "type": "boolean",
+            "title": "Needs Review"
+          },
+          "uncertainty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncertainty"
           },
           "completed_at": {
             "anyOf": [
@@ -1224,19 +1530,38 @@
             },
             "type": "array",
             "title": "Contacts"
+          },
+          "urgency": {
+            "type": "string",
+            "enum": [
+              "OVERDUE",
+              "ACUTE",
+              "UPCOMING",
+              "NONE"
+            ],
+            "title": "Urgency",
+            "readOnly": true
           }
         },
         "type": "object",
         "required": [
           "id",
+          "record_key",
           "title",
+          "priority",
           "status",
           "summary",
           "deliverables",
+          "last_contact_date",
           "next_action",
+          "owner",
+          "deadline",
           "release_at",
           "fee_amount_minor",
           "fee_currency",
+          "fee_status",
+          "needs_review",
+          "uncertainty",
           "completed_at",
           "brand_organization_id",
           "agency_organization_id",
@@ -1245,7 +1570,8 @@
           "updated_at",
           "brand_organization",
           "agency_organization",
-          "contacts"
+          "contacts",
+          "urgency"
         ],
         "title": "CoopDetail"
       },
@@ -1325,6 +1651,22 @@
             ],
             "title": "Title"
           },
+          "priority": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "P0",
+                  "P1",
+                  "P2"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priority"
+          },
           "summary": {
             "anyOf": [
               {
@@ -1350,6 +1692,18 @@
             ],
             "title": "Deliverables"
           },
+          "last_contact_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Contact Date"
+          },
           "next_action": {
             "anyOf": [
               {
@@ -1360,6 +1714,30 @@
               }
             ],
             "title": "Next Action"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline"
           },
           "release_at": {
             "anyOf": [
@@ -1372,6 +1750,47 @@
               }
             ],
             "title": "Release At"
+          },
+          "fee_status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "UNKNOWN",
+                  "PROPOSED",
+                  "AGREED",
+                  "INVOICED",
+                  "PAID",
+                  "NOT_APPLICABLE"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fee Status"
+          },
+          "needs_review": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Needs Review"
+          },
+          "uncertainty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncertainty"
           },
           "brand_organization_id": {
             "anyOf": [
@@ -1396,6 +1815,30 @@
               }
             ],
             "title": "Agency Organization Id"
+          },
+          "brand_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand Key"
+          },
+          "agency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agency Key"
           }
         },
         "additionalProperties": false,
@@ -1412,9 +1855,22 @@
             "format": "uuid",
             "title": "Id"
           },
+          "record_key": {
+            "type": "string",
+            "title": "Record Key"
+          },
           "title": {
             "type": "string",
             "title": "Title"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "P0",
+              "P1",
+              "P2"
+            ],
+            "title": "Priority"
           },
           "status": {
             "$ref": "#/components/schemas/CoopStatus"
@@ -1445,6 +1901,18 @@
             ],
             "title": "Deliverables"
           },
+          "last_contact_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Contact Date"
+          },
           "next_action": {
             "anyOf": [
               {
@@ -1455,6 +1923,29 @@
               }
             ],
             "title": "Next Action"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline"
           },
           "release_at": {
             "anyOf": [
@@ -1489,6 +1980,33 @@
               }
             ],
             "title": "Fee Currency"
+          },
+          "fee_status": {
+            "type": "string",
+            "enum": [
+              "UNKNOWN",
+              "PROPOSED",
+              "AGREED",
+              "INVOICED",
+              "PAID",
+              "NOT_APPLICABLE"
+            ],
+            "title": "Fee Status"
+          },
+          "needs_review": {
+            "type": "boolean",
+            "title": "Needs Review"
+          },
+          "uncertainty": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncertainty"
           },
           "completed_at": {
             "anyOf": [
@@ -1539,25 +2057,45 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "urgency": {
+            "type": "string",
+            "enum": [
+              "OVERDUE",
+              "ACUTE",
+              "UPCOMING",
+              "NONE"
+            ],
+            "title": "Urgency",
+            "readOnly": true
           }
         },
         "type": "object",
         "required": [
           "id",
+          "record_key",
           "title",
+          "priority",
           "status",
           "summary",
           "deliverables",
+          "last_contact_date",
           "next_action",
+          "owner",
+          "deadline",
           "release_at",
           "fee_amount_minor",
           "fee_currency",
+          "fee_status",
+          "needs_review",
+          "uncertainty",
           "completed_at",
           "brand_organization_id",
           "agency_organization_id",
           "version",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "urgency"
         ],
         "title": "CoopRead"
       },
@@ -1635,6 +2173,20 @@
       },
       "OrganizationCreate": {
         "properties": {
+          "record_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 160,
+                "minLength": 3,
+                "pattern": "^[a-z0-9][a-z0-9._-]+$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Record Key"
+          },
           "name": {
             "type": "string",
             "maxLength": 200,
@@ -1684,10 +2236,17 @@
       },
       "OrganizationRead": {
         "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "record_key": {
+            "type": "string",
+            "title": "Record Key"
+          },
           "name": {
             "type": "string",
-            "maxLength": 200,
-            "minLength": 1,
             "title": "Name"
           },
           "kind": {
@@ -1697,14 +2256,12 @@
               "AGENCY",
               "OTHER"
             ],
-            "title": "Kind",
-            "default": "OTHER"
+            "title": "Kind"
           },
           "website_url": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 500
+                "type": "string"
               },
               {
                 "type": "null"
@@ -1723,11 +2280,6 @@
             ],
             "title": "Notes"
           },
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "title": "Id"
-          },
           "version": {
             "type": "integer",
             "title": "Version"
@@ -1743,11 +2295,14 @@
             "title": "Updated At"
           }
         },
-        "additionalProperties": false,
         "type": "object",
         "required": [
-          "name",
           "id",
+          "record_key",
+          "name",
+          "kind",
+          "website_url",
+          "notes",
           "version",
           "created_at",
           "updated_at"

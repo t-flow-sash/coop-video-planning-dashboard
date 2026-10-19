@@ -50,6 +50,10 @@ uv run --project apps/api alembic check
 
 `make openapi` exportiert den versionierten Vertrag nach `packages/api-client/openapi.json`. Der Frontend-Adapter ist explizit gegen diese API-Modelle typisiert; FastAPI bleibt die alleinige fachliche Schreibgrenze.
 
+Der kontrollierte CLI-Import für den fachlichen Stand **19.10.2026** ist in
+[`docs/manual-coop-import.md`](docs/manual-coop-import.md) beschrieben. Der automatische
+Delta-Lauf bleibt pausiert, suspendiert und unarmed.
+
 ## Statusmodell
 
 `NEW → QUALIFYING → NEGOTIATING → CONFIRMED → IN_PRODUCTION → REVIEW → SCHEDULED → PUBLISHED → COMPLETED` mit den in der Architektur dokumentierten Rückschritten und Abbruchpfaden. `COMPLETED`, `DECLINED` und `CANCELLED` sind terminal; alle anderen Status gelten als offen. Terminale Datensätze werden nur mit „Abgeschlossene einblenden“ sichtbar.

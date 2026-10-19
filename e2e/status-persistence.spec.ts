@@ -6,6 +6,7 @@ import {
 } from "@playwright/test";
 
 const baseURL = process.env.E2E_BASE_URL ?? "http://localhost:3000";
+const apiURL = process.env.E2E_API_URL ?? baseURL;
 const nextStatus: Record<string, { value: string; label: string }> = {
   NEW: { value: "QUALIFYING", label: "In Klärung" },
   QUALIFYING: { value: "NEGOTIATING", label: "Verhandlung" },
@@ -19,12 +20,93 @@ const nextStatus: Record<string, { value: string; label: string }> = {
 
 type ApiCoop = {
   id: string;
+  record_key: string;
   title: string;
+  priority?: string;
+  needs_review?: boolean;
+  next_action?: string | null;
+  owner?: string | null;
+  uncertainty?: string | null;
   status: string;
   version: number;
 };
 
 type ApiCoopPage = { items: ApiCoop[] };
+
+function expectNoProviderOrImportIds(value: unknown): void {
+  if (Array.isArray(value)) {
+    value.forEach(expectNoProviderOrImportIds);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const forbidden = new Set([
+    "external_id",
+    "gmail_thread_id",
+    "gmail_message_id",
+    "history_id",
+    "provider_id",
+    "import_id",
+    "batch_id",
+    "manifest_id",
+  ]);
+  for (const [key, child] of Object.entries(value)) {
+    expect(forbidden.has(key), `interne ID im Web-Vertrag: ${key}`).toBeFalsy();
+    expectNoProviderOrImportIds(child);
+  }
+}
+
+test("P0, Review-Filter und Detail bleiben frei von Provider-IDs", async ({
+  page,
+  request,
+}) => {
+  const recordKey = `e2e-overview-${Date.now()}`;
+  const title = `E2E P0 ${recordKey}`;
+  const createdResponse = await request.post(`${apiURL}/api/v1/coops`, {
+    data: {
+      record_key: recordKey,
+      title,
+      priority: "P0",
+      status: "NEGOTIATING",
+      next_action: "Synthetic E2E action",
+      owner: "E2E Owner",
+      deadline: "2026-10-20",
+      needs_review: true,
+      uncertainty: "Synthetic E2E uncertainty",
+    },
+  });
+  expect(
+    createdResponse.ok(),
+    `Koop-Erstellung fehlgeschlagen: HTTP ${createdResponse.status()}`,
+  ).toBeTruthy();
+  const created = (await createdResponse.json()) as ApiCoop;
+  expect(created.id).toBeTruthy();
+  expectNoProviderOrImportIds(created);
+
+  await page.goto(`${baseURL}/coops`);
+  const table = page.getByRole("table", { name: "Offene Kooperationen" });
+  const row = table.locator("tbody tr").filter({ hasText: title });
+  await expect(row).toContainText("P0");
+  await expect(row).toContainText("Synthetic E2E action");
+
+  await page.getByText("Filter", { exact: true }).click();
+  await page.getByLabel("Datenqualität").selectOption("needs-review");
+  await expect(row).toBeVisible();
+
+  await row.locator(".title-link").click();
+  const detail = page.getByRole("complementary", { name: title });
+  await expect(detail).toContainText("E2E Owner");
+  await expect(detail).toContainText("Synthetic E2E action");
+  await expect(detail).toContainText("Synthetic E2E uncertainty");
+
+  const detailResponse = await request.get(
+    `${apiURL}/api/v1/coops/${encodeURIComponent(created.id)}`,
+  );
+  expect(
+    detailResponse.ok(),
+    `Koop-Detail fehlgeschlagen: HTTP ${detailResponse.status()}`,
+  ).toBeTruthy();
+  expectNoProviderOrImportIds(await detailResponse.json());
+});
 
 async function successfulJson<T>(
   response: PlaywrightResponse,

@@ -1,25 +1,38 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from app.domain import CoopStatus, Deliverable, MoneyFields
+
+RecordKey = str
+Priority = Literal["P0", "P1", "P2"]
+FeeStatus = Literal["UNKNOWN", "PROPOSED", "AGREED", "INVOICED", "PAID", "NOT_APPLICABLE"]
+Urgency = Literal["OVERDUE", "ACUTE", "UPCOMING", "NONE"]
 
 
 class OrganizationCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    record_key: RecordKey | None = Field(
+        default=None, min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9._-]+$"
+    )
     name: str = Field(min_length=1, max_length=200)
     kind: Literal["BRAND", "AGENCY", "OTHER"] = "OTHER"
     website_url: str | None = Field(default=None, max_length=500)
     notes: str | None = None
 
 
-class OrganizationRead(OrganizationCreate):
+class OrganizationRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    record_key: RecordKey
+    name: str
+    kind: Literal["BRAND", "AGENCY", "OTHER"]
+    website_url: str | None
+    notes: str | None
     version: int
     created_at: datetime
     updated_at: datetime
@@ -27,7 +40,11 @@ class OrganizationRead(OrganizationCreate):
 
 class ContactCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    record_key: RecordKey | None = Field(
+        default=None, min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9._-]+$"
+    )
     organization_id: UUID | None = None
+    organization_key: RecordKey | None = Field(default=None, max_length=160)
     first_name: str | None = Field(default=None, max_length=100)
     last_name: str | None = Field(default=None, max_length=100)
     display_name: str = Field(min_length=1, max_length=200)
@@ -42,10 +59,18 @@ class ContactCreate(BaseModel):
         return self
 
 
-class ContactRead(ContactCreate):
+class ContactRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    record_key: RecordKey
+    organization_id: UUID | None
+    first_name: str | None
+    last_name: str | None
+    display_name: str
+    email: str | None
     normalized_email: str | None
+    phone: str | None
+    notes: str | None
     version: int
     created_at: datetime
     updated_at: datetime
@@ -58,24 +83,50 @@ class ContactLinkRead(BaseModel):
 
 
 class CoopFields(MoneyFields):
+    record_key: RecordKey | None = Field(
+        default=None, min_length=3, max_length=160, pattern=r"^[a-z0-9][a-z0-9._-]+$"
+    )
     title: str = Field(min_length=1, max_length=240)
+    priority: Priority = "P2"
     summary: str | None = None
     deliverables: list[Deliverable] | None = None
+    last_contact_date: date | None = None
     next_action: str | None = None
+    owner: str | None = Field(default=None, max_length=160)
+    deadline: date | None = None
     release_at: datetime | None = None
+    fee_status: FeeStatus = "UNKNOWN"
+    needs_review: bool = False
+    uncertainty: str | None = None
     brand_organization_id: UUID | None = None
     agency_organization_id: UUID | None = None
+    brand_key: RecordKey | None = Field(default=None, max_length=160)
+    agency_key: RecordKey | None = Field(default=None, max_length=160)
+
+    @field_validator("record_key")
+    @classmethod
+    def reject_uuid_shaped_record_key(cls, value: RecordKey | None) -> RecordKey | None:
+        if value is None:
+            return value
+        try:
+            UUID(value)
+        except ValueError:
+            return value
+        raise ValueError("UUID-shaped record_key is reserved for public UUID routes")
 
 
 class CoopCreate(CoopFields):
     model_config = ConfigDict(extra="forbid")
     status: CoopStatus = CoopStatus.NEW
     contact_ids: list[UUID] = Field(default_factory=list)
+    contact_keys: list[RecordKey] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def scheduled_has_date(self) -> CoopCreate:
+    def validate_state(self) -> CoopCreate:
         if self.status is CoopStatus.SCHEDULED and self.release_at is None:
             raise ValueError("release_at is required for SCHEDULED")
+        if self.needs_review and not (self.uncertainty and self.uncertainty.strip()):
+            raise ValueError("uncertainty is required when needs_review is true")
         return self
 
 
@@ -83,31 +134,66 @@ class CoopPatch(MoneyFields):
     model_config = ConfigDict(extra="forbid")
     version: int = Field(ge=1)
     title: str | None = Field(default=None, min_length=1, max_length=240)
+    priority: Priority | None = None
     summary: str | None = None
     deliverables: list[Deliverable] | None = None
+    last_contact_date: date | None = None
     next_action: str | None = None
+    owner: str | None = Field(default=None, max_length=160)
+    deadline: date | None = None
     release_at: datetime | None = None
+    fee_status: FeeStatus | None = None
+    needs_review: bool | None = None
+    uncertainty: str | None = None
     brand_organization_id: UUID | None = None
     agency_organization_id: UUID | None = None
+    brand_key: RecordKey | None = Field(default=None, max_length=160)
+    agency_key: RecordKey | None = Field(default=None, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_review_state(self) -> CoopPatch:
+        if self.needs_review is True and not (self.uncertainty and self.uncertainty.strip()):
+            raise ValueError("uncertainty is required when needs_review is true")
+        return self
 
 
 class CoopRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
+    record_key: RecordKey
     title: str
+    priority: Priority
     status: CoopStatus
     summary: str | None
     deliverables: list[dict[str, Any]] | None
+    last_contact_date: date | None
     next_action: str | None
+    owner: str | None
+    deadline: date | None
     release_at: datetime | None
     fee_amount_minor: int | None
     fee_currency: str | None
+    fee_status: FeeStatus
+    needs_review: bool
+    uncertainty: str | None
     completed_at: datetime | None
     brand_organization_id: UUID | None
     agency_organization_id: UUID | None
     version: int
     created_at: datetime
     updated_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def urgency(self) -> Urgency:
+        if self.deadline is None:
+            return "NONE"
+        today = datetime.now(UTC).date()
+        if self.deadline < today:
+            return "OVERDUE"
+        if self.deadline <= today + timedelta(days=2):
+            return "ACUTE"
+        return "UPCOMING"
 
 
 class CoopDetail(CoopRead):

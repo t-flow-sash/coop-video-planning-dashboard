@@ -47,6 +47,12 @@ class RestoreScriptTests(unittest.TestCase):
         ignore_delta_quarantine_patch: bool = False,
         lose_delta_quarantine_on_import_resume: bool = False,
         suspension_ack_polls: int = 1,
+        api_termination_stuck: bool = False,
+        lock_create_readback_mismatch: bool = False,
+        lock_recreated_before_cleanup: bool = False,
+        lock_lost_before_cleanup: bool = False,
+        lock_replaced_during_delete: bool = False,
+        lock_mutated_before_cleanup: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], list[list[str]], dict[str, Any]]:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
@@ -69,6 +75,9 @@ class RestoreScriptTests(unittest.TestCase):
                         "annotations": {},
                         "import_reconcile_reads": 0,
                         "replicas": 2,
+                        "api_pods": 2,
+                        "lock": None,
+                        "lock_reads": 0,
                         "generation": {item: 1 for item in self.flux_objects},
                         "observed_generation": {item: 1 for item in self.flux_objects},
                         "last_handled": {item: "old-request" for item in self.flux_objects},
@@ -207,6 +216,74 @@ class RestoreScriptTests(unittest.TestCase):
                         if os.environ.get("MOCK_LOCK_COLLISION") == "1":
                             print("Error from server (AlreadyExists)", file=sys.stderr)
                             sys.exit(1)
+                        holder_arg = next(item for item in args if item.startswith("--from-literal=holder="))
+                        state["lock"] = {
+                            "uid": "lock-uid-1",
+                            "holder": holder_arg.split("=", 2)[2],
+                            "resourceVersion": "1",
+                        }
+                        save()
+                        if "-o" in args and args[args.index("-o") + 1] == "json":
+                            print(json.dumps({
+                                "metadata": {
+                                    "uid": state["lock"]["uid"],
+                                    "resourceVersion": state["lock"]["resourceVersion"],
+                                },
+                                "data": {"holder": state["lock"]["holder"]},
+                            }))
+                    elif "get" in args and "configmap" in args:
+                        state["lock_reads"] += 1
+                        if (
+                            state["lock_reads"] == 1
+                            and os.environ.get("MOCK_LOCK_CREATE_READBACK_MISMATCH") == "1"
+                        ) or (
+                            state["lock_reads"] == 2
+                            and os.environ.get("MOCK_LOCK_RECREATED_BEFORE_CLEANUP") == "1"
+                        ):
+                            state["lock"] = {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"}
+                        if (
+                            state["lock_reads"] == 2
+                            and os.environ.get("MOCK_LOCK_LOST_BEFORE_CLEANUP") == "1"
+                        ):
+                            state["lock"] = None
+                        if (
+                            state["lock_reads"] == 2
+                            and os.environ.get("MOCK_LOCK_MUTATED_BEFORE_CLEANUP") == "1"
+                            and state["lock"] is not None
+                        ):
+                            state["lock"]["resourceVersion"] = "2"
+                        save()
+                        if state["lock"] is None:
+                            print("Error from server (NotFound)", file=sys.stderr)
+                            sys.exit(1)
+                        print(json.dumps({
+                            "metadata": {
+                                "uid": state["lock"]["uid"],
+                                "resourceVersion": state["lock"]["resourceVersion"],
+                            },
+                            "data": {"holder": state["lock"]["holder"]},
+                        }))
+                    elif "delete" in args and "configmap" in args:
+                        if os.environ.get("MOCK_LOCK_REPLACED_DURING_DELETE") == "1":
+                            state["lock"] = {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"}
+                        uid_precondition = next(
+                            (item for item in args if item.startswith("--preconditions=uid=")),
+                            "",
+                        ).split("=", 2)[-1]
+                        rv_precondition = next(
+                            (item for item in args if item.startswith("--preconditions=resourceVersion=")),
+                            "",
+                        ).split("=", 2)[-1]
+                        if (
+                            state["lock"] is None
+                            or uid_precondition != state["lock"]["uid"]
+                            or rv_precondition != state["lock"]["resourceVersion"]
+                        ):
+                            save()
+                            print("Error from server (Conflict): lock precondition failed", file=sys.stderr)
+                            sys.exit(1)
+                        state["lock"] = None
+                        save()
                     elif "create" in args and "-f" in args and "-" in args:
                         sys.stdin.read()
                         print("coop-restore-generated", end="")
@@ -230,7 +307,16 @@ class RestoreScriptTests(unittest.TestCase):
                     elif "scale" in args:
                         replica_arg = next(item for item in args if item.startswith("--replicas="))
                         state["replicas"] = int(replica_arg.split("=", 1)[1])
+                        if not (
+                            state["replicas"] == 0
+                            and os.environ.get("MOCK_API_TERMINATION_STUCK") == "1"
+                        ):
+                            state["api_pods"] = state["replicas"]
                         save()
+                    elif "rollout" in args and "status" in args and "deployment/coop-api" in args:
+                        if state["api_pods"] != state["replicas"]:
+                            print("error: timed out waiting for the condition", file=sys.stderr)
+                            sys.exit(53)
                     elif "exec" in args and os.environ.get("MOCK_FAIL_EXEC") == "1":
                         sys.exit(41)
                     sys.exit(0)
@@ -262,6 +348,20 @@ class RestoreScriptTests(unittest.TestCase):
                     else "0",
                     "MOCK_LOSE_DELTA_QUARANTINE": "1"
                     if lose_delta_quarantine_on_import_resume
+                    else "0",
+                    "MOCK_API_TERMINATION_STUCK": "1" if api_termination_stuck else "0",
+                    "MOCK_LOCK_CREATE_READBACK_MISMATCH": "1"
+                    if lock_create_readback_mismatch
+                    else "0",
+                    "MOCK_LOCK_RECREATED_BEFORE_CLEANUP": "1"
+                    if lock_recreated_before_cleanup
+                    else "0",
+                    "MOCK_LOCK_LOST_BEFORE_CLEANUP": "1" if lock_lost_before_cleanup else "0",
+                    "MOCK_LOCK_REPLACED_DURING_DELETE": "1"
+                    if lock_replaced_during_delete
+                    else "0",
+                    "MOCK_LOCK_MUTATED_BEFORE_CLEANUP": "1"
+                    if lock_mutated_before_cleanup
                     else "0",
                     "RECONCILE_ATTEMPTS": "2",
                     "RECONCILE_POLL_SECONDS": "0",
@@ -494,6 +594,85 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertFalse(any("delete configmap coop-postgres-restore-lock" in call for call in rendered))
         self.assertEqual(state["replicas"], 2)
 
+    def test_lock_create_requires_uid_and_holder_readback(self) -> None:
+        result, calls, state = self.run_restore(lock_create_readback_mismatch=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not verify ownership of PostgreSQL restore lock", result.stderr)
+        self.assertEqual(state["lock"], {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"})
+        self.assertTrue(
+            any("get configmap coop-postgres-restore-lock -o json" in call for call in rendered)
+        )
+        self.assertFalse(any(" patch " in f" {call} " for call in rendered))
+        self.assertFalse(any(" scale " in f" {call} " for call in rendered))
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+
+    def test_recreated_lock_is_preserved_and_reported_fail_closed(self) -> None:
+        result, calls, state = self.run_restore(lock_recreated_before_cleanup=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 11)
+        self.assertIn("lock ownership was lost", result.stderr)
+        self.assertIn("fail-closed", result.stderr)
+        self.assertEqual(state["lock"], {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"})
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+
+    def test_lost_lock_is_not_name_deleted_and_is_reported_fail_closed(self) -> None:
+        result, calls, state = self.run_restore(lock_lost_before_cleanup=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 11)
+        self.assertIn("lock ownership was lost", result.stderr)
+        self.assertIn("fail-closed", result.stderr)
+        self.assertIsNone(state["lock"])
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+
+    def test_uid_precondition_preserves_lock_replaced_during_delete(self) -> None:
+        result, calls, state = self.run_restore(lock_replaced_during_delete=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 11)
+        self.assertIn("UID precondition", result.stderr)
+        self.assertIn("fail-closed", result.stderr)
+        self.assertEqual(state["lock"], {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"})
+        self.assertTrue(
+            any(
+                "delete configmap coop-postgres-restore-lock" in call
+                and "--preconditions=uid=lock-uid-1" in call
+                for call in rendered
+            )
+        )
+
+    def test_resource_version_change_preserves_mutated_lock(self) -> None:
+        result, calls, state = self.run_restore(lock_mutated_before_cleanup=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 11)
+        self.assertIn("lock ownership was lost", result.stderr)
+        self.assertEqual(state["lock"]["resourceVersion"], "2")
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+
+    def test_failed_quarantine_does_not_claim_a_lost_lock_remains_held(self) -> None:
+        result, _, state = self.run_restore(
+            active_writer=True,
+            api_termination_stuck=True,
+            lock_lost_before_cleanup=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(state["lock"])
+        self.assertIn("lock ownership was lost", result.stderr)
+        self.assertNotIn("restore lock remains held", result.stderr)
+
     def test_pre_suspended_dependency_aborts_before_restore_or_api_scale_up(self) -> None:
         result, calls, state = self.run_restore(initially_suspended="kustomization/coop-migration")
         rendered = [self.operation(call) for call in calls]
@@ -521,6 +700,25 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertTrue(all(state["suspended"].values()))
         self.assertEqual(state["replicas"], 0)
         self.assertFalse(any('"suspend":false' in call for call in rendered))
+
+    def test_failure_quarantine_retains_lock_until_api_pods_terminate(self) -> None:
+        result, calls, state = self.run_restore(
+            active_writer=True,
+            api_termination_stuck=True,
+        )
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(state["replicas"], 0)
+        self.assertEqual(state["api_pods"], 2)
+        self.assertTrue(
+            any("rollout status deployment/coop-api" in call for call in rendered)
+        )
+        self.assertNotIn("verified suspended/stopped", result.stderr)
+        self.assertIn("could not prove the fail-closed quarantine", result.stderr)
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
 
     def test_success_resumes_and_reconciles_in_dependency_order(self) -> None:
         result, calls, state = self.run_restore()
@@ -576,7 +774,15 @@ class RestoreScriptTests(unittest.TestCase):
             )
         self.assertTrue(any("create -f - -o jsonpath={.metadata.name}" in call for call in rendered))
         self.assertTrue(any("delete pod coop-restore-generated" in call for call in rendered))
-        self.assertTrue(any("delete configmap coop-postgres-restore-lock" in call for call in rendered))
+        self.assertTrue(
+            any(
+                "delete configmap coop-postgres-restore-lock" in call
+                and "--preconditions=uid=lock-uid-1" in call
+                for call in rendered
+            )
+        )
+        self.assertGreaterEqual(state["lock_reads"], 2)
+        self.assertIsNone(state["lock"])
         for cronjob in (
             "coop-seed",
             "gmail-import-full",

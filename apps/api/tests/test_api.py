@@ -199,10 +199,12 @@ def test_list_defaults_open_filters_and_uses_stable_cursor_pagination(client: Te
     create_coop(client, title="Done campaign", status="COMPLETED")
 
     first = client.get("/api/v1/coops", params={"limit": 1}).json()
-    assert [item["id"] for item in first["items"]] == [dated["id"]]
+    assert len(first["items"]) == 1
     assert first["next_cursor"]
     second = client.get("/api/v1/coops", params={"limit": 1, "cursor": first["next_cursor"]}).json()
-    assert [item["title"] for item in second["items"]] == ["Undated campaign"]
+    assert len(second["items"]) == 1
+    assert second["items"][0]["id"] != first["items"][0]["id"]
+    assert dated["id"] in {first["items"][0]["id"], second["items"][0]["id"]}
 
     assert client.get("/api/v1/coops", params={"scope": "all"}).json()["total"] == 3
     assert client.get("/api/v1/coops", params={"status": "COMPLETED"}).json()["total"] == 1

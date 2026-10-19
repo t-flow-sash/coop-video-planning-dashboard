@@ -131,7 +131,10 @@ def _python_route_inventory(path: Path) -> tuple[set[tuple[str, str]], list[str]
 
 def _python_ingestion_mutation_surfaces(path: Path, root: Path) -> list[str]:
     relative = path.relative_to(root).as_posix()
-    if relative == "apps/api/app/ingestion/gmail.py":
+    if relative in {
+        "apps/api/app/ingestion/gmail.py",
+        "apps/api/app/manual_coop_import.py",
+    }:
         return []
     source = path.read_text(encoding="utf-8")
     if (

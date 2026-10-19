@@ -38,6 +38,8 @@ readonly resume_order=(
 declare -A was_suspended=()
 pod=""
 lock_acquired=false
+lock_uid=""
+lock_resource_version=""
 restore_succeeded=false
 maintenance_started=false
 
@@ -94,6 +96,26 @@ raise SystemExit(0 if valid else 1)
 ' <<<"$delta_json"
 }
 
+lock_identity_matches() {
+  local lock_json="$1"
+  python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+valid = (
+    obj.get("metadata", {}).get("uid") == sys.argv[1]
+    and obj.get("metadata", {}).get("resourceVersion") == sys.argv[2]
+    and obj.get("data", {}).get("holder") == sys.argv[3]
+)
+raise SystemExit(0 if valid else 1)
+' "$lock_uid" "$lock_resource_version" "$lock_holder" <<<"$lock_json"
+}
+
+verify_lock_ownership() {
+  local lock_json
+  lock_json="$(kubectl -n "$NAMESPACE" get configmap "$LOCK_NAME" -o json)" || return 1
+  lock_identity_matches "$lock_json"
+}
+
 fail_closed() {
   local resource kind name cronjob
   local quarantine_proven=true
@@ -139,6 +161,9 @@ fail_closed() {
   if ! kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas=0 >/dev/null 2>&1; then
     quarantine_proven=false
   fi
+  if ! kubectl -n "$NAMESPACE" rollout status deployment/coop-api --timeout=180s >/dev/null 2>&1; then
+    quarantine_proven=false
+  fi
   if [[ "$(kubectl -n "$NAMESPACE" get deployment coop-api -o jsonpath='{.spec.replicas}' 2>/dev/null || true)" != 0 ]]; then
     quarantine_proven=false
   fi
@@ -155,12 +180,28 @@ cleanup() {
     if fail_closed; then
       echo "Restore failed: Flux root, source, workload Kustomizations, schedulers, and coop-api are verified suspended/stopped." >&2
     else
-      echo "Restore failed and could not prove the fail-closed quarantine; the restore lock remains held for operator containment." >&2
-      lock_acquired=false
+      if verify_lock_ownership; then
+        echo "Restore failed and could not prove the fail-closed quarantine; the restore lock remains held for operator containment." >&2
+        lock_acquired=false
+      else
+        echo "Restore failed, quarantine is unproven, and restore lock ownership was lost; refusing to claim containment." >&2
+      fi
     fi
   fi
   if [[ "$lock_acquired" == true ]]; then
-    kubectl -n "$NAMESPACE" delete configmap "$LOCK_NAME" --ignore-not-found >/dev/null 2>&1 || true
+    if ! verify_lock_ownership; then
+      echo "Restore lock ownership was lost; refusing to delete an unverified lock (fail-closed)." >&2
+      if ((status == 0)); then
+        status=11
+      fi
+    elif ! kubectl -n "$NAMESPACE" delete configmap "$LOCK_NAME" \
+      --preconditions="uid=${lock_uid}" \
+      --preconditions="resourceVersion=${lock_resource_version}" >/dev/null; then
+      echo "Restore lock deletion failed its UID precondition or resourceVersion precondition; a changed lock was preserved (fail-closed)." >&2
+      if ((status == 0)); then
+        status=11
+      fi
+    fi
   fi
   exit "$status"
 }
@@ -169,9 +210,28 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 lock_holder="$(date -u +%Y%m%dT%H%M%S)-$$-${RANDOM}"
-if ! kubectl -n "$NAMESPACE" create configmap "$LOCK_NAME" \
-  --from-literal="holder=${lock_holder}" >/dev/null; then
+if ! lock_create_json="$(kubectl -n "$NAMESPACE" create configmap "$LOCK_NAME" \
+  --from-literal="holder=${lock_holder}" -o json)"; then
   echo "Could not acquire cluster-wide PostgreSQL restore lock; another restore may be running." >&2
+  exit 8
+fi
+if ! read -r lock_uid lock_resource_version < <(python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+uid = obj.get("metadata", {}).get("uid")
+resource_version = obj.get("metadata", {}).get("resourceVersion")
+holder = obj.get("data", {}).get("holder")
+if (
+    not isinstance(uid, str)
+    or not uid
+    or not isinstance(resource_version, str)
+    or not resource_version
+    or holder != sys.argv[1]
+):
+    raise SystemExit(1)
+print(uid, resource_version)
+' "$lock_holder" <<<"$lock_create_json") || ! verify_lock_ownership; then
+  echo "Could not verify ownership of PostgreSQL restore lock; refusing to continue or delete it." >&2
   exit 8
 fi
 lock_acquired=true

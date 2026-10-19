@@ -18,7 +18,7 @@ Der operative Bootstrap- und Delta-Pfad existiert zunächst **dormant**. Er muti
 
 Erforderliche Secret-Keys sind `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` und `GMAIL_ACCOUNT`. `gmail-oauth.secret.example.yaml` ist wertfrei und wird nicht gerendert. Das produktive `gmail-oauth.secret.sops.yaml` wird erst aus dem root-only Store erzeugt, mit SOPS verschlüsselt und explizit in die Kustomization aufgenommen.
 
-Der Adapter erneuert das Access Token über `oauth2.googleapis.com`, validiert den live zurückgelieferten Scope über Tokeninfo und bindet den Lauf über Tokeninfo (falls dort `email` vorhanden ist) sowie zwingend über `users.getProfile.emailAddress` an `GMAIL_ACCOUNT`. Vor Provider- oder Datenbankzugriff muss außerdem der normalisierte Account zum unabhängig freigegebenen `GMAIL_ACCOUNT_SHA256` passen; der Null-Sentinel ist nicht ausführbar. Zulässig sind ausschließlich `https://www.googleapis.com/auth/gmail.readonly` und explizite Identity-Scopes (`openid`, `email`, `profile`, `userinfo.email`, `userinfo.profile`). Zusätzliche Gmail- oder Workspace-Rechte blockieren den Lauf fail-closed. Bis ein dediziertes least-privilege Refresh-Token bereitgestellt und read-back-verifiziert ist, bleiben alle Gmail-Scheduler suspendiert und unarmed.
+Der Adapter erneuert das Access Token über `oauth2.googleapis.com`, verlangt im live zurückgelieferten Scope mindestens `https://www.googleapis.com/auth/gmail.readonly` und bindet den Lauf über Tokeninfo (falls dort `email` vorhanden ist) sowie zwingend über `users.getProfile.emailAddress` an `GMAIL_ACCOUNT`. Vor Provider- oder Datenbankzugriff muss außerdem der normalisierte Account zum unabhängig freigegebenen `GMAIL_ACCOUNT_SHA256` passen; der Null-Sentinel ist nicht ausführbar. Die Produktentscheidung vom 19.10.2026 erlaubt das vorhandene Credential mit zusätzlichen Gmail-/Drive-/Calendar-Scopes. Diese zusätzlichen Token-Rechte sind keine Aktionsfreigabe: Der Collector besitzt ausschließlich GET-basierte Gmail-Profil-, Nachrichten-, Metadaten- und History-Lesepfade; keine Mail-, Draft-, Label-, Calendar- oder Drive-Mutationsmethode ist implementiert. Senden bleibt ohne explizite Freigabe verboten.
 
 ## FULL und Checkpoint-Bindung
 
@@ -286,7 +286,7 @@ dadurch suspendiert; die Quarantäne darf erst in einem separat reviewten
 Post-Restore-Schritt nach DB-, Checkpoint- und Evidence-Attestation entfernt werden.
 Das Entfernen der Restore-Quarantäne aktiviert Delta ausdrücklich nicht: Danach müssen
 weiterhin `suspend=true` und `GMAIL_IMPORT_ARMED=false` read-back-verifiziert werden.
-Eine spätere Aktivierung setzt ein dediziertes, ausschließlich für `gmail.readonly` plus
-zulässige Identity-Scopes ausgestelltes Credential voraus und benötigt einen separaten
-Review-PR samt Live-Attestation. Jede Abweichung suspendiert `coop-import` und Delta
+Eine spätere Aktivierung darf das ausdrücklich freigegebene vorhandene Credential verwenden,
+setzt aber einen separaten Review-PR samt statischer und dynamischer GET-only-Live-Attestation
+voraus. Jede Abweichung vom mutationsfreien Collectorpfad suspendiert `coop-import` und Delta
 erneut. Full und Bootstrap bleiben suspendiert und unbewaffnet.

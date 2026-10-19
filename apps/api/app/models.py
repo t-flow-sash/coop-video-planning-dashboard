@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -41,6 +43,7 @@ class Organization(TimestampVersionMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    record_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(200))
     normalized_name: Mapped[str] = mapped_column(String(200))
     kind: Mapped[str] = mapped_column(String(20))
@@ -64,6 +67,7 @@ class Contact(TimestampVersionMixin, Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    record_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
     organization_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("organization.id"))
     first_name: Mapped[str | None] = mapped_column(String(100))
     last_name: Mapped[str | None] = mapped_column(String(100))
@@ -82,6 +86,11 @@ class Coop(TimestampVersionMixin, Base):
             "status IN (" + ",".join(f"'{status.value}'" for status in CoopStatus) + ")",
             name="ck_coop_status",
         ),
+        CheckConstraint("priority IN ('P0','P1','P2')", name="ck_coop_priority"),
+        CheckConstraint(
+            "fee_status IN ('UNKNOWN','PROPOSED','AGREED','INVOICED','PAID','NOT_APPLICABLE')",
+            name="ck_coop_fee_status",
+        ),
         CheckConstraint(
             "(fee_amount_minor IS NULL) = (fee_currency IS NULL)", name="ck_coop_fee_pair"
         ),
@@ -95,19 +104,31 @@ class Coop(TimestampVersionMixin, Base):
         Index("ix_coop_status_release_at", "status", "release_at"),
         Index("ix_coop_brand", "brand_organization_id"),
         Index("ix_coop_agency", "agency_organization_id"),
+        Index("ix_coop_priority_deadline", "priority", "deadline"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    record_key: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    is_synthetic_seed: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
     title: Mapped[str] = mapped_column(String(240))
+    priority: Mapped[str] = mapped_column(String(2), default="P2", server_default="P2")
     status: Mapped[str] = mapped_column(String(30), default=CoopStatus.NEW.value)
     brand_organization_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("organization.id"))
     agency_organization_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("organization.id"))
     summary: Mapped[str | None] = mapped_column(Text)
     deliverables: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
     next_action: Mapped[str | None] = mapped_column(Text)
+    last_contact_date: Mapped[date | None] = mapped_column(Date)
+    owner: Mapped[str | None] = mapped_column(String(160))
+    deadline: Mapped[date | None] = mapped_column(Date)
     release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fee_amount_minor: Mapped[int | None] = mapped_column(BigInteger)
     fee_currency: Mapped[str | None] = mapped_column(String(3))
+    fee_status: Mapped[str] = mapped_column(String(20), default="UNKNOWN", server_default="UNKNOWN")
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    uncertainty: Mapped[str | None] = mapped_column(Text)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     brand_organization: Mapped[Organization | None] = relationship(
         foreign_keys=[brand_organization_id]
@@ -148,7 +169,8 @@ class AuditEvent(Base):
     __table_args__ = (
         CheckConstraint("actor_type IN ('USER','AGENT','SYSTEM')", name="ck_audit_actor"),
         CheckConstraint(
-            "source IN ('DASHBOARD','INFLUENCER_AGENT','GMAIL_INGESTION','SEED','API')",
+            "source IN ('DASHBOARD','INFLUENCER_AGENT','GMAIL_INGESTION',"
+            "'MANUAL_IMPORT','SEED','API')",
             name="ck_audit_source",
         ),
         Index("ix_audit_coop_created", "coop_id", text("created_at DESC")),
@@ -307,4 +329,36 @@ class SourceRecordObservation(Base):
     source_record_revision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     observed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ManualImportBatch(Base):
+    __tablename__ = "manual_import_batch"
+    __table_args__ = (
+        CheckConstraint("schema_version = 1", name="ck_manual_import_schema_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    manifest_id: Mapped[str] = mapped_column(String(160))
+    manifest_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    schema_version: Mapped[int] = mapped_column(Integer)
+    summary: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CoopImportState(Base):
+    __tablename__ = "coop_import_state"
+    __table_args__ = (CheckConstraint("record_version >= 1", name="ck_coop_import_record_version"),)
+
+    coop_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("coop.id", ondelete="CASCADE"), primary_key=True
+    )
+    record_version: Mapped[int] = mapped_column(Integer)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    snapshot_hash: Mapped[str] = mapped_column(String(64))
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("manual_import_batch.id"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

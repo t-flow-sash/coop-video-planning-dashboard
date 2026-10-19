@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.models import AuditEvent, Contact, Coop, CoopContact, Organization
+from app.synthetic_seeds import SYNTHETIC_SEED_COOP_IDS
 
 ORGS = [
     ("00000000-0000-4000-8000-000000000101", "Northstar Labs", "BRAND"),
@@ -71,7 +72,15 @@ def _seed(session: Session) -> None:
     for id_value, name, kind in ORGS:
         org_id = UUID(id_value)
         if session.get(Organization, org_id) is None:
-            session.add(Organization(id=org_id, name=name, normalized_name=name.lower(), kind=kind))
+            session.add(
+                Organization(
+                    id=org_id,
+                    record_key=f"org-{org_id.hex}",
+                    name=name,
+                    normalized_name=name.lower(),
+                    kind=kind,
+                )
+            )
     session.flush()
     for id_value, organization_id, display_name, email in CONTACTS:
         contact_id = UUID(id_value)
@@ -80,6 +89,7 @@ def _seed(session: Session) -> None:
             session.add(
                 Contact(
                     id=contact_id,
+                    record_key=f"contact-{contact_id.hex}",
                     organization_id=UUID(organization_id),
                     first_name=first_name,
                     last_name=last_name,
@@ -97,6 +107,8 @@ def _seed(session: Session) -> None:
         brand_id = UUID(ORGS[index % 2][0])
         coop = Coop(
             id=coop_id,
+            record_key=f"coop-{coop_id.hex}",
+            is_synthetic_seed=coop_id in SYNTHETIC_SEED_COOP_IDS,
             title=title,
             status=status,
             brand_organization_id=brand_id,
