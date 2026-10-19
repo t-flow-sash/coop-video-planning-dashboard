@@ -4,6 +4,10 @@ from datetime import date
 from typing import Any
 
 from fastapi.testclient import TestClient
+from sqlalchemy import Engine, select
+from sqlalchemy.orm import Session
+
+from app.models import AuditEvent, Coop
 
 
 def _assert_no_provider_or_import_ids(value: Any) -> None:
@@ -67,6 +71,56 @@ def test_coop_overview_keeps_public_uuids_but_hides_provider_and_import_ids(
     _assert_no_provider_or_import_ids(detail.json())
 
 
+def test_public_audit_omits_internal_import_references_but_database_retains_them(
+    client: TestClient, test_engine: Engine
+) -> None:
+    created = client.post(
+        "/api/v1/coops",
+        json={
+            "record_key": "audit-redaction",
+            "title": "Audit redaction",
+            "status": "NEW",
+            "uncertainty": "Awaiting verification",
+        },
+    ).json()
+    manifest_hash = "a" * 64
+    internal_request_id = f"manual-import-{manifest_hash[:24]}"
+    with Session(test_engine) as session, session.begin():
+        coop = session.scalar(select(Coop).where(Coop.record_key == "audit-redaction"))
+        assert coop is not None
+        session.add(
+            AuditEvent(
+                coop_id=coop.id,
+                action="MANUAL_IMPORT_UPDATED",
+                actor_type="SYSTEM",
+                actor_id="manual-coop-import-v1",
+                source="MANUAL_IMPORT",
+                changes={},
+                request_id=internal_request_id,
+                source_reference=manifest_hash,
+            )
+        )
+
+    response = client.get(f"/api/v1/coops/{created['id']}/audit-events")
+
+    assert response.status_code == 200, response.text
+    serialized = response.text
+    import_event = next(
+        item for item in response.json()["items"] if item["source"] == "MANUAL_IMPORT"
+    )
+    assert "request_id" not in import_event
+    assert "source_reference" not in import_event
+    assert manifest_hash not in serialized
+    assert internal_request_id not in serialized
+    with Session(test_engine) as session:
+        stored = session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "MANUAL_IMPORT_UPDATED")
+        )
+        assert stored is not None
+        assert stored.request_id == internal_request_id
+        assert stored.source_reference == manifest_hash
+
+
 def test_list_filters_priority_review_and_deadline_and_sorts_priority_first(
     client: TestClient,
 ) -> None:
@@ -104,10 +158,136 @@ def test_list_filters_priority_review_and_deadline_and_sorts_priority_first(
     assert [item["record_key"] for item in overdue["items"]] == ["synthetic-p2"]
 
 
+def test_create_defaults_to_review_and_requires_a_meaningful_uncertainty(
+    client: TestClient,
+) -> None:
+    missing_reason = client.post(
+        "/api/v1/coops",
+        json={"record_key": "default-review-missing", "title": "Default review missing"},
+    )
+    blank_reason = client.post(
+        "/api/v1/coops",
+        json={
+            "record_key": "default-review-blank",
+            "title": "Default review blank",
+            "uncertainty": "   ",
+        },
+    )
+    explained = client.post(
+        "/api/v1/coops",
+        json={
+            "record_key": "default-review-explained",
+            "title": "Default review explained",
+            "uncertainty": "Source details have not been verified",
+        },
+    )
+
+    assert missing_reason.status_code == 422
+    assert blank_reason.status_code == 422
+    assert explained.status_code == 201, explained.text
+    assert explained.json()["needs_review"] is True
+
+
+def test_search_covers_operational_coop_and_linked_identity_fields(client: TestClient) -> None:
+    brand = client.post(
+        "/api/v1/organizations",
+        json={"record_key": "brand-aurora", "name": "Aurora Organisation", "kind": "BRAND"},
+    ).json()
+    agency = client.post(
+        "/api/v1/organizations",
+        json={"record_key": "agency-nimbus", "name": "Nimbus Agency", "kind": "AGENCY"},
+    ).json()
+    contact = client.post(
+        "/api/v1/contacts",
+        json={
+            "record_key": "contact-quasar",
+            "display_name": "Quasar Contact",
+            "email": "quasar@example.invalid",
+            "organization_id": agency["id"],
+        },
+    ).json()
+    target = client.post(
+        "/api/v1/coops",
+        json={
+            "record_key": "search-target",
+            "title": "Tangerine title",
+            "summary": "Violet summary",
+            "owner": "Cobalt Owner",
+            "next_action": "Prepare Magenta briefing",
+            "brand_organization_id": brand["id"],
+            "agency_organization_id": agency["id"],
+            "contact_ids": [contact["id"]],
+            "needs_review": False,
+        },
+    ).json()
+    distractor = client.post(
+        "/api/v1/coops",
+        json={"record_key": "search-distractor", "title": "Unrelated", "needs_review": False},
+    ).json()
+
+    for query in (
+        "tangerine",
+        "violet",
+        "cobalt",
+        "magenta",
+        "aurora",
+        "quasar",
+        "nimbus",
+    ):
+        response = client.get("/api/v1/coops", params={"scope": "all", "query": query})
+        assert response.status_code == 200, response.text
+        assert [item["id"] for item in response.json()["items"]] == [target["id"]]
+        assert distractor["id"] not in {item["id"] for item in response.json()["items"]}
+
+
+def test_coop_list_embeds_relationships_without_detail_requests(client: TestClient) -> None:
+    brand = client.post(
+        "/api/v1/organizations",
+        json={"record_key": "brand-list", "name": "List Brand", "kind": "BRAND"},
+    ).json()
+    agency = client.post(
+        "/api/v1/organizations",
+        json={"record_key": "agency-list", "name": "List Agency", "kind": "AGENCY"},
+    ).json()
+    contact = client.post(
+        "/api/v1/contacts",
+        json={
+            "record_key": "contact-list",
+            "display_name": "List Contact",
+            "email": "list-contact@example.invalid",
+        },
+    ).json()
+    created = client.post(
+        "/api/v1/coops",
+        json={
+            "record_key": "relationship-list",
+            "title": "Relationship list",
+            "brand_organization_id": brand["id"],
+            "agency_organization_id": agency["id"],
+            "contact_ids": [contact["id"]],
+            "needs_review": False,
+        },
+    ).json()
+
+    response = client.get("/api/v1/coops", params={"scope": "all", "query": "Relationship"})
+
+    assert response.status_code == 200, response.text
+    [item] = response.json()["items"]
+    assert item["id"] == created["id"]
+    assert item["brand_organization"]["name"] == "List Brand"
+    assert item["agency_organization"]["name"] == "List Agency"
+    assert item["contacts"][0]["contact"]["display_name"] == "List Contact"
+
+
 def test_patch_cannot_enable_review_without_explaining_uncertainty(client: TestClient) -> None:
     created = client.post(
         "/api/v1/coops",
-        json={"record_key": "review-guard", "title": "Review guard", "status": "NEW"},
+        json={
+            "record_key": "review-guard",
+            "title": "Review guard",
+            "status": "NEW",
+            "needs_review": False,
+        },
     ).json()
 
     response = client.patch(

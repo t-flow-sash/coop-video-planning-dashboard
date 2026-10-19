@@ -142,16 +142,22 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
             ).all()
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("e8a1c4d7b902")
+            ).scalar_one() == ("f9b2d4e6a801")
             record_keys = connection.execute(
                 text(
-                    "SELECT id, record_key, priority, fee_status, is_synthetic_seed "
+                    "SELECT id, record_key, priority, fee_status, is_synthetic_seed, "
+                    "needs_review, uncertainty "
                     "FROM coop ORDER BY title"
                 )
             ).all()
             assert len({row.record_key for row in record_keys}) == 7
             assert all(row.record_key.startswith("coop-") for row in record_keys)
             assert all((row.priority, row.fee_status) == ("P2", "UNKNOWN") for row in record_keys)
+            assert all(row.needs_review is True for row in record_keys)
+            assert all(
+                row.uncertainty == "Migrated record has not been explicitly reviewed."
+                for row in record_keys
+            )
             assert {row.id for row in record_keys if row.is_synthetic_seed} == set(known_seed_ids)
             assert (
                 next(row for row in record_keys if row.id == genuine_user_id).is_synthetic_seed
@@ -274,7 +280,7 @@ def test_operational_source_activation_downgrade_is_consumption_safe() -> None:
             _downgrade_alembic(isolated_url, "c2d7a91f4e60")
         with isolated.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "e8a1c4d7b902"
+                "f9b2d4e6a801"
             )
             assert (
                 connection.scalar(

@@ -264,6 +264,16 @@ export function CoopWorkspace({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   });
+  useEffect(() => {
+    if (!selectedId) return;
+    const shellNavigation = Array.from(
+      document.querySelectorAll<HTMLElement>(".sidebar, .mobile-topbar"),
+    );
+    shellNavigation.forEach((element) => element.setAttribute("inert", ""));
+    return () => {
+      shellNavigation.forEach((element) => element.removeAttribute("inert"));
+    };
+  }, [selectedId]);
   const reset = () => {
     const next: QueryState = {
       q: "",
@@ -379,7 +389,11 @@ export function CoopWorkspace({
 
   return (
     <div className={`workspace ${selectedId ? "has-detail" : ""}`}>
-      <section className="list-pane" aria-label="Kooperationsarbeitsbereich">
+      <section
+        className="list-pane"
+        aria-label="Kooperationsarbeitsbereich"
+        inert={selectedId ? true : undefined}
+      >
         <header className="page-heading">
           <div>
             <h1>Kooperationen</h1>
@@ -895,6 +909,7 @@ function CoopTable({
             <th scope="col">Honorar</th>
             <th scope="col">Kontakt / Agentur</th>
             <th scope="col">Owner</th>
+            <th scope="col">Review</th>
           </tr>
         </thead>
         <tbody>
@@ -956,6 +971,16 @@ function CoopTable({
                   />
                 </td>
                 <td>{coop.owner ?? "Nicht zugewiesen"}</td>
+                <td>
+                  {coop.needs_review ? (
+                    <span className="review-warning">
+                      Prüfung erforderlich
+                      {coop.uncertainty && <small>{coop.uncertainty}</small>}
+                    </span>
+                  ) : (
+                    <span>Kein Prüfhinweis</span>
+                  )}
+                </td>
               </tr>
             );
           })}
@@ -978,6 +1003,9 @@ function CoopCards({
           <article onClick={() => onOpen(coop.id)}>
             <div className="card-top">
               <span className="status-badge">{statusLabel(coop.status)}</span>
+              <strong className={`priority priority-${coop.priority ?? "P2"}`}>
+                {coop.priority ?? "P2"}
+              </strong>
               <Sync coop={coop} />
             </div>
             <button
@@ -989,6 +1017,37 @@ function CoopCards({
             </button>
             <p>{coop.brand?.name ?? "Marke nicht erfasst"}</p>
             <dl>
+              <div>
+                <dt>Deadline</dt>
+                <dd>
+                  <strong
+                    className={`urgency urgency-${coop.urgency ?? "NONE"}`}
+                  >
+                    {urgencyLabel(coop)}
+                  </strong>{" "}
+                  {formatDate(coop.deadline)}
+                </dd>
+              </div>
+              <div>
+                <dt>Nächste Aktion</dt>
+                <dd>{coop.next_action ?? "Noch nicht erfasst"}</dd>
+              </div>
+              <div>
+                <dt>Owner</dt>
+                <dd>{coop.owner ?? "Nicht zugewiesen"}</dd>
+              </div>
+              <div>
+                <dt>Letzter Kontakt</dt>
+                <dd>{formatDate(coop.last_contact_date)}</dd>
+              </div>
+              <div>
+                <dt>Review</dt>
+                <dd>
+                  {coop.needs_review
+                    ? `Prüfung erforderlich${coop.uncertainty ? `: ${coop.uncertainty}` : ""}`
+                    : "Kein Prüfhinweis"}
+                </dd>
+              </div>
               <div>
                 <dt>Release</dt>
                 <dd>{formatDate(coop.release_at)}</dd>
@@ -1050,6 +1109,32 @@ function DetailPanel({
   demoMode: boolean;
 }) {
   const heading = useRef<HTMLHeadingElement>(null);
+  const trapFocus = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]',
+      ),
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      event.currentTarget.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (!focusable.includes(active as HTMLElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
   useEffect(() => {
     heading.current?.focus();
   }, [coop?.id]);
@@ -1057,15 +1142,26 @@ function DetailPanel({
     return (
       <aside
         className="detail-panel"
+        role="dialog"
+        aria-modal="true"
         aria-label="Coop-Details"
         aria-busy="true"
+        tabIndex={-1}
+        onKeyDown={trapFocus}
       >
         <p>Details werden geladen …</p>
       </aside>
     );
   if (!coop)
     return (
-      <aside className="detail-panel" aria-label="Coop-Details">
+      <aside
+        className="detail-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Coop-Details"
+        tabIndex={-1}
+        onKeyDown={trapFocus}
+      >
         <div className="state-block">
           <h2>{error ?? "Details konnten nicht geladen werden."}</h2>
           <button onClick={onRetry}>Erneut versuchen</button>
@@ -1082,7 +1178,14 @@ function DetailPanel({
         (coop.agency && item.agency?.id === coop.agency.id)),
   );
   return (
-    <aside className="detail-panel" aria-labelledby="coop-detail-title">
+    <aside
+      className="detail-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="coop-detail-title"
+      tabIndex={-1}
+      onKeyDown={trapFocus}
+    >
       {demoMode && (
         <p className="detail-demo-note" role="note">
           <strong>Öffentliche Demo:</strong> Synthetische Daten · keine API,

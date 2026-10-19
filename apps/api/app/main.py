@@ -223,7 +223,7 @@ def get_coops(
     items, total = list_coops(session, limit=limit, offset=offset, filters=filters)
     next_cursor = encode_cursor(offset + len(items)) if offset + len(items) < total else None
     return {
-        "items": [CoopRead.model_validate(item).model_dump(mode="json") for item in items],
+        "items": [CoopDetail.model_validate(item) for item in items],
         "next_cursor": next_cursor,
         "total": total,
     }

@@ -96,7 +96,7 @@ class CoopFields(MoneyFields):
     deadline: date | None = None
     release_at: datetime | None = None
     fee_status: FeeStatus = "UNKNOWN"
-    needs_review: bool = False
+    needs_review: bool = True
     uncertainty: str | None = None
     brand_organization_id: UUID | None = None
     agency_organization_id: UUID | None = None
@@ -222,6 +222,8 @@ class ReopenRequest(BaseModel):
 
 
 class AuditEventRead(BaseModel):
+    """Public audit projection; internal correlation and source references stay private."""
+
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     coop_id: UUID
@@ -231,13 +233,13 @@ class AuditEventRead(BaseModel):
     source: str
     changes: dict[str, Any]
     reason: str | None
-    request_id: str
-    source_reference: str | None
     created_at: datetime
 
 
 class CoopPage(BaseModel):
-    items: list[CoopRead]
+    # The operational overview needs linked display data. Returning the enriched
+    # projection per page avoids one detail request per cooperation in the web UI.
+    items: list[CoopDetail]
     next_cursor: str | None
     total: int
 

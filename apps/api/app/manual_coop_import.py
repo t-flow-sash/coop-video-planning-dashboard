@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
-from sqlalchemy import delete, select, text
+from sqlalchemy import case, delete, select, text
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
@@ -25,7 +25,7 @@ from app.models import (
     ManualImportBatch,
     Organization,
 )
-from app.synthetic_seeds import SYNTHETIC_SEED_COOP_IDS
+from app.synthetic_seeds import SYNTHETIC_SEED_COOP_IDS, SYNTHETIC_SEED_KEYS
 
 PROVIDER_KEYS = {
     "provider",
@@ -37,6 +37,31 @@ PROVIDER_KEYS = {
     "history_id",
     "source_reference",
 }
+INTERNAL_AUDIT_KEYS = {"id", "request_id", "source_reference", "manifest_hash"}
+
+
+def _redact_internal_audit_references(value: Any, *, key: str | None = None) -> Any:
+    """Retain useful seed history while removing DB/import identifiers."""
+    if key in INTERNAL_AUDIT_KEYS or (key is not None and key.endswith("_id")):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            item_key: _redact_internal_audit_references(item_value, key=item_key)
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_internal_audit_references(item) for item in value]
+    if isinstance(value, str):
+        try:
+            UUID(value)
+        except ValueError:
+            if len(value) == 64 and all(
+                character in "0123456789abcdefABCDEF" for character in value
+            ):
+                return "[redacted]"
+            return value
+        return "[redacted]"
+    return value
 
 
 class ManualImportError(ValueError):
@@ -73,7 +98,7 @@ class RecordInput(BaseModel):
     fee_status: Literal["UNKNOWN", "PROPOSED", "AGREED", "INVOICED", "PAID", "NOT_APPLICABLE"] = (
         "UNKNOWN"
     )
-    needs_review: bool = False
+    needs_review: bool = True
     uncertainty: str | None = None
     contact: ContactInput | None = None
     agency: AgencyInput | None = None
@@ -312,7 +337,37 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
     )
     session.add(batch)
     seed_ids = [coop.id for coop in synthetic_seeds]
+    replacement_seeds: list[dict[str, Any]] = []
     if seed_ids:
+        seed_events: dict[UUID, list[dict[str, Any]]] = {seed_id: [] for seed_id in seed_ids}
+        for event in session.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.coop_id.in_(seed_ids))
+            .order_by(
+                case((AuditEvent.action == "COOP_CREATED", 0), else_=1),
+                AuditEvent.created_at,
+                AuditEvent.id,
+            )
+        ):
+            seed_events[event.coop_id].append(
+                jsonable_encoder(
+                    {
+                        "action": event.action,
+                        "actor_type": event.actor_type,
+                        "source": event.source,
+                        "changes": _redact_internal_audit_references(event.changes),
+                        "reason": event.reason,
+                        "created_at": event.created_at,
+                    }
+                )
+            )
+        replacement_seeds = [
+            {
+                "seed_key": SYNTHETIC_SEED_KEYS[seed.id],
+                "audit_history": seed_events[seed.id],
+            }
+            for seed in sorted(synthetic_seeds, key=lambda item: SYNTHETIC_SEED_KEYS[item.id])
+        ]
         session.execute(delete(AuditEvent).where(AuditEvent.coop_id.in_(seed_ids)))
         session.execute(delete(CoopContact).where(CoopContact.coop_id.in_(seed_ids)))
         for synthetic_seed in synthetic_seeds:
@@ -376,7 +431,14 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
                 source_reference=manifest.manifest_hash,
             )
         )
-    batch.summary = counts
+    batch.summary = {
+        **counts,
+        "removed_synthetic_seeds": len(synthetic_seeds),
+        "synthetic_seed_replacement": {
+            "removed_count": len(synthetic_seeds),
+            "seeds": replacement_seeds,
+        },
+    }
     session.flush()
     return {
         **counts,

@@ -93,7 +93,7 @@ test("P0, Review-Filter und Detail bleiben frei von Provider-IDs", async ({
   await expect(row).toBeVisible();
 
   await row.locator(".title-link").click();
-  const detail = page.getByRole("complementary", { name: title });
+  const detail = page.getByRole("dialog", { name: title });
   await expect(detail).toContainText("E2E Owner");
   await expect(detail).toContainText("Synthetic E2E action");
   await expect(detail).toContainText("Synthetic E2E uncertainty");

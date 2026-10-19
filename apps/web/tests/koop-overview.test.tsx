@@ -86,13 +86,48 @@ describe("fachliche Koop-Übersicht", () => {
     expect(rows[2]).toHaveTextContent("Synthetic P1");
   });
 
+  it("zeigt Reviewstatus und Unsicherheit direkt in der Desktopliste", () => {
+    render(<CoopWorkspace repository={repository} initialCoops={coops} />);
+
+    const table = screen.getByRole("table", { name: "Offene Kooperationen" });
+    expect(
+      within(table).getByRole("columnheader", { name: "Review" }),
+    ).toBeVisible();
+    const urgentRow = within(table)
+      .getByText("Synthetic urgent")
+      .closest("tr")!;
+    expect(urgentRow).toHaveTextContent("Prüfung erforderlich");
+    expect(urgentRow).toHaveTextContent("Synthetic uncertainty");
+  });
+
+  it("zeigt operative Pflichtinformationen auf mobilen Karten", () => {
+    const { container } = render(
+      <CoopWorkspace repository={repository} initialCoops={coops} />,
+    );
+
+    const cards = container.querySelector<HTMLElement>(".mobile-cards")!;
+    const urgentCard = within(cards)
+      .getByText("Synthetic urgent")
+      .closest("article")!;
+    expect(urgentCard).toHaveTextContent("P0");
+    expect(urgentCard).toHaveTextContent("Überfällig");
+    expect(urgentCard).toHaveTextContent("18.10.2026");
+    expect(urgentCard).toHaveTextContent("Review synthetic brief");
+    expect(urgentCard).toHaveTextContent("Test Owner");
+    expect(urgentCard).toHaveTextContent("18.10.2026");
+    expect(urgentCard).toHaveTextContent("Prüfung erforderlich");
+    expect(urgentCard).toHaveTextContent("Synthetic uncertainty");
+  });
+
   it("zeigt Aktion, Owner, Kontakt, Agentur und Unsicherheit im Detail", async () => {
     render(<CoopWorkspace repository={repository} initialCoops={coops} />);
     within(screen.getByRole("table", { name: "Offene Kooperationen" }))
       .getByRole("button", { name: "Synthetic urgent" })
       .click();
 
-    const detail = await screen.findByRole("complementary");
+    const detail = await screen.findByRole("dialog", {
+      name: "Synthetic urgent",
+    });
     expect(detail).toHaveTextContent("Review synthetic brief");
     expect(detail).toHaveTextContent("Test Owner");
     expect(detail).toHaveTextContent("Synthetic Contact");

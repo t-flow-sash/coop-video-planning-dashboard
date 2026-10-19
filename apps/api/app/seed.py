@@ -119,6 +119,8 @@ def _seed(session: Session) -> None:
             release_at=release_at,
             fee_amount_minor=fee,
             fee_currency="EUR" if fee is not None else None,
+            needs_review=True,
+            uncertainty="Synthetic demonstration record; not production-reviewed.",
             completed_at=now if status == "COMPLETED" else None,
         )
         session.add(coop)

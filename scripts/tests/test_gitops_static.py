@@ -1062,7 +1062,7 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         self.assertIn("import app.database_access", workflow)
         self.assertIn("SELECT version_num FROM alembic_version", workflow)
         self.assertIn('source == ("gmail-open-coops-v1", "GMAIL", True)', workflow)
-        self.assertIn("e8a1c4d7b902", workflow)
+        self.assertIn("f9b2d4e6a801", workflow)
         self.assertIn("assert len(jobs) == 3", workflow)
 
     def test_global_render_image_gate_rejects_any_unpinned_image(self) -> None:

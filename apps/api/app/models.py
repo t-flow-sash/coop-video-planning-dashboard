@@ -101,6 +101,10 @@ class Coop(TimestampVersionMixin, Base):
         CheckConstraint(
             "status <> 'SCHEDULED' OR release_at IS NOT NULL", name="ck_coop_scheduled_date"
         ),
+        CheckConstraint(
+            "NOT needs_review OR (uncertainty IS NOT NULL AND btrim(uncertainty) <> '')",
+            name="ck_coop_review_uncertainty",
+        ),
         Index("ix_coop_status_release_at", "status", "release_at"),
         Index("ix_coop_brand", "brand_organization_id"),
         Index("ix_coop_agency", "agency_organization_id"),
@@ -127,7 +131,7 @@ class Coop(TimestampVersionMixin, Base):
     fee_amount_minor: Mapped[int | None] = mapped_column(BigInteger)
     fee_currency: Mapped[str | None] = mapped_column(String(3))
     fee_status: Mapped[str] = mapped_column(String(20), default="UNKNOWN", server_default="UNKNOWN")
-    needs_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
     uncertainty: Mapped[str | None] = mapped_column(Text)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     brand_organization: Mapped[Organization | None] = relationship(

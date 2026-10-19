@@ -15,3 +15,10 @@ SYNTHETIC_SEED_COOP_IDS = frozenset(
         UUID("00000000-0000-4000-8000-000000000306"),
     }
 )
+
+# Stable, non-sensitive labels for replacement summaries. These deliberately do
+# not expose database IDs, mutable titles, record keys, or import identifiers.
+SYNTHETIC_SEED_KEYS = {
+    seed_id: f"milestone-one-demo-{index}"
+    for index, seed_id in enumerate(sorted(SYNTHETIC_SEED_COOP_IDS, key=str), start=1)
+}

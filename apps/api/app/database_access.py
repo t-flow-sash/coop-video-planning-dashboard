@@ -173,6 +173,14 @@ def reconcile_collector_access(admin_url: str) -> None:
                     schema_id, role_id
                 )
             )
+            # Function EXECUTE is granted to PUBLIC by default. Without removing
+            # that ambient grant, the collector still inherits execution rights
+            # for extension functions such as pg_trgm despite the direct revoke.
+            cursor.execute(
+                sql.SQL("REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {} FROM PUBLIC").format(
+                    schema_id
+                )
+            )
             cursor.execute(
                 "SELECT type.typname FROM pg_type type "
                 "JOIN pg_namespace namespace ON namespace.oid = type.typnamespace "

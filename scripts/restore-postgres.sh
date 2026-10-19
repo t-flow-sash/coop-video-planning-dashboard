@@ -14,6 +14,7 @@ LOCK_NAME="coop-postgres-restore-lock"
 [[ "$CONFIRM" == "--yes" ]] || { echo "Restore is destructive; pass --yes." >&2; exit 2; }
 command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 127; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 127; }
+command -v curl >/dev/null || { echo "curl is required" >&2; exit 127; }
 
 readonly suspend_order=(
   kustomization/coop-root
@@ -116,6 +117,71 @@ verify_lock_ownership() {
   lock_identity_matches "$lock_json"
 }
 
+delete_owned_lock() {
+  local proxy_dir proxy_socket proxy_pid delete_options attempt status=0
+  proxy_dir="$(mktemp -d)"
+  proxy_socket="${proxy_dir}/kubernetes.sock"
+  kubectl proxy --unix-socket="$proxy_socket" --api-prefix=/ \
+    >"${proxy_dir}/proxy.log" 2>&1 &
+  proxy_pid=$!
+  for ((attempt = 1; attempt <= 50; attempt++)); do
+    [[ -S "$proxy_socket" ]] && break
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      status=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ ! -S "$proxy_socket" ]]; then
+    status=1
+  fi
+  if ((status == 0)); then
+    delete_options="$(python3 -c '
+import json, sys
+print(json.dumps({
+    "apiVersion": "v1",
+    "kind": "DeleteOptions",
+    "preconditions": {"uid": sys.argv[1], "resourceVersion": sys.argv[2]},
+}))
+' "$lock_uid" "$lock_resource_version")" || status=1
+  fi
+  if ((status == 0)) && ! curl --silent --show-error --fail-with-body \
+    --unix-socket "$proxy_socket" -X DELETE \
+    -H 'Content-Type: application/json' --data-binary @- \
+    "http://localhost/api/v1/namespaces/${NAMESPACE}/configmaps/${LOCK_NAME}" \
+    <<<"$delete_options" >/dev/null; then
+    status=1
+  fi
+  kill "$proxy_pid" >/dev/null 2>&1 || true
+  wait "$proxy_pid" >/dev/null 2>&1 || true
+  rm -rf "$proxy_dir"
+  return "$status"
+}
+
+verify_api_pods_absent() {
+  local selector='app.kubernetes.io/name=coop-api' pods_json
+  local absence_proven=true
+  if ! kubectl -n "$NAMESPACE" delete pods -l "$selector" \
+    --wait=true --timeout=180s >/dev/null 2>&1; then
+    absence_proven=false
+  fi
+  if ! kubectl -n "$NAMESPACE" wait --for=delete pod -l "$selector" \
+    --timeout=180s >/dev/null 2>&1; then
+    absence_proven=false
+  fi
+  if ! pods_json="$(kubectl -n "$NAMESPACE" get pods -l "$selector" -o json)"; then
+    absence_proven=false
+  elif ! python3 -c '
+import json, sys
+pods = json.load(sys.stdin).get("items")
+raise SystemExit(0 if isinstance(pods, list) and not pods else 1)
+' <<<"$pods_json"; then
+    # The unfiltered list includes terminating Pods. Any item is unsafe.
+    absence_proven=false
+  fi
+  [[ "$absence_proven" == true ]]
+}
+
 fail_closed() {
   local resource kind name cronjob
   local quarantine_proven=true
@@ -164,6 +230,9 @@ fail_closed() {
   if ! kubectl -n "$NAMESPACE" rollout status deployment/coop-api --timeout=180s >/dev/null 2>&1; then
     quarantine_proven=false
   fi
+  if ! verify_api_pods_absent; then
+    quarantine_proven=false
+  fi
   if [[ "$(kubectl -n "$NAMESPACE" get deployment coop-api -o jsonpath='{.spec.replicas}' 2>/dev/null || true)" != 0 ]]; then
     quarantine_proven=false
   fi
@@ -194,9 +263,7 @@ cleanup() {
       if ((status == 0)); then
         status=11
       fi
-    elif ! kubectl -n "$NAMESPACE" delete configmap "$LOCK_NAME" \
-      --preconditions="uid=${lock_uid}" \
-      --preconditions="resourceVersion=${lock_resource_version}" >/dev/null; then
+    elif ! delete_owned_lock; then
       echo "Restore lock deletion failed its UID precondition or resourceVersion precondition; a changed lock was preserved (fail-closed)." >&2
       if ((status == 0)); then
         status=11
@@ -331,6 +398,10 @@ for job in jobs:
 assert_no_active_writers
 kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas=0
 kubectl -n "$NAMESPACE" rollout status deployment/coop-api --timeout=180s
+verify_api_pods_absent || {
+  echo "coop-api Pods, including terminating Pods, did not become absent; refusing restore." >&2
+  exit 7
+}
 # Close the boundary against a Job which appeared while an already-running
 # reconciliation was winding down after suspension.
 assert_no_active_writers

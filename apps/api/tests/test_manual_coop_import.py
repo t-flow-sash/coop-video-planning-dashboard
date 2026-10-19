@@ -321,14 +321,32 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
 ) -> None:
     synthetic_ids = {UUID(row[0]) for row in SYNTHETIC_SEED_COOPS}
     genuine_id = uuid4()
+    internal_organization_id = uuid4()
     with Session(test_engine) as session, session.begin():
         _seed(session)
+        session.add(
+            AuditEvent(
+                coop_id=next(iter(synthetic_ids)),
+                action="COOP_UPDATED",
+                actor_type="USER",
+                source="API",
+                changes={
+                    "brand_organization_id": {
+                        "old": None,
+                        "new": str(internal_organization_id),
+                    }
+                },
+                request_id="internal-request-id",
+            )
+        )
         session.add(
             Coop(
                 id=genuine_id,
                 record_key=f"user-{genuine_id.hex}",
                 title="Genuine user cooperation",
                 status="NEGOTIATING",
+                needs_review=False,
+                is_synthetic_seed=False,
             )
         )
 
@@ -343,6 +361,29 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
         assert not (remaining_ids & synthetic_ids)
         assert genuine_id in remaining_ids
         assert session.scalar(select(func.count()).select_from(Coop)) == 22
+        batch = session.scalar(select(ManualImportBatch))
+        assert batch is not None
+        replacement = batch.summary["synthetic_seed_replacement"]
+        assert replacement["removed_count"] == 6
+        assert {item["seed_key"] for item in replacement["seeds"]} == {
+            f"milestone-one-demo-{number}" for number in range(1, 7)
+        }
+        assert all(
+            item["audit_history"][0]["action"] == "COOP_CREATED" for item in replacement["seeds"]
+        )
+        assert (
+            sum(
+                event["action"] == "COOP_UPDATED"
+                for item in replacement["seeds"]
+                for event in item["audit_history"]
+            )
+            == 1
+        )
+        serialized_summary = json.dumps(batch.summary, sort_keys=True)
+        assert not any(str(seed_id) in serialized_summary for seed_id in synthetic_ids)
+        assert str(internal_organization_id) not in serialized_summary
+        assert "internal-request-id" not in serialized_summary
+        assert "seed-00000000" not in serialized_summary
 
     with Session(test_engine) as session, session.begin():
         replay = apply_manifest(session, payload)

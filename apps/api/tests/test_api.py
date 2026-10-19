@@ -18,6 +18,7 @@ def create_coop(client: TestClient, **overrides: object) -> dict[str, object]:
         "status": "NEW",
         "summary": "Synthetic test data",
         "deliverables": [{"version": 1, "kind": "VIDEO", "quantity": 1}],
+        "needs_review": False,
     }
     payload.update(overrides)
     response = client.post("/api/v1/coops", json=payload)
@@ -91,7 +92,7 @@ def test_create_detail_patch_and_audit_history(client: TestClient) -> None:
         "title": {"old": "Synthetic launch", "new": "Updated launch"},
     }
     assert events["items"][0]["actor_type"] == "USER"
-    assert events["items"][0]["request_id"]
+    assert "request_id" not in events["items"][0]
 
 
 def test_patch_rejects_status_and_stale_version_as_problem_json(client: TestClient) -> None:

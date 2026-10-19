@@ -372,9 +372,31 @@ def coop_filters(
         filters.append(Coop.release_at >= release_from)
     if release_to is not None:
         filters.append(Coop.release_at <= release_to)
-    if query:
-        pattern = f"%{query.strip()}%"
-        filters.append(or_(Coop.title.ilike(pattern), Coop.summary.ilike(pattern)))
+    if query and (search_term := query.strip()):
+        pattern = f"%{search_term}%"
+        organization_name_matches = select(Organization.id).where(Organization.name.ilike(pattern))
+        contact_matches = Coop.contact_links.any(
+            CoopContact.contact.has(
+                or_(
+                    Contact.display_name.ilike(pattern),
+                    Contact.first_name.ilike(pattern),
+                    Contact.last_name.ilike(pattern),
+                    Contact.email.ilike(pattern),
+                    Contact.organization.has(Organization.name.ilike(pattern)),
+                )
+            )
+        )
+        filters.append(
+            or_(
+                Coop.title.ilike(pattern),
+                Coop.summary.ilike(pattern),
+                Coop.owner.ilike(pattern),
+                Coop.next_action.ilike(pattern),
+                Coop.brand_organization_id.in_(organization_name_matches),
+                Coop.agency_organization_id.in_(organization_name_matches),
+                contact_matches,
+            )
+        )
     if priority is not None:
         filters.append(Coop.priority == priority)
     if needs_review is not None:
@@ -391,7 +413,17 @@ def list_coops(
     statement = (
         select(Coop)
         .where(*filters)
-        .order_by(Coop.priority.asc(), Coop.deadline.asc().nulls_last(), Coop.updated_at.desc())
+        .options(
+            selectinload(Coop.brand_organization),
+            selectinload(Coop.agency_organization),
+            selectinload(Coop.contact_links).selectinload(CoopContact.contact),
+        )
+        .order_by(
+            Coop.priority.asc(),
+            Coop.deadline.asc().nulls_last(),
+            Coop.updated_at.desc(),
+            Coop.id.asc(),
+        )
         .offset(offset)
         .limit(limit)
     )

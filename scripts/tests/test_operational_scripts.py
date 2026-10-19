@@ -92,7 +92,7 @@ class RestoreScriptTests(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     #!/usr/bin/env python3
-                    import json, os, sys
+                    import json, os, signal, socket, sys
                     from pathlib import Path
 
                     args = sys.argv[1:]
@@ -104,6 +104,16 @@ class RestoreScriptTests(unittest.TestCase):
 
                     def save():
                         state_path.write_text(json.dumps(state))
+
+                    if "proxy" in args:
+                        socket_arg = next(
+                            item for item in args if item.startswith("--unix-socket=")
+                        )
+                        socket_path = socket_arg.split("=", 1)[1]
+                        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        server.bind(socket_path)
+                        server.listen(1)
+                        signal.pause()
 
                     if "get" in args and "deployment" in args and "coop-api" in args:
                         print(state["replicas"], end="")
@@ -264,26 +274,8 @@ class RestoreScriptTests(unittest.TestCase):
                             "data": {"holder": state["lock"]["holder"]},
                         }))
                     elif "delete" in args and "configmap" in args:
-                        if os.environ.get("MOCK_LOCK_REPLACED_DURING_DELETE") == "1":
-                            state["lock"] = {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"}
-                        uid_precondition = next(
-                            (item for item in args if item.startswith("--preconditions=uid=")),
-                            "",
-                        ).split("=", 2)[-1]
-                        rv_precondition = next(
-                            (item for item in args if item.startswith("--preconditions=resourceVersion=")),
-                            "",
-                        ).split("=", 2)[-1]
-                        if (
-                            state["lock"] is None
-                            or uid_precondition != state["lock"]["uid"]
-                            or rv_precondition != state["lock"]["resourceVersion"]
-                        ):
-                            save()
-                            print("Error from server (Conflict): lock precondition failed", file=sys.stderr)
-                            sys.exit(1)
-                        state["lock"] = None
-                        save()
+                        print("error: unknown flag: --preconditions", file=sys.stderr)
+                        sys.exit(1)
                     elif "create" in args and "-f" in args and "-" in args:
                         sys.stdin.read()
                         print("coop-restore-generated", end="")
@@ -307,16 +299,32 @@ class RestoreScriptTests(unittest.TestCase):
                     elif "scale" in args:
                         replica_arg = next(item for item in args if item.startswith("--replicas="))
                         state["replicas"] = int(replica_arg.split("=", 1)[1])
-                        if not (
-                            state["replicas"] == 0
-                            and os.environ.get("MOCK_API_TERMINATION_STUCK") == "1"
-                        ):
+                        if state["replicas"] > 0:
                             state["api_pods"] = state["replicas"]
                         save()
                     elif "rollout" in args and "status" in args and "deployment/coop-api" in args:
-                        if state["api_pods"] != state["replicas"]:
-                            print("error: timed out waiting for the condition", file=sys.stderr)
+                        pass
+                    elif "delete" in args and "pods" in args and "-l" in args:
+                        if os.environ.get("MOCK_API_TERMINATION_STUCK") != "1":
+                            state["api_pods"] = 0
+                            save()
+                        else:
                             sys.exit(53)
+                    elif "wait" in args and "--for=delete" in args and "pod" in args:
+                        if state["api_pods"] != 0:
+                            sys.exit(53)
+                    elif "get" in args and "pods" in args and "-l" in args:
+                        print(json.dumps({
+                            "items": [
+                                {
+                                    "metadata": {
+                                        "name": f"coop-api-{index}",
+                                        "deletionTimestamp": "2026-01-01T00:00:00Z",
+                                    }
+                                }
+                                for index in range(state["api_pods"])
+                            ]
+                        }))
                     elif "exec" in args and os.environ.get("MOCK_FAIL_EXEC") == "1":
                         sys.exit(41)
                     sys.exit(0)
@@ -325,6 +333,59 @@ class RestoreScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             kubectl.chmod(0o755)
+            curl = temp / "curl"
+            curl.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import json, os, sys
+                    from pathlib import Path
+
+                    args = sys.argv[1:]
+                    body = sys.stdin.read()
+                    state_path = Path(os.environ["MOCK_STATE"])
+                    log_path = Path(os.environ["MOCK_LOG"])
+                    with log_path.open("a") as stream:
+                        stream.write(json.dumps(["curl", *args, body]) + "\\n")
+                    state = json.loads(state_path.read_text())
+                    expected_url = (
+                        "http://localhost/api/v1/namespaces/coop-prod/configmaps/"
+                        "coop-postgres-restore-lock"
+                    )
+                    try:
+                        delete_options = json.loads(body)
+                    except json.JSONDecodeError:
+                        sys.exit(64)
+                    if (
+                        "--unix-socket" not in args
+                        or "DELETE" not in args
+                        or expected_url not in args
+                        or delete_options.get("kind") != "DeleteOptions"
+                        or delete_options.get("apiVersion") != "v1"
+                    ):
+                        sys.exit(64)
+                    if os.environ.get("MOCK_LOCK_REPLACED_DURING_DELETE") == "1":
+                        state["lock"] = {
+                            "uid": "foreign-uid",
+                            "holder": "foreign-holder",
+                            "resourceVersion": "2",
+                        }
+                    preconditions = delete_options.get("preconditions", {})
+                    if (
+                        state["lock"] is None
+                        or preconditions.get("uid") != state["lock"]["uid"]
+                        or preconditions.get("resourceVersion")
+                        != state["lock"]["resourceVersion"]
+                    ):
+                        state_path.write_text(json.dumps(state))
+                        sys.exit(22)
+                    state["lock"] = None
+                    state_path.write_text(json.dumps(state))
+                    """
+                ),
+                encoding="utf-8",
+            )
+            curl.chmod(0o755)
             env = os.environ.copy()
             env.update(
                 {
@@ -644,8 +705,9 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertEqual(state["lock"], {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"})
         self.assertTrue(
             any(
-                "delete configmap coop-postgres-restore-lock" in call
-                and "--preconditions=uid=lock-uid-1" in call
+                call.startswith("curl ")
+                and '"uid": "lock-uid-1"' in call
+                and '"resourceVersion": "1"' in call
                 for call in rendered
             )
         )
@@ -712,13 +774,56 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertEqual(state["replicas"], 0)
         self.assertEqual(state["api_pods"], 2)
         self.assertTrue(
-            any("rollout status deployment/coop-api" in call for call in rendered)
+            any(
+                "delete pods -l app.kubernetes.io/name=coop-api" in call
+                for call in rendered
+            )
+        )
+        self.assertTrue(
+            any(
+                "wait --for=delete pod -l app.kubernetes.io/name=coop-api" in call
+                for call in rendered
+            )
+        )
+        self.assertTrue(
+            any(
+                "get pods -l app.kubernetes.io/name=coop-api -o json" in call
+                for call in rendered
+            )
         )
         self.assertNotIn("verified suspended/stopped", result.stderr)
         self.assertIn("could not prove the fail-closed quarantine", result.stderr)
-        self.assertFalse(
-            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        self.assertFalse(any(call.startswith("curl ") for call in rendered))
+
+    def test_success_proves_no_api_pods_remain_before_restore(self) -> None:
+        result, calls, state = self.run_restore()
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        delete_index = next(
+            index
+            for index, call in enumerate(rendered)
+            if "delete pods -l app.kubernetes.io/name=coop-api" in call
         )
+        wait_index = next(
+            index
+            for index, call in enumerate(rendered)
+            if "wait --for=delete pod -l app.kubernetes.io/name=coop-api" in call
+        )
+        readback_index = next(
+            index
+            for index, call in enumerate(rendered)
+            if "get pods -l app.kubernetes.io/name=coop-api -o json" in call
+        )
+        restore_index = next(
+            index
+            for index, call in enumerate(rendered)
+            if "create -f - -o jsonpath={.metadata.name}" in call
+        )
+        self.assertLess(delete_index, wait_index)
+        self.assertLess(wait_index, readback_index)
+        self.assertLess(readback_index, restore_index)
+        self.assertEqual(state["api_pods"], 2)
 
     def test_success_resumes_and_reconciles_in_dependency_order(self) -> None:
         result, calls, state = self.run_restore()
@@ -776,11 +881,25 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertTrue(any("delete pod coop-restore-generated" in call for call in rendered))
         self.assertTrue(
             any(
-                "delete configmap coop-postgres-restore-lock" in call
-                and "--preconditions=uid=lock-uid-1" in call
+                call.startswith("curl ")
+                and "-X DELETE" in call
+                and "http://localhost/api/v1/namespaces/coop-prod/configmaps/coop-postgres-restore-lock"
+                in call
+                and '"kind": "DeleteOptions"' in call
+                and '"uid": "lock-uid-1"' in call
+                and '"resourceVersion": "1"' in call
                 for call in rendered
             )
         )
+        self.assertTrue(
+            any(
+                "proxy" in call
+                and any(part.startswith("--unix-socket=") for part in calls[index])
+                and "--api-prefix=/" in calls[index]
+                for index, call in enumerate(rendered)
+            )
+        )
+        self.assertFalse(any("--preconditions=" in call for call in rendered))
         self.assertGreaterEqual(state["lock_reads"], 2)
         self.assertIsNone(state["lock"])
         for cronjob in (
@@ -870,6 +989,14 @@ class RestoreScriptTests(unittest.TestCase):
         script = RESTORE.read_text(encoding="utf-8")
         terminate = next(line for line in script.splitlines() if "pg_terminate_backend" in line)
         self.assertNotIn("|| true", terminate)
+
+    def test_recurring_gmail_scheduler_comment_matches_dormant_state(self) -> None:
+        manifest = (
+            ROOT / "infrastructure/import/gmail-recurring-cronjobs.yaml"
+        ).read_text(encoding="utf-8")
+        comment = manifest.splitlines()[0].lower()
+        self.assertIn("bootstrap and delta remain dormant", comment)
+        self.assertNotIn("active", comment)
 
 
 class RegistryBootstrapTests(unittest.TestCase):
