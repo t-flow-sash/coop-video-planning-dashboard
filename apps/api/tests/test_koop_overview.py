@@ -89,6 +89,18 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
     nil_uuid = "00000000-0000-0000-0000-000000000000"
     provider_marker = "provider-ref-SYNTHETIC-LEAK-92471"
     mixed_case_marker = "gmail-provider-message-SYNTHETIC-LEAK-83491"
+    spaced_markers = (
+        "Z9Q8W7V6U5",
+        "A1B2C3D4E5",
+        "M9N8B7V6C5",
+        "T1R2E3A4D5",
+        "E1X2T3N4L5",
+    )
+    spaced_references = (
+        f"providerId {spaced_markers[0]} Import-ID {spaced_markers[1]} "
+        f"MessageID {spaced_markers[2]} ThreadID {spaced_markers[3]} "
+        f"externalId {spaced_markers[4]}"
+    )
     internal_request_id = f"manual-import-{manifest_hash[:24]}"
     with Session(test_engine) as session, session.begin():
         coop = session.scalar(select(Coop).where(Coop.record_key == "audit-redaction"))
@@ -111,11 +123,13 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
                         "providerId": provider_marker,
                         "MessageID": mixed_case_marker,
                         "ThreadID": mixed_case_marker,
+                        "free_text": spaced_references,
                     },
                 },
                 reason=(
                     f"retry {manifest_hash} for {embedded_uuid} "
-                    f"new={embedded_uuid_v7} nil={nil_uuid} reference={provider_marker}"
+                    f"new={embedded_uuid_v7} nil={nil_uuid} reference={provider_marker} "
+                    f"{spaced_references}"
                 ),
                 request_id=internal_request_id,
                 source_reference=manifest_hash,
@@ -137,6 +151,7 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
     assert nil_uuid not in serialized
     assert provider_marker not in serialized
     assert mixed_case_marker not in serialized
+    assert not any(marker in serialized for marker in spaced_markers)
     assert "actor_id" not in import_event
     assert "provider-19" not in serialized
     _assert_no_provider_or_import_ids(import_event)

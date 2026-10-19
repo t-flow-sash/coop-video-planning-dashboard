@@ -30,7 +30,7 @@ _LABELED_INTERNAL_REFERENCE_PATTERN = re.compile(
     r"(?:gmail[-_.:]*)?"
     r"(?:provider|external|import|message|thread|history|manifest|batch|request|source|reference|ref)"
     r"(?:[-_.:]*(?:id|ref(?:erence)?))?"
-    r"[-_.:=]+[A-Za-z0-9][A-Za-z0-9._:-]*"
+    r"(?:[-_.:=]+[A-Za-z0-9][A-Za-z0-9._:-]*|\s+[A-Za-z0-9][A-Za-z0-9._:-]{7,})"
 )
 
 

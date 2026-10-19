@@ -227,6 +227,7 @@ def test_acl_reconciler_denies_collector_execute_on_future_cross_owner_functions
 ) -> None:
     role = f"future_function_owner_{uuid.uuid4().hex}"
     function_name = f"cross_owner_future_probe_{uuid.uuid4().hex}"
+    procedure_name = f"cross_owner_future_proc_{uuid.uuid4().hex}"
     database_access.reconcile_collector_access(
         test_engine.url.render_as_string(hide_password=False)
     )
@@ -240,13 +241,43 @@ def test_acl_reconciler_denies_collector_execute_on_future_cross_owner_functions
                 f'CREATE FUNCTION public."{function_name}"() RETURNS integer '
                 "LANGUAGE sql IMMUTABLE AS 'SELECT 42'"
             )
+            connection.exec_driver_sql(
+                f'CREATE PROCEDURE public."{procedure_name}"() '
+                "LANGUAGE plpgsql AS 'BEGIN NULL; END'"
+            )
+            connection.exec_driver_sql(
+                f'GRANT EXECUTE ON FUNCTION public."{function_name}"() TO PUBLIC'
+            )
+            connection.exec_driver_sql(
+                f'GRANT EXECUTE ON PROCEDURE public."{procedure_name}"() TO PUBLIC'
+            )
+            connection.exec_driver_sql(
+                f'GRANT EXECUTE ON FUNCTION public."{function_name}"() TO {COLLECTOR_ROLE}'
+            )
             connection.exec_driver_sql("RESET ROLE")
             assert not connection.scalar(
                 text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
                 {"role": COLLECTOR_ROLE, "function": f"public.{function_name}()"},
             )
+            assert not connection.scalar(
+                text("SELECT has_function_privilege(:role, :procedure, 'EXECUTE')"),
+                {"role": COLLECTOR_ROLE, "procedure": f"public.{procedure_name}()"},
+            )
+        database_access.reconcile_collector_access(
+            test_engine.url.render_as_string(hide_password=False)
+        )
+        with test_engine.connect() as connection:
+            assert not connection.scalar(
+                text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                {"role": COLLECTOR_ROLE, "function": f"public.{function_name}()"},
+            )
+            assert not connection.scalar(
+                text("SELECT has_function_privilege(:role, :procedure, 'EXECUTE')"),
+                {"role": COLLECTOR_ROLE, "procedure": f"public.{procedure_name}()"},
+            )
     finally:
         with test_engine.begin() as connection:
+            connection.exec_driver_sql(f'DROP PROCEDURE IF EXISTS public."{procedure_name}"()')
             connection.exec_driver_sql(f'DROP FUNCTION IF EXISTS public."{function_name}"()')
             connection.exec_driver_sql(f'DROP OWNED BY "{role}"')
             connection.exec_driver_sql(f'DROP ROLE IF EXISTS "{role}"')

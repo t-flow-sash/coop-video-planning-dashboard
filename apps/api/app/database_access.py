@@ -177,7 +177,60 @@ def reconcile_collector_access(admin_url: str) -> None:
             DECLARE
                 command record;
                 object_kind text;
+                role_name text;
             BEGIN
+                IF TG_TAG = 'GRANT' THEN
+                    IF current_setting('coop.enforcing_routine_acl', true) = 'on' THEN
+                        RETURN;
+                    END IF;
+                    PERFORM set_config('coop.enforcing_routine_acl', 'on', true);
+                    FOR command IN
+                        SELECT
+                            routine.oid AS routine_oid,
+                            namespace.nspname AS schema_name,
+                            routine.proname AS object_name,
+                            pg_get_function_identity_arguments(routine.oid) AS identity_arguments,
+                            routine.prokind AS routine_kind
+                        FROM pg_proc routine
+                        JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+                        WHERE namespace.nspname !~ '^pg_'
+                          AND namespace.nspname <> 'information_schema'
+                    LOOP
+                        object_kind := CASE
+                            WHEN command.routine_kind = 'p' THEN 'PROCEDURE'
+                            ELSE 'FUNCTION'
+                        END;
+                        FOR role_name IN
+                            SELECT role.rolname
+                            FROM pg_roles role
+                            WHERE role.rolname <> 'coop_evidence_collector'
+                              AND has_function_privilege(
+                                  role.rolname,
+                                  command.routine_oid,
+                                  'EXECUTE'
+                              )
+                        LOOP
+                            EXECUTE format(
+                                'GRANT EXECUTE ON %s %I.%I(%s) TO %I',
+                                object_kind,
+                                command.schema_name,
+                                command.object_name,
+                                command.identity_arguments,
+                                role_name
+                            );
+                        END LOOP;
+                        EXECUTE format(
+                            'REVOKE EXECUTE ON %s %I.%I(%s) FROM PUBLIC, %I',
+                            object_kind,
+                            command.schema_name,
+                            command.object_name,
+                            command.identity_arguments,
+                            'coop_evidence_collector'
+                        );
+                    END LOOP;
+                    PERFORM set_config('coop.enforcing_routine_acl', 'off', true);
+                    RETURN;
+                END IF;
                 FOR command IN SELECT * FROM pg_event_trigger_ddl_commands()
                 LOOP
                     IF command.object_type IN ('function', 'procedure', 'aggregate')
@@ -190,9 +243,10 @@ def reconcile_collector_access(admin_url: str) -> None:
                             ELSE 'FUNCTION'
                         END;
                         EXECUTE format(
-                            'REVOKE EXECUTE ON %s %s FROM PUBLIC',
+                            'REVOKE EXECUTE ON %s %s FROM PUBLIC, %I',
                             object_kind,
-                            command.object_identity
+                            command.object_identity,
+                            'coop_evidence_collector'
                         );
                     END IF;
                 END LOOP;
@@ -208,7 +262,7 @@ def reconcile_collector_access(admin_url: str) -> None:
         cursor.execute(
             "CREATE EVENT TRIGGER coop_enforce_no_public_routine_execute "
             "ON ddl_command_end "
-            "WHEN TAG IN ('CREATE FUNCTION', 'CREATE PROCEDURE', 'CREATE AGGREGATE') "
+            "WHEN TAG IN ('CREATE FUNCTION', 'CREATE PROCEDURE', 'CREATE AGGREGATE', 'GRANT') "
             "EXECUTE FUNCTION public.coop_enforce_no_public_routine_execute()"
         )
         for schema in schemas:
@@ -236,7 +290,7 @@ def reconcile_collector_access(admin_url: str) -> None:
             # capabilities of unrelated runtime or reporting roles.
             cursor.execute(
                 "SELECT role.rolname, function.proname, "
-                "pg_get_function_identity_arguments(function.oid) "
+                "pg_get_function_identity_arguments(function.oid), function.prokind "
                 "FROM pg_roles role CROSS JOIN pg_proc function "
                 "JOIN pg_namespace namespace ON namespace.oid = function.pronamespace "
                 "WHERE namespace.nspname = %s AND role.rolname <> %s "
@@ -250,9 +304,11 @@ def reconcile_collector_access(admin_url: str) -> None:
                     schema_id
                 )
             )
-            for role, function_name, identity_arguments in preserved_function_grants:
+            for role, function_name, identity_arguments, routine_kind in preserved_function_grants:
+                object_kind = "PROCEDURE" if routine_kind == "p" else "FUNCTION"
                 cursor.execute(
-                    sql.SQL("GRANT EXECUTE ON FUNCTION {}.{}({}) TO {}").format(
+                    sql.SQL("GRANT EXECUTE ON {} {}.{}({}) TO {}").format(
+                        sql.SQL(object_kind),
                         schema_id,
                         sql.Identifier(function_name),
                         sql.SQL(identity_arguments),

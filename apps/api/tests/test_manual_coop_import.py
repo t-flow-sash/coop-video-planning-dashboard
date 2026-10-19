@@ -327,6 +327,18 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
     nil_uuid = "00000000-0000-0000-0000-000000000000"
     provider_marker = "provider-ref-SYNTHETIC-LEAK-92471"
     mixed_case_marker = "gmail-provider-message-SYNTHETIC-LEAK-83491"
+    spaced_markers = (
+        "Z9Q8W7V6U5",
+        "A1B2C3D4E5",
+        "M9N8B7V6C5",
+        "T1R2E3A4D5",
+        "E1X2T3N4L5",
+    )
+    spaced_references = (
+        f"providerId {spaced_markers[0]} Import-ID {spaced_markers[1]} "
+        f"MessageID {spaced_markers[2]} ThreadID {spaced_markers[3]} "
+        f"externalId {spaced_markers[4]}"
+    )
     with Session(test_engine) as session, session.begin():
         _seed(session)
         session.add(
@@ -348,10 +360,12 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
                     "providerId": provider_marker,
                     "MessageID": mixed_case_marker,
                     "ThreadID": mixed_case_marker,
+                    "free_text": spaced_references,
                 },
                 reason=(
                     f"retry {embedded_hash} for {internal_organization_id} "
-                    f"new={embedded_uuid_v7} nil={nil_uuid} reference={provider_marker}"
+                    f"new={embedded_uuid_v7} nil={nil_uuid} reference={provider_marker} "
+                    f"{spaced_references}"
                 ),
                 request_id="internal-request-id",
             )
@@ -404,6 +418,7 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
         assert nil_uuid not in serialized_summary
         assert provider_marker not in serialized_summary
         assert mixed_case_marker not in serialized_summary
+        assert not any(marker in serialized_summary for marker in spaced_markers)
         assert "internal-request-id" not in serialized_summary
         assert "seed-00000000" not in serialized_summary
 
