@@ -49,6 +49,29 @@ suspend_resource() {
     -p '{"spec":{"suspend":true}}' >/dev/null
 }
 
+wait_for_flux_quiescence() {
+  local resource="$1" kind name resource_json attempt
+  kind="${resource%%/*}"
+  name="${resource#*/}"
+  for ((attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt++)); do
+    resource_json="$(kubectl -n flux-system get "$kind" "$name" -o json)"
+    if python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+reconciling = any(
+    condition.get("type") == "Reconciling" and condition.get("status") == "True"
+    for condition in (obj.get("status", {}).get("conditions") or [])
+)
+raise SystemExit(1 if reconciling else 0)
+' <<<"$resource_json"; then
+      return 0
+    fi
+    sleep "$RECONCILE_POLL_SECONDS"
+  done
+  echo "Timed out waiting for Flux quiescence of ${resource}." >&2
+  return 10
+}
+
 fail_closed() {
   local resource
   for resource in "${suspend_order[@]}"; do
@@ -115,6 +138,20 @@ for resource in "${suspend_order[@]}"; do
   name="${resource#*/}"
   [[ "$(kubectl -n flux-system get "$kind" "$name" -o jsonpath='{.spec.suspend}')" == true ]] || {
     echo "Failed to verify suspension of ${resource}." >&2
+    exit 5
+  }
+done
+# spec.suspend prevents new reconciles but does not cancel one already applying
+# objects. Drain every in-flight Flux operation, then re-read all suspension
+# boundaries before touching CronJobs or querying PostgreSQL writers.
+for resource in "${suspend_order[@]}"; do
+  wait_for_flux_quiescence "$resource"
+done
+for resource in "${suspend_order[@]}"; do
+  kind="${resource%%/*}"
+  name="${resource#*/}"
+  [[ "$(kubectl -n flux-system get "$kind" "$name" -o jsonpath='{.spec.suspend}')" == true ]] || {
+    echo "Flux boundary ${resource} changed while draining reconciliation." >&2
     exit 5
   }
 done
@@ -312,6 +349,12 @@ resume_and_reconcile() {
 
 for resource in "${resume_order[@]}"; do
   resume_and_reconcile "$resource"
+  if [[ "$resource" == kustomization/coop-import ]]; then
+    verify_delta_quarantine || {
+      echo "Flux quarantine for cronjob/gmail-import-delta was lost during coop-import reconciliation." >&2
+      exit 5
+    }
+  fi
   if [[ "$resource" == kustomization/coop-apps ]]; then
     kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas="${replicas:-2}"
     kubectl -n "$NAMESPACE" rollout status deployment/coop-api --timeout=300s

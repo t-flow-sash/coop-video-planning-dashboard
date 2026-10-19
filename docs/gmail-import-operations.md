@@ -279,7 +279,16 @@ Der Restore-Ablauf suspendiert und read-back-verifiziert alle drei
 Gmail-CronJobs unabhängig von deklarativem Soll oder Live-Drift. Für den
 deklarativ aktiven Delta-CronJob setzt er zusätzlich
 `kustomize.toolkit.fluxcd.io/reconcile=disabled` und verifiziert die Flux-Quarantäne
-vor dem ersten Writer-Check sowie nach allen Reconciles. Delta bleibt dadurch
-suspendiert; die Quarantäne darf erst in einem separat reviewten Post-Restore-Schritt
-nach DB-, Checkpoint- und Evidence-Attestation entfernt werden. Full und Bootstrap
-bleiben suspendiert und unbewaffnet.
+vor dem ersten Writer-Check sowie unmittelbar nach dem `coop-import`-Reconcile und
+nach allen Reconciles. Zuvor wartet das Skript nach Suspension aller Flux-Grenzen
+auf `Reconciling!=True` und verifiziert sämtliche Suspensionen erneut. Delta bleibt
+dadurch suspendiert; die Quarantäne darf erst in einem separat reviewten
+Post-Restore-Schritt nach DB-, Checkpoint- und Evidence-Attestation entfernt werden.
+Dieser Schritt muss fail-closed in dieser Reihenfolge erfolgen: `coop-import`
+suspendieren und Quieszenz belegen; alle nichtterminalen PostgreSQL-Writer ausschließen;
+Delta weiterhin suspendiert read-back-verifizieren; die Annotation entfernen und ihr
+Fehlen read-back-verifizieren; `coop-import` einmal kontrolliert reconciliieren und
+`Ready` abwarten; exakt `suspend=false`, `GMAIL_IMPORT_ARMED=true` und keine
+unerwarteten Jobs verifizieren; anschließend den Erfolg der ersten DELTA-Ausführung und
+den nichtregressiven Checkpoint attestieren. Jede Abweichung suspendiert
+`coop-import` und Delta erneut. Full und Bootstrap bleiben suspendiert und unbewaffnet.

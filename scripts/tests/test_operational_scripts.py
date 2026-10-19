@@ -43,6 +43,9 @@ class RestoreScriptTests(unittest.TestCase):
         root_stale_observed_generation: bool = False,
         root_not_ready: bool = False,
         initially_suspended: str | None = None,
+        import_reconcile_polls: int = 0,
+        ignore_delta_quarantine_patch: bool = False,
+        lose_delta_quarantine_on_import_resume: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], list[list[str]], dict[str, Any]]:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
@@ -63,6 +66,7 @@ class RestoreScriptTests(unittest.TestCase):
                     {
                         "suspended": suspended,
                         "annotations": {},
+                        "import_reconcile_reads": 0,
                         "replicas": 2,
                         "generation": {item: 1 for item in self.flux_objects},
                         "observed_generation": {item: 1 for item in self.flux_objects},
@@ -102,6 +106,16 @@ class RestoreScriptTests(unittest.TestCase):
                         name = args[args.index(kind) + 1]
                         resource = f"{kind}/{name}"
                         if "-o" in args and args[args.index("-o") + 1] == "json":
+                            reconciling = False
+                            if (
+                                resource == "kustomization/coop-import"
+                                and state["suspended"][resource]
+                                and state["import_reconcile_reads"] < int(os.environ.get("MOCK_IMPORT_RECONCILE_POLLS", "0"))
+                            ):
+                                state["import_reconcile_reads"] += 1
+                                state["suspended"]["cronjob/gmail-import-delta"] = False
+                                reconciling = True
+                                save()
                             print(json.dumps({
                                 "metadata": {
                                     "generation": state["generation"].get(resource, 1),
@@ -111,7 +125,10 @@ class RestoreScriptTests(unittest.TestCase):
                                 "status": {
                                     "observedGeneration": state["observed_generation"].get(resource, 1),
                                     "lastHandledReconcileAt": state["last_handled"].get(resource, ""),
-                                    "conditions": [{"type": "Ready", "status": "True" if state["ready"].get(resource, True) else "False"}],
+                                    "conditions": [
+                                        {"type": "Ready", "status": "True" if state["ready"].get(resource, True) else "False"},
+                                        {"type": "Reconciling", "status": "True" if reconciling else "False"},
+                                    ],
                                 },
                             }))
                         else:
@@ -136,6 +153,23 @@ class RestoreScriptTests(unittest.TestCase):
                         state["annotations"].setdefault(resource, {}).update(
                             patch.get("metadata", {}).get("annotations", {})
                         )
+                        if (
+                            resource == "cronjob/gmail-import-delta"
+                            and os.environ.get("MOCK_IGNORE_DELTA_QUARANTINE_PATCH") == "1"
+                        ):
+                            state["annotations"][resource].pop(
+                                "kustomize.toolkit.fluxcd.io/reconcile", None
+                            )
+                        if (
+                            resource == "kustomization/coop-import"
+                            and new_suspend is False
+                            and os.environ.get("MOCK_LOSE_DELTA_QUARANTINE") == "1"
+                        ):
+                            delta = "cronjob/gmail-import-delta"
+                            state["suspended"][delta] = False
+                            state["annotations"].setdefault(delta, {}).pop(
+                                "kustomize.toolkit.fluxcd.io/reconcile", None
+                            )
                         if (
                             resource == "kustomization/coop-root"
                             and not new_suspend
@@ -210,6 +244,13 @@ class RestoreScriptTests(unittest.TestCase):
                     "MOCK_STALE_OBSERVED_GENERATION": "1" if stale_observed_generation else "0",
                     "MOCK_ROOT_STALE_OBSERVED_GENERATION": "1" if root_stale_observed_generation else "0",
                     "MOCK_ROOT_NOT_READY": "1" if root_not_ready else "0",
+                    "MOCK_IMPORT_RECONCILE_POLLS": str(import_reconcile_polls),
+                    "MOCK_IGNORE_DELTA_QUARANTINE_PATCH": "1"
+                    if ignore_delta_quarantine_patch
+                    else "0",
+                    "MOCK_LOSE_DELTA_QUARANTINE": "1"
+                    if lose_delta_quarantine_on_import_resume
+                    else "0",
                     "RECONCILE_ATTEMPTS": "2",
                     "RECONCILE_POLL_SECONDS": "0",
                 }
@@ -317,7 +358,7 @@ class RestoreScriptTests(unittest.TestCase):
             self.assertTrue(state["suspended"][f"cronjob/{name}"])
 
     def test_success_quarantines_delta_from_flux_before_import_reconcile(self) -> None:
-        result, calls, state = self.run_restore()
+        result, calls, state = self.run_restore(import_reconcile_polls=1)
         self.assertEqual(result.returncode, 0, result.stderr)
         rendered = [self.operation(call) for call in calls]
         quarantine = next(
@@ -342,12 +383,44 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertLess(verification, writer_check)
         self.assertLess(verification, import_resume)
         self.assertTrue(state["suspended"]["cronjob/gmail-import-delta"])
+        self.assertEqual(state["import_reconcile_reads"], 1)
         self.assertEqual(
             state["annotations"]["cronjob/gmail-import-delta"][
                 "kustomize.toolkit.fluxcd.io/reconcile"
             ],
             "disabled",
         )
+
+    def test_quarantine_readback_failure_aborts_before_writer_check(self) -> None:
+        result, calls, _ = self.run_restore(ignore_delta_quarantine_patch=True)
+        rendered = [self.operation(call) for call in calls]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Failed to establish Flux quarantine", result.stderr)
+        self.assertFalse(any(" get jobs " in f" {call} " for call in rendered))
+        self.assertNotIn("Restore completed", result.stdout)
+
+    def test_quarantine_loss_aborts_immediately_after_import_reconcile(self) -> None:
+        result, calls, state = self.run_restore(
+            lose_delta_quarantine_on_import_resume=True
+        )
+        rendered = [self.operation(call) for call in calls]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("was lost during coop-import reconciliation", result.stderr)
+        import_resume = next(
+            index
+            for index, call in enumerate(rendered)
+            if "patch kustomization coop-import" in call and '"suspend":false' in call
+        )
+        self.assertFalse(
+            any(
+                index > import_resume
+                and "patch kustomization coop-apps" in call
+                and '"suspend":false' in call
+                for index, call in enumerate(rendered)
+            )
+        )
+        self.assertTrue(state["suspended"]["cronjob/gmail-import-delta"])
+        self.assertNotIn("Restore completed", result.stdout)
 
     def test_seed_remains_suspended_on_restore_failure(self) -> None:
         result, _, state = self.run_restore(fail_exec=True)
