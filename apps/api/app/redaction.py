@@ -25,17 +25,26 @@ _UUID_PATTERN = re.compile(
     r"(?![0-9A-Fa-f])"
 )
 _SHA256_PATTERN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
+_LABELED_INTERNAL_REFERENCE_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9])"
+    r"(?:gmail[-_.:]*)?"
+    r"(?:provider|external|import|message|thread|history|manifest|batch|request|source|reference|ref)"
+    r"(?:[-_.:]*(?:id|ref(?:erence)?))?"
+    r"[-_.:=]+[A-Za-z0-9][A-Za-z0-9._:-]*"
+)
 
 
 def _is_internal_key(key: str) -> bool:
     snake_case = re.sub(r"(?<!^)(?=[A-Z])", "_", key).replace("-", "_").lower()
     compact = re.sub(r"[^a-z0-9]", "", snake_case)
     internal_compact = {re.sub(r"[^a-z0-9]", "", item) for item in INTERNAL_REFERENCE_KEYS}
-    return compact in internal_compact or snake_case.endswith("_id")
+    return compact in internal_compact or snake_case.endswith("_id") or bool(re.search(r"ID$", key))
 
 
 def _redact_text(value: str) -> str:
-    return _UUID_PATTERN.sub(REDACTED, _SHA256_PATTERN.sub(REDACTED, value))
+    value = _SHA256_PATTERN.sub(REDACTED, value)
+    value = _UUID_PATTERN.sub(REDACTED, value)
+    return _LABELED_INTERNAL_REFERENCE_PATTERN.sub(REDACTED, value)
 
 
 def redact_internal_references(value: Any, *, drop_internal_keys: bool = False) -> Any:

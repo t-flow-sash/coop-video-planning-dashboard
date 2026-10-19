@@ -162,6 +162,55 @@ def reconcile_collector_access(admin_url: str) -> None:
                 "ALTER DEFAULT PRIVILEGES FOR ROLE {} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
             ).format(sql.Identifier(function_owner))
         )
+        # Default privileges are owner-specific. A SECURITY DEFINER event trigger
+        # is therefore required to remove PostgreSQL's ambient PUBLIC EXECUTE
+        # from routines created later by any owner. Creating event triggers
+        # requires superuser privileges; failure is intentionally fail-closed.
+        cursor.execute(
+            """
+            CREATE OR REPLACE FUNCTION public.coop_enforce_no_public_routine_execute()
+            RETURNS event_trigger
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = pg_catalog
+            AS $function$
+            DECLARE
+                command record;
+                object_kind text;
+            BEGIN
+                FOR command IN SELECT * FROM pg_event_trigger_ddl_commands()
+                LOOP
+                    IF command.object_type IN ('function', 'procedure', 'aggregate')
+                       AND command.schema_name IS NOT NULL
+                       AND command.schema_name !~ '^pg_'
+                       AND command.schema_name <> 'information_schema'
+                    THEN
+                        object_kind := CASE
+                            WHEN command.object_type = 'procedure' THEN 'PROCEDURE'
+                            ELSE 'FUNCTION'
+                        END;
+                        EXECUTE format(
+                            'REVOKE EXECUTE ON %s %s FROM PUBLIC',
+                            object_kind,
+                            command.object_identity
+                        );
+                    END IF;
+                END LOOP;
+            END
+            $function$
+            """
+        )
+        cursor.execute(
+            "REVOKE ALL PRIVILEGES ON FUNCTION "
+            "public.coop_enforce_no_public_routine_execute() FROM PUBLIC"
+        )
+        cursor.execute("DROP EVENT TRIGGER IF EXISTS coop_enforce_no_public_routine_execute")
+        cursor.execute(
+            "CREATE EVENT TRIGGER coop_enforce_no_public_routine_execute "
+            "ON ddl_command_end "
+            "WHEN TAG IN ('CREATE FUNCTION', 'CREATE PROCEDURE', 'CREATE AGGREGATE') "
+            "EXECUTE FUNCTION public.coop_enforce_no_public_routine_execute()"
+        )
         for schema in schemas:
             schema_id = sql.Identifier(schema)
             role_id = sql.Identifier(COLLECTOR_ROLE)

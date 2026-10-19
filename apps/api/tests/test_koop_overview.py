@@ -88,6 +88,7 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
     embedded_uuid_v7 = "019a01b0-7abc-7def-8abc-0123456789ab"
     nil_uuid = "00000000-0000-0000-0000-000000000000"
     provider_marker = "provider-ref-SYNTHETIC-LEAK-92471"
+    mixed_case_marker = "gmail-provider-message-SYNTHETIC-LEAK-83491"
     internal_request_id = f"manual-import-{manifest_hash[:24]}"
     with Session(test_engine) as session, session.begin():
         coop = session.scalar(select(Coop).where(Coop.record_key == "audit-redaction"))
@@ -108,11 +109,13 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
                         ),
                         "Provider_ID": provider_marker,
                         "providerId": provider_marker,
+                        "MessageID": mixed_case_marker,
+                        "ThreadID": mixed_case_marker,
                     },
                 },
                 reason=(
                     f"retry {manifest_hash} for {embedded_uuid} "
-                    f"new={embedded_uuid_v7} nil={nil_uuid}"
+                    f"new={embedded_uuid_v7} nil={nil_uuid} reference={provider_marker}"
                 ),
                 request_id=internal_request_id,
                 source_reference=manifest_hash,
@@ -133,6 +136,7 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
     assert embedded_uuid_v7 not in serialized
     assert nil_uuid not in serialized
     assert provider_marker not in serialized
+    assert mixed_case_marker not in serialized
     assert "actor_id" not in import_event
     assert "provider-19" not in serialized
     _assert_no_provider_or_import_ids(import_event)

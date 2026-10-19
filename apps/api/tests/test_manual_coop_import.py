@@ -326,6 +326,7 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
     embedded_uuid_v7 = "019a01b0-7abc-7def-8abc-0123456789ab"
     nil_uuid = "00000000-0000-0000-0000-000000000000"
     provider_marker = "provider-ref-SYNTHETIC-LEAK-92471"
+    mixed_case_marker = "gmail-provider-message-SYNTHETIC-LEAK-83491"
     with Session(test_engine) as session, session.begin():
         _seed(session)
         session.add(
@@ -345,10 +346,12 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
                     ),
                     "Provider_ID": provider_marker,
                     "providerId": provider_marker,
+                    "MessageID": mixed_case_marker,
+                    "ThreadID": mixed_case_marker,
                 },
                 reason=(
                     f"retry {embedded_hash} for {internal_organization_id} "
-                    f"new={embedded_uuid_v7} nil={nil_uuid}"
+                    f"new={embedded_uuid_v7} nil={nil_uuid} reference={provider_marker}"
                 ),
                 request_id="internal-request-id",
             )
@@ -400,6 +403,7 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
         assert embedded_uuid_v7 not in serialized_summary
         assert nil_uuid not in serialized_summary
         assert provider_marker not in serialized_summary
+        assert mixed_case_marker not in serialized_summary
         assert "internal-request-id" not in serialized_summary
         assert "seed-00000000" not in serialized_summary
 

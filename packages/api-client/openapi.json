@@ -727,17 +727,6 @@
             "type": "string",
             "title": "Actor Type"
           },
-          "actor_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Actor Id"
-          },
           "source": {
             "type": "string",
             "title": "Source"
@@ -770,7 +759,6 @@
           "coop_id",
           "action",
           "actor_type",
-          "actor_id",
           "source",
           "changes",
           "reason",
