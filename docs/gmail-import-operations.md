@@ -18,7 +18,7 @@ Der operative Bootstrap- und Delta-Pfad existiert zunächst **dormant**. Er muti
 
 Erforderliche Secret-Keys sind `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` und `GMAIL_ACCOUNT`. `gmail-oauth.secret.example.yaml` ist wertfrei und wird nicht gerendert. Das produktive `gmail-oauth.secret.sops.yaml` wird erst aus dem root-only Store erzeugt, mit SOPS verschlüsselt und explizit in die Kustomization aufgenommen.
 
-Der Adapter erneuert das Access Token über `oauth2.googleapis.com`, validiert den live zurückgelieferten Scope über Tokeninfo und bindet den Lauf über Tokeninfo (falls dort `email` vorhanden ist) sowie zwingend über `users.getProfile.emailAddress` an `GMAIL_ACCOUNT`. Vor Provider- oder Datenbankzugriff muss außerdem der normalisierte Account zum unabhängig freigegebenen `GMAIL_ACCOUNT_SHA256` passen; der Null-Sentinel ist nicht ausführbar. Der bewusst vom Influencer-Agenten übernommene Produktions-Token besitzt zusätzliche Google-Workspace- und Gmail-Rechte. Diese Risikoausnahme wurde am 16. Oktober 2026 ausdrücklich freigegeben. Der Adapter verlangt weiterhin `https://www.googleapis.com/auth/gmail.readonly`; seine ausführbare Gmail-Oberfläche implementiert ausschließlich `GET` auf Profil, Nachrichtenliste und Metadaten. Die zusätzlichen Token-Grants erweitern den Collector-Codepfad nicht, erhöhen aber den Schaden bei einer Credential-Kompromittierung und bleiben deshalb als akzeptiertes Restrisiko dokumentiert.
+Der Adapter erneuert das Access Token über `oauth2.googleapis.com`, validiert den live zurückgelieferten Scope über Tokeninfo und bindet den Lauf über Tokeninfo (falls dort `email` vorhanden ist) sowie zwingend über `users.getProfile.emailAddress` an `GMAIL_ACCOUNT`. Vor Provider- oder Datenbankzugriff muss außerdem der normalisierte Account zum unabhängig freigegebenen `GMAIL_ACCOUNT_SHA256` passen; der Null-Sentinel ist nicht ausführbar. Zulässig sind ausschließlich `https://www.googleapis.com/auth/gmail.readonly` und explizite Identity-Scopes (`openid`, `email`, `profile`, `userinfo.email`, `userinfo.profile`). Zusätzliche Gmail- oder Workspace-Rechte blockieren den Lauf fail-closed. Bis ein dediziertes least-privilege Refresh-Token bereitgestellt und read-back-verifiziert ist, bleiben alle Gmail-Scheduler suspendiert und unarmed.
 
 ## FULL und Checkpoint-Bindung
 
@@ -36,9 +36,9 @@ Sie liegt nicht im Secret, sondern als `GMAIL_IMPORT_QUERY` in der CronJob-Konfi
 
 `delta` verlangt einen vorhandenen Checkpoint, exakt passenden Query-Hash und `snapshot.start_history_id == checkpoint_value`. Gmail `history.list` wird ab diesem Cursor vollständig paginiert; `messages`, `messagesAdded`, `messagesDeleted`, `labelsAdded` und `labelsRemoved` werden dedupliziert. Anschließend wird die unveränderte fachliche Query erneut über `messages.list(q=...)` ausgewertet. Nur die Schnittmenge aus History-Änderungen und aktuell query-passenden IDs wird mit `messages.get(format=metadata)` geladen. Abwesenheit oder Label-Entfernung erzeugt keine Löschung und keine fachliche Mutation.
 
-Erst Evidence, Observations, Review-Kandidaten, erfolgreicher Run und der terminale Gmail-`historyId` werden atomar committet. Provider-, Parse-, Query- oder DB-Fehler lassen den Checkpoint unverändert und erzeugen höchstens einen separaten terminalen `FAILED`-Run mit allowlist-basiertem Fehlercode. Ein von Gmail verworfener Cursor (`404`) wird ausschließlich als `full_required` behandelt: Delta wird daraufhin fail-closed über einen eigenen Review-PR wieder suspendiert; ein neuer Baseline-Plan benötigt eine eigene Review- und Aktivierungsfreigabe.
+Erst Evidence, Observations, Review-Kandidaten, erfolgreicher Run und der terminale Gmail-`historyId` werden atomar committet. Provider-, Parse-, Query- oder DB-Fehler lassen den Checkpoint unverändert und erzeugen höchstens einen separaten terminalen `FAILED`-Run mit allowlist-basiertem Fehlercode. Ein von Gmail verworfener Cursor (`404`) wird ausschließlich als `full_required` behandelt. Der Scheduler bleibt in diesem Release suspendiert; ein neuer Baseline-Plan und jede spätere Aktivierung benötigen eine eigene Review- und Freigabestrecke.
 
-Nach erfolgreich attestiertem operativem Bootstrap ist dessen commit-gebundener One-shot-Job aus dem GitOps Desired State entfernt. `gmail-import-full` und `gmail-import-bootstrap` bleiben suspendiert und unarmed; ausschließlich `gmail-import-delta` läuft stündlich zur Minute 17 mit `concurrencyPolicy=Forbid`, `backoffLimit=0` und `GMAIL_IMPORT_ARMED=true`. Restore und jeder Recovery-Fall suspendieren den Scheduler erneut, bis Zustand und Checkpoint separat attestiert wurden.
+Nach erfolgreich attestiertem operativem Bootstrap ist dessen commit-gebundener One-shot-Job aus dem GitOps Desired State entfernt. `gmail-import-full`, `gmail-import-bootstrap` und `gmail-import-delta` bleiben suspendiert und unarmed. Die Delta-Definition behält ihren Stundenplan, startet aber ohne separat reviewte least-privilege Credentials und Aktivierungsfreigabe keinen Job.
 
 Operative Runs sind wiederholbare GET-only Läufe. Sie halten den Advisory Lock während Providerzugriff und Commit und werden erst atomar als `SUCCEEDED` sichtbar; dadurch koexistieren sie mit dem unveränderten historischen `RUNNING`-Pilotclaim, ohne dessen Exactly-once-Vertrag oder den Unique-Index aufzuweichen.
 
@@ -277,18 +277,16 @@ freigegebener, getesteter Datenbankeingriff erlaubt.
 
 Der Restore-Ablauf suspendiert und read-back-verifiziert alle drei
 Gmail-CronJobs unabhängig von deklarativem Soll oder Live-Drift. Für den
-deklarativ aktiven Delta-CronJob setzt er zusätzlich
+deklarativ dormanten Delta-CronJob setzt er zusätzlich
 `kustomize.toolkit.fluxcd.io/reconcile=disabled` und verifiziert die Flux-Quarantäne
 vor dem ersten Writer-Check sowie unmittelbar nach dem `coop-import`-Reconcile und
 nach allen Reconciles. Zuvor wartet das Skript nach Suspension aller Flux-Grenzen
 auf `Reconciling!=True` und verifiziert sämtliche Suspensionen erneut. Delta bleibt
 dadurch suspendiert; die Quarantäne darf erst in einem separat reviewten
 Post-Restore-Schritt nach DB-, Checkpoint- und Evidence-Attestation entfernt werden.
-Dieser Schritt muss fail-closed in dieser Reihenfolge erfolgen: `coop-import`
-suspendieren und Quieszenz belegen; alle nichtterminalen PostgreSQL-Writer ausschließen;
-Delta weiterhin suspendiert read-back-verifizieren; die Annotation entfernen und ihr
-Fehlen read-back-verifizieren; `coop-import` einmal kontrolliert reconciliieren und
-`Ready` abwarten; exakt `suspend=false`, `GMAIL_IMPORT_ARMED=true` und keine
-unerwarteten Jobs verifizieren; anschließend den Erfolg der ersten DELTA-Ausführung und
-den nichtregressiven Checkpoint attestieren. Jede Abweichung suspendiert
-`coop-import` und Delta erneut. Full und Bootstrap bleiben suspendiert und unbewaffnet.
+Das Entfernen der Restore-Quarantäne aktiviert Delta ausdrücklich nicht: Danach müssen
+weiterhin `suspend=true` und `GMAIL_IMPORT_ARMED=false` read-back-verifiziert werden.
+Eine spätere Aktivierung setzt ein dediziertes, ausschließlich für `gmail.readonly` plus
+zulässige Identity-Scopes ausgestelltes Credential voraus und benötigt einen separaten
+Review-PR samt Live-Attestation. Jede Abweichung suspendiert `coop-import` und Delta
+erneut. Full und Bootstrap bleiben suspendiert und unbewaffnet.

@@ -360,10 +360,8 @@ class GmailClient:
             raise GmailAuthError("tokeninfo_failed")
         raw_scope = self._required_text(tokeninfo, "scope", "scope_missing")
         scopes = set(raw_scope.split())
-        # The production token is deliberately reused from the Influencer agent and
-        # therefore has additional grants. Runtime capability stays read-only: this
-        # adapter only implements GETs and still requires gmail.readonly explicitly.
-        if GMAIL_READONLY_SCOPE not in scopes:
+        allowed_scopes = IDENTITY_SCOPES | {GMAIL_READONLY_SCOPE}
+        if GMAIL_READONLY_SCOPE not in scopes or not scopes <= allowed_scopes:
             raise GmailAuthError("scope_invalid")
         if "email" in tokeninfo:
             token_email = tokeninfo["email"]

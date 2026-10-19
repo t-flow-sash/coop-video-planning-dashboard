@@ -46,6 +46,7 @@ class RestoreScriptTests(unittest.TestCase):
         import_reconcile_polls: int = 0,
         ignore_delta_quarantine_patch: bool = False,
         lose_delta_quarantine_on_import_resume: bool = False,
+        suspension_ack_polls: int = 1,
     ) -> tuple[subprocess.CompletedProcess[str], list[list[str]], dict[str, Any]]:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
@@ -72,6 +73,7 @@ class RestoreScriptTests(unittest.TestCase):
                         "observed_generation": {item: 1 for item in self.flux_objects},
                         "last_handled": {item: "old-request" for item in self.flux_objects},
                         "ready": {item: True for item in self.flux_objects},
+                        "suspension_reads": {item: 0 for item in self.flux_objects},
                     }
                 ),
                 encoding="utf-8",
@@ -106,6 +108,15 @@ class RestoreScriptTests(unittest.TestCase):
                         name = args[args.index(kind) + 1]
                         resource = f"{kind}/{name}"
                         if "-o" in args and args[args.index("-o") + 1] == "json":
+                            if (
+                                resource in state["generation"]
+                                and state["suspended"][resource]
+                                and state["observed_generation"][resource] < state["generation"][resource]
+                            ):
+                                state["suspension_reads"][resource] += 1
+                                if state["suspension_reads"][resource] >= int(os.environ.get("MOCK_SUSPENSION_ACK_POLLS", "1")):
+                                    state["observed_generation"][resource] = state["generation"][resource]
+                                save()
                             reconciling = False
                             if (
                                 resource == "kustomization/coop-import"
@@ -245,6 +256,7 @@ class RestoreScriptTests(unittest.TestCase):
                     "MOCK_ROOT_STALE_OBSERVED_GENERATION": "1" if root_stale_observed_generation else "0",
                     "MOCK_ROOT_NOT_READY": "1" if root_not_ready else "0",
                     "MOCK_IMPORT_RECONCILE_POLLS": str(import_reconcile_polls),
+                    "MOCK_SUSPENSION_ACK_POLLS": str(suspension_ack_polls),
                     "MOCK_IGNORE_DELTA_QUARANTINE_PATCH": "1"
                     if ignore_delta_quarantine_patch
                     else "0",
@@ -303,6 +315,18 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertLess(cron_verify, active_index)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("ACTIVE_CHECK_BEFORE_SUSPEND", result.stderr)
+
+    def test_refuses_restore_until_flux_acknowledges_suspension_generation(self) -> None:
+        result, calls, _ = self.run_restore(suspension_ack_polls=3)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Timed out waiting for Flux quiescence", result.stderr)
+        self.assertIn("could not prove the fail-closed quarantine", result.stderr)
+        self.assertFalse(any(" get jobs " in f" {call} " for call in rendered))
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
 
     def test_unsuspended_seed_is_suspended_and_verified_before_first_writer_check(self) -> None:
         result, calls, state = self.run_restore(active_writer=True)
@@ -392,11 +416,17 @@ class RestoreScriptTests(unittest.TestCase):
         )
 
     def test_quarantine_readback_failure_aborts_before_writer_check(self) -> None:
-        result, calls, _ = self.run_restore(ignore_delta_quarantine_patch=True)
+        result, calls, state = self.run_restore(ignore_delta_quarantine_patch=True)
         rendered = [self.operation(call) for call in calls]
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Failed to establish Flux quarantine", result.stderr)
+        self.assertIn("could not prove the fail-closed quarantine", result.stderr)
         self.assertFalse(any(" get jobs " in f" {call} " for call in rendered))
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+        self.assertTrue(all(state["suspended"].values()))
+        self.assertEqual(state["replicas"], 0)
         self.assertNotIn("Restore completed", result.stdout)
 
     def test_quarantine_loss_aborts_immediately_after_import_reconcile(self) -> None:
@@ -420,6 +450,12 @@ class RestoreScriptTests(unittest.TestCase):
             )
         )
         self.assertTrue(state["suspended"]["cronjob/gmail-import-delta"])
+        self.assertEqual(
+            state["annotations"]["cronjob/gmail-import-delta"][
+                "kustomize.toolkit.fluxcd.io/reconcile"
+            ],
+            "disabled",
+        )
         self.assertNotIn("Restore completed", result.stdout)
 
     def test_seed_remains_suspended_on_restore_failure(self) -> None:
@@ -559,9 +595,7 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertFalse(any("--replicas=2" in call for call in rendered))
         self.assertNotIn("Restore completed", result.stdout)
         source = "gitrepository/coop-video-planning"
-        self.assertEqual(
-            state["observed_generation"][source] + 1, state["generation"][source]
-        )
+        self.assertEqual(state["observed_generation"][source], state["generation"][source])
         self.assertTrue(state["ready"][source])
         self.assertEqual(state["last_handled"][source], "old-request")
         self.assertTrue(all(state["suspended"].values()))
@@ -573,9 +607,7 @@ class RestoreScriptTests(unittest.TestCase):
         rendered = [self.operation(call) for call in calls]
         self.assertEqual(result.returncode, 10)
         self.assertIn(f"fresh reconciliation of {child}", result.stderr)
-        self.assertEqual(
-            state["observed_generation"][child] + 1, state["generation"][child]
-        )
+        self.assertEqual(state["observed_generation"][child], state["generation"][child])
         self.assertTrue(state["ready"][child])
         self.assertEqual(state["last_handled"][child], "old-request")
         self.assertFalse(any("--replicas=2" in call for call in rendered))

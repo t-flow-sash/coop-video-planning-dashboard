@@ -156,7 +156,7 @@ Restore ist destruktiv und benötigt ein Wartungsfenster.
 
 1. Gewünschten Dump anhand Job-Logs/Bestandsliste identifizieren; nur Dateinamen der Form `daily-*`, `weekly-*` oder `pre-restore-*` akzeptieren.
 2. Aktuelle Git-/Image-/Migrationsrevision und Replica-Zahl dokumentieren. Das Skript suspendiert fail-closed zuerst `coop-root`, die Git-Source sowie `coop-database`, `coop-migration`, `coop-import`, `coop-apps`, `coop-ingress` und `coop-backup` und verifiziert diese Sperren. Danach suspendiert und verifiziert es die weiterhin eigenständig aktiven CronJobs `postgres-backup`, `coop-seed`, `gmail-import-full`, `gmail-import-bootstrap` und `gmail-import-delta`, bevor es zum ersten Mal aktive oder pending PostgreSQL-Writer prüft.
-3. Bei einem aktiven Writer-Job oder einer nicht verifizierbaren Abfrage bricht das Skript ab; Flux und alle fünf Scheduler bleiben suspendiert und die API wird auf null gehalten. Auch nach Erfolg bleiben `coop-seed` sowie Full und Bootstrap suspendiert. Der deklarativ aktive Delta-CronJob bleibt durch `kustomize.toolkit.fluxcd.io/reconcile=disabled` quarantänisiert und suspendiert; nur der Backup-CronJob wird kontrolliert auf seinen vorherigen Zustand gesetzt.
+3. Bei einem aktiven Writer-Job oder einer nicht verifizierbaren Abfrage bricht das Skript ab; Flux und alle fünf Scheduler bleiben suspendiert und die API wird auf null gehalten. Auch nach Erfolg bleiben `coop-seed` sowie alle Gmail-CronJobs suspendiert. Delta bleibt zusätzlich durch `kustomize.toolkit.fluxcd.io/reconcile=disabled` quarantänisiert; nur der Backup-CronJob wird kontrolliert auf seinen vorherigen Zustand gesetzt.
 4. Ausführen:
    ```bash
    scripts/restore-postgres.sh daily-20260101T011700Z.dump --yes

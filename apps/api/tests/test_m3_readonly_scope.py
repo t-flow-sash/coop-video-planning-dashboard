@@ -243,7 +243,7 @@ def readonly_scope_violations(root: Path) -> list[str]:
     expected_workloads = {
         "gmail-import-full": ("full", True, "false"),
         "gmail-import-bootstrap": ("bootstrap", True, "false"),
-        "gmail-import-delta": ("delta", False, "true"),
+        "gmail-import-delta": ("delta", True, "false"),
     }
     actual_workloads = {
         name: document for kind, name, document in workloads if kind == "CronJob" and name

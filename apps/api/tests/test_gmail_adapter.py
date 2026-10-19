@@ -319,7 +319,7 @@ def test_authorize_rejects_tokens_without_gmail_readonly(scope: str) -> None:
 
 
 @pytest.mark.no_db
-def test_authorize_accepts_explicitly_approved_broad_influencer_token() -> None:
+def test_authorize_rejects_overprivileged_influencer_token() -> None:
     scope = " ".join(
         [
             GMAIL_READONLY_SCOPE,
@@ -330,9 +330,8 @@ def test_authorize_accepts_explicitly_approved_broad_influencer_token() -> None:
         ]
     )
 
-    authorized = GmailClient(config(), FakeTransport(authorized_responses(scope=scope))).authorize()
-
-    assert authorized.history_id == "100"
+    with pytest.raises(GmailAuthError, match="scope_invalid"):
+        GmailClient(config(), FakeTransport(authorized_responses(scope=scope))).authorize()
 
 
 @pytest.mark.no_db
