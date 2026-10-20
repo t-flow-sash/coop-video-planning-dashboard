@@ -43,6 +43,16 @@ class RestoreScriptTests(unittest.TestCase):
         root_stale_observed_generation: bool = False,
         root_not_ready: bool = False,
         initially_suspended: str | None = None,
+        import_reconcile_polls: int = 0,
+        ignore_delta_quarantine_patch: bool = False,
+        lose_delta_quarantine_on_import_resume: bool = False,
+        suspension_ack_polls: int = 1,
+        api_termination_stuck: bool = False,
+        lock_create_readback_mismatch: bool = False,
+        lock_recreated_before_cleanup: bool = False,
+        lock_lost_before_cleanup: bool = False,
+        lock_replaced_during_delete: bool = False,
+        lock_mutated_before_cleanup: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], list[list[str]], dict[str, Any]]:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
@@ -62,11 +72,17 @@ class RestoreScriptTests(unittest.TestCase):
                 json.dumps(
                     {
                         "suspended": suspended,
+                        "annotations": {},
+                        "import_reconcile_reads": 0,
                         "replicas": 2,
+                        "api_pods": 2,
+                        "lock": None,
+                        "lock_reads": 0,
                         "generation": {item: 1 for item in self.flux_objects},
                         "observed_generation": {item: 1 for item in self.flux_objects},
                         "last_handled": {item: "old-request" for item in self.flux_objects},
                         "ready": {item: True for item in self.flux_objects},
+                        "suspension_reads": {item: 0 for item in self.flux_objects},
                     }
                 ),
                 encoding="utf-8",
@@ -76,7 +92,7 @@ class RestoreScriptTests(unittest.TestCase):
                 textwrap.dedent(
                     """\
                     #!/usr/bin/env python3
-                    import json, os, sys
+                    import json, os, signal, socket, sys
                     from pathlib import Path
 
                     args = sys.argv[1:]
@@ -88,6 +104,16 @@ class RestoreScriptTests(unittest.TestCase):
 
                     def save():
                         state_path.write_text(json.dumps(state))
+
+                    if "proxy" in args:
+                        socket_arg = next(
+                            item for item in args if item.startswith("--unix-socket=")
+                        )
+                        socket_path = socket_arg.split("=", 1)[1]
+                        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                        server.bind(socket_path)
+                        server.listen(1)
+                        signal.pause()
 
                     if "get" in args and "deployment" in args and "coop-api" in args:
                         print(state["replicas"], end="")
@@ -101,12 +127,38 @@ class RestoreScriptTests(unittest.TestCase):
                         name = args[args.index(kind) + 1]
                         resource = f"{kind}/{name}"
                         if "-o" in args and args[args.index("-o") + 1] == "json":
+                            if (
+                                resource in state["generation"]
+                                and state["suspended"][resource]
+                                and state["observed_generation"][resource] < state["generation"][resource]
+                            ):
+                                state["suspension_reads"][resource] += 1
+                                if state["suspension_reads"][resource] >= int(os.environ.get("MOCK_SUSPENSION_ACK_POLLS", "1")):
+                                    state["observed_generation"][resource] = state["generation"][resource]
+                                save()
+                            reconciling = False
+                            if (
+                                resource == "kustomization/coop-import"
+                                and state["suspended"][resource]
+                                and state["import_reconcile_reads"] < int(os.environ.get("MOCK_IMPORT_RECONCILE_POLLS", "0"))
+                            ):
+                                state["import_reconcile_reads"] += 1
+                                state["suspended"]["cronjob/gmail-import-delta"] = False
+                                reconciling = True
+                                save()
                             print(json.dumps({
-                                "metadata": {"generation": state["generation"][resource]},
+                                "metadata": {
+                                    "generation": state["generation"].get(resource, 1),
+                                    "annotations": state["annotations"].get(resource, {}),
+                                },
+                                "spec": {"suspend": state["suspended"][resource]},
                                 "status": {
-                                    "observedGeneration": state["observed_generation"][resource],
-                                    "lastHandledReconcileAt": state["last_handled"][resource],
-                                    "conditions": [{"type": "Ready", "status": "True" if state["ready"][resource] else "False"}],
+                                    "observedGeneration": state["observed_generation"].get(resource, 1),
+                                    "lastHandledReconcileAt": state["last_handled"].get(resource, ""),
+                                    "conditions": [
+                                        {"type": "Ready", "status": "True" if state["ready"].get(resource, True) else "False"},
+                                        {"type": "Reconciling", "status": "True" if reconciling else "False"},
+                                    ],
                                 },
                             }))
                         else:
@@ -121,10 +173,33 @@ class RestoreScriptTests(unittest.TestCase):
                         name = args[args.index(kind) + 1]
                         resource = f"{kind}/{name}"
                         payload = args[args.index("-p") + 1]
-                        new_suspend = json.loads(payload)["spec"]["suspend"]
-                        if kind != "cronjob" and state["suspended"][resource] != new_suspend:
-                            state["generation"][resource] += 1
-                        state["suspended"][resource] = new_suspend
+                        patch = json.loads(payload)
+                        new_suspend = state["suspended"][resource]
+                        if "suspend" in patch.get("spec", {}):
+                            new_suspend = patch["spec"]["suspend"]
+                            if kind != "cronjob" and state["suspended"][resource] != new_suspend:
+                                state["generation"][resource] += 1
+                            state["suspended"][resource] = new_suspend
+                        state["annotations"].setdefault(resource, {}).update(
+                            patch.get("metadata", {}).get("annotations", {})
+                        )
+                        if (
+                            resource == "cronjob/gmail-import-delta"
+                            and os.environ.get("MOCK_IGNORE_DELTA_QUARANTINE_PATCH") == "1"
+                        ):
+                            state["annotations"][resource].pop(
+                                "kustomize.toolkit.fluxcd.io/reconcile", None
+                            )
+                        if (
+                            resource == "kustomization/coop-import"
+                            and new_suspend is False
+                            and os.environ.get("MOCK_LOSE_DELTA_QUARANTINE") == "1"
+                        ):
+                            delta = "cronjob/gmail-import-delta"
+                            state["suspended"][delta] = False
+                            state["annotations"].setdefault(delta, {}).pop(
+                                "kustomize.toolkit.fluxcd.io/reconcile", None
+                            )
                         if (
                             resource == "kustomization/coop-root"
                             and not new_suspend
@@ -151,6 +226,56 @@ class RestoreScriptTests(unittest.TestCase):
                         if os.environ.get("MOCK_LOCK_COLLISION") == "1":
                             print("Error from server (AlreadyExists)", file=sys.stderr)
                             sys.exit(1)
+                        holder_arg = next(item for item in args if item.startswith("--from-literal=holder="))
+                        state["lock"] = {
+                            "uid": "lock-uid-1",
+                            "holder": holder_arg.split("=", 2)[2],
+                            "resourceVersion": "1",
+                        }
+                        save()
+                        if "-o" in args and args[args.index("-o") + 1] == "json":
+                            print(json.dumps({
+                                "metadata": {
+                                    "uid": state["lock"]["uid"],
+                                    "resourceVersion": state["lock"]["resourceVersion"],
+                                },
+                                "data": {"holder": state["lock"]["holder"]},
+                            }))
+                    elif "get" in args and "configmap" in args:
+                        state["lock_reads"] += 1
+                        if (
+                            state["lock_reads"] == 1
+                            and os.environ.get("MOCK_LOCK_CREATE_READBACK_MISMATCH") == "1"
+                        ) or (
+                            state["lock_reads"] == 2
+                            and os.environ.get("MOCK_LOCK_RECREATED_BEFORE_CLEANUP") == "1"
+                        ):
+                            state["lock"] = {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"}
+                        if (
+                            state["lock_reads"] == 2
+                            and os.environ.get("MOCK_LOCK_LOST_BEFORE_CLEANUP") == "1"
+                        ):
+                            state["lock"] = None
+                        if (
+                            state["lock_reads"] == 2
+                            and os.environ.get("MOCK_LOCK_MUTATED_BEFORE_CLEANUP") == "1"
+                            and state["lock"] is not None
+                        ):
+                            state["lock"]["resourceVersion"] = "2"
+                        save()
+                        if state["lock"] is None:
+                            print("Error from server (NotFound)", file=sys.stderr)
+                            sys.exit(1)
+                        print(json.dumps({
+                            "metadata": {
+                                "uid": state["lock"]["uid"],
+                                "resourceVersion": state["lock"]["resourceVersion"],
+                            },
+                            "data": {"holder": state["lock"]["holder"]},
+                        }))
+                    elif "delete" in args and "configmap" in args:
+                        print("error: unknown flag: --preconditions", file=sys.stderr)
+                        sys.exit(1)
                     elif "create" in args and "-f" in args and "-" in args:
                         sys.stdin.read()
                         print("coop-restore-generated", end="")
@@ -174,7 +299,32 @@ class RestoreScriptTests(unittest.TestCase):
                     elif "scale" in args:
                         replica_arg = next(item for item in args if item.startswith("--replicas="))
                         state["replicas"] = int(replica_arg.split("=", 1)[1])
+                        if state["replicas"] > 0:
+                            state["api_pods"] = state["replicas"]
                         save()
+                    elif "rollout" in args and "status" in args and "deployment/coop-api" in args:
+                        pass
+                    elif "delete" in args and "pods" in args and "-l" in args:
+                        if os.environ.get("MOCK_API_TERMINATION_STUCK") != "1":
+                            state["api_pods"] = 0
+                            save()
+                        else:
+                            sys.exit(53)
+                    elif "wait" in args and "--for=delete" in args and "pod" in args:
+                        if state["api_pods"] != 0:
+                            sys.exit(53)
+                    elif "get" in args and "pods" in args and "-l" in args:
+                        print(json.dumps({
+                            "items": [
+                                {
+                                    "metadata": {
+                                        "name": f"coop-api-{index}",
+                                        "deletionTimestamp": "2026-01-01T00:00:00Z",
+                                    }
+                                }
+                                for index in range(state["api_pods"])
+                            ]
+                        }))
                     elif "exec" in args and os.environ.get("MOCK_FAIL_EXEC") == "1":
                         sys.exit(41)
                     sys.exit(0)
@@ -183,6 +333,59 @@ class RestoreScriptTests(unittest.TestCase):
                 encoding="utf-8",
             )
             kubectl.chmod(0o755)
+            curl = temp / "curl"
+            curl.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import json, os, sys
+                    from pathlib import Path
+
+                    args = sys.argv[1:]
+                    body = sys.stdin.read()
+                    state_path = Path(os.environ["MOCK_STATE"])
+                    log_path = Path(os.environ["MOCK_LOG"])
+                    with log_path.open("a") as stream:
+                        stream.write(json.dumps(["curl", *args, body]) + "\\n")
+                    state = json.loads(state_path.read_text())
+                    expected_url = (
+                        "http://localhost/api/v1/namespaces/coop-prod/configmaps/"
+                        "coop-postgres-restore-lock"
+                    )
+                    try:
+                        delete_options = json.loads(body)
+                    except json.JSONDecodeError:
+                        sys.exit(64)
+                    if (
+                        "--unix-socket" not in args
+                        or "DELETE" not in args
+                        or expected_url not in args
+                        or delete_options.get("kind") != "DeleteOptions"
+                        or delete_options.get("apiVersion") != "v1"
+                    ):
+                        sys.exit(64)
+                    if os.environ.get("MOCK_LOCK_REPLACED_DURING_DELETE") == "1":
+                        state["lock"] = {
+                            "uid": "foreign-uid",
+                            "holder": "foreign-holder",
+                            "resourceVersion": "2",
+                        }
+                    preconditions = delete_options.get("preconditions", {})
+                    if (
+                        state["lock"] is None
+                        or preconditions.get("uid") != state["lock"]["uid"]
+                        or preconditions.get("resourceVersion")
+                        != state["lock"]["resourceVersion"]
+                    ):
+                        state_path.write_text(json.dumps(state))
+                        sys.exit(22)
+                    state["lock"] = None
+                    state_path.write_text(json.dumps(state))
+                    """
+                ),
+                encoding="utf-8",
+            )
+            curl.chmod(0o755)
             env = os.environ.copy()
             env.update(
                 {
@@ -199,6 +402,28 @@ class RestoreScriptTests(unittest.TestCase):
                     "MOCK_STALE_OBSERVED_GENERATION": "1" if stale_observed_generation else "0",
                     "MOCK_ROOT_STALE_OBSERVED_GENERATION": "1" if root_stale_observed_generation else "0",
                     "MOCK_ROOT_NOT_READY": "1" if root_not_ready else "0",
+                    "MOCK_IMPORT_RECONCILE_POLLS": str(import_reconcile_polls),
+                    "MOCK_SUSPENSION_ACK_POLLS": str(suspension_ack_polls),
+                    "MOCK_IGNORE_DELTA_QUARANTINE_PATCH": "1"
+                    if ignore_delta_quarantine_patch
+                    else "0",
+                    "MOCK_LOSE_DELTA_QUARANTINE": "1"
+                    if lose_delta_quarantine_on_import_resume
+                    else "0",
+                    "MOCK_API_TERMINATION_STUCK": "1" if api_termination_stuck else "0",
+                    "MOCK_LOCK_CREATE_READBACK_MISMATCH": "1"
+                    if lock_create_readback_mismatch
+                    else "0",
+                    "MOCK_LOCK_RECREATED_BEFORE_CLEANUP": "1"
+                    if lock_recreated_before_cleanup
+                    else "0",
+                    "MOCK_LOCK_LOST_BEFORE_CLEANUP": "1" if lock_lost_before_cleanup else "0",
+                    "MOCK_LOCK_REPLACED_DURING_DELETE": "1"
+                    if lock_replaced_during_delete
+                    else "0",
+                    "MOCK_LOCK_MUTATED_BEFORE_CLEANUP": "1"
+                    if lock_mutated_before_cleanup
+                    else "0",
                     "RECONCILE_ATTEMPTS": "2",
                     "RECONCILE_POLL_SECONDS": "0",
                 }
@@ -251,6 +476,18 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertLess(cron_verify, active_index)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("ACTIVE_CHECK_BEFORE_SUSPEND", result.stderr)
+
+    def test_refuses_restore_until_flux_acknowledges_suspension_generation(self) -> None:
+        result, calls, _ = self.run_restore(suspension_ack_polls=3)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Timed out waiting for Flux quiescence", result.stderr)
+        self.assertIn("could not prove the fail-closed quarantine", result.stderr)
+        self.assertFalse(any(" get jobs " in f" {call} " for call in rendered))
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
 
     def test_unsuspended_seed_is_suspended_and_verified_before_first_writer_check(self) -> None:
         result, calls, state = self.run_restore(active_writer=True)
@@ -305,6 +542,83 @@ class RestoreScriptTests(unittest.TestCase):
             )
             self.assertTrue(state["suspended"][f"cronjob/{name}"])
 
+    def test_success_quarantines_delta_from_flux_before_import_reconcile(self) -> None:
+        result, calls, state = self.run_restore(import_reconcile_polls=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = [self.operation(call) for call in calls]
+        quarantine = next(
+            index
+            for index, call in enumerate(rendered)
+            if "patch cronjob gmail-import-delta" in call
+            and "kustomize.toolkit.fluxcd.io/reconcile" in call
+        )
+        verification = next(
+            index
+            for index, call in enumerate(rendered)
+            if index > quarantine and "get cronjob gmail-import-delta -o json" in call
+        )
+        writer_check = next(
+            index for index, call in enumerate(rendered) if " get jobs " in f" {call} "
+        )
+        import_resume = next(
+            index
+            for index, call in enumerate(rendered)
+            if "patch kustomization coop-import" in call and '"suspend":false' in call
+        )
+        self.assertLess(verification, writer_check)
+        self.assertLess(verification, import_resume)
+        self.assertTrue(state["suspended"]["cronjob/gmail-import-delta"])
+        self.assertEqual(state["import_reconcile_reads"], 1)
+        self.assertEqual(
+            state["annotations"]["cronjob/gmail-import-delta"][
+                "kustomize.toolkit.fluxcd.io/reconcile"
+            ],
+            "disabled",
+        )
+
+    def test_quarantine_readback_failure_aborts_before_writer_check(self) -> None:
+        result, calls, state = self.run_restore(ignore_delta_quarantine_patch=True)
+        rendered = [self.operation(call) for call in calls]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Failed to establish Flux quarantine", result.stderr)
+        self.assertIn("could not prove the fail-closed quarantine", result.stderr)
+        self.assertFalse(any(" get jobs " in f" {call} " for call in rendered))
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+        self.assertTrue(all(state["suspended"].values()))
+        self.assertEqual(state["replicas"], 0)
+        self.assertNotIn("Restore completed", result.stdout)
+
+    def test_quarantine_loss_aborts_immediately_after_import_reconcile(self) -> None:
+        result, calls, state = self.run_restore(
+            lose_delta_quarantine_on_import_resume=True
+        )
+        rendered = [self.operation(call) for call in calls]
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("was lost during coop-import reconciliation", result.stderr)
+        import_resume = next(
+            index
+            for index, call in enumerate(rendered)
+            if "patch kustomization coop-import" in call and '"suspend":false' in call
+        )
+        self.assertFalse(
+            any(
+                index > import_resume
+                and "patch kustomization coop-apps" in call
+                and '"suspend":false' in call
+                for index, call in enumerate(rendered)
+            )
+        )
+        self.assertTrue(state["suspended"]["cronjob/gmail-import-delta"])
+        self.assertEqual(
+            state["annotations"]["cronjob/gmail-import-delta"][
+                "kustomize.toolkit.fluxcd.io/reconcile"
+            ],
+            "disabled",
+        )
+        self.assertNotIn("Restore completed", result.stdout)
+
     def test_seed_remains_suspended_on_restore_failure(self) -> None:
         result, _, state = self.run_restore(fail_exec=True)
         self.assertNotEqual(result.returncode, 0)
@@ -341,6 +655,86 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertFalse(any("delete configmap coop-postgres-restore-lock" in call for call in rendered))
         self.assertEqual(state["replicas"], 2)
 
+    def test_lock_create_requires_uid_and_holder_readback(self) -> None:
+        result, calls, state = self.run_restore(lock_create_readback_mismatch=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Could not verify ownership of PostgreSQL restore lock", result.stderr)
+        self.assertEqual(state["lock"], {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"})
+        self.assertTrue(
+            any("get configmap coop-postgres-restore-lock -o json" in call for call in rendered)
+        )
+        self.assertFalse(any(" patch " in f" {call} " for call in rendered))
+        self.assertFalse(any(" scale " in f" {call} " for call in rendered))
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+
+    def test_recreated_lock_is_preserved_and_reported_fail_closed(self) -> None:
+        result, calls, state = self.run_restore(lock_recreated_before_cleanup=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 11)
+        self.assertIn("lock ownership was lost", result.stderr)
+        self.assertIn("fail-closed", result.stderr)
+        self.assertEqual(state["lock"], {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"})
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+
+    def test_lost_lock_is_not_name_deleted_and_is_reported_fail_closed(self) -> None:
+        result, calls, state = self.run_restore(lock_lost_before_cleanup=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 11)
+        self.assertIn("lock ownership was lost", result.stderr)
+        self.assertIn("fail-closed", result.stderr)
+        self.assertIsNone(state["lock"])
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+
+    def test_uid_precondition_preserves_lock_replaced_during_delete(self) -> None:
+        result, calls, state = self.run_restore(lock_replaced_during_delete=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 11)
+        self.assertIn("UID precondition", result.stderr)
+        self.assertIn("fail-closed", result.stderr)
+        self.assertEqual(state["lock"], {"uid": "foreign-uid", "holder": "foreign-holder", "resourceVersion": "2"})
+        self.assertTrue(
+            any(
+                call.startswith("curl ")
+                and '"uid": "lock-uid-1"' in call
+                and '"resourceVersion": "1"' in call
+                for call in rendered
+            )
+        )
+
+    def test_resource_version_change_preserves_mutated_lock(self) -> None:
+        result, calls, state = self.run_restore(lock_mutated_before_cleanup=True)
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 11)
+        self.assertIn("lock ownership was lost", result.stderr)
+        self.assertEqual(state["lock"]["resourceVersion"], "2")
+        self.assertFalse(
+            any("delete configmap coop-postgres-restore-lock" in call for call in rendered)
+        )
+
+    def test_failed_quarantine_does_not_claim_a_lost_lock_remains_held(self) -> None:
+        result, _, state = self.run_restore(
+            active_writer=True,
+            api_termination_stuck=True,
+            lock_lost_before_cleanup=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(state["lock"])
+        self.assertIn("lock ownership was lost", result.stderr)
+        self.assertNotIn("restore lock remains held", result.stderr)
+
     def test_pre_suspended_dependency_aborts_before_restore_or_api_scale_up(self) -> None:
         result, calls, state = self.run_restore(initially_suspended="kustomization/coop-migration")
         rendered = [self.operation(call) for call in calls]
@@ -368,6 +762,68 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertTrue(all(state["suspended"].values()))
         self.assertEqual(state["replicas"], 0)
         self.assertFalse(any('"suspend":false' in call for call in rendered))
+
+    def test_failure_quarantine_retains_lock_until_api_pods_terminate(self) -> None:
+        result, calls, state = self.run_restore(
+            active_writer=True,
+            api_termination_stuck=True,
+        )
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(state["replicas"], 0)
+        self.assertEqual(state["api_pods"], 2)
+        self.assertTrue(
+            any(
+                "delete pods -l app.kubernetes.io/name=coop-api" in call
+                for call in rendered
+            )
+        )
+        self.assertTrue(
+            any(
+                "wait --for=delete pod -l app.kubernetes.io/name=coop-api" in call
+                for call in rendered
+            )
+        )
+        self.assertTrue(
+            any(
+                "get pods -l app.kubernetes.io/name=coop-api -o json" in call
+                for call in rendered
+            )
+        )
+        self.assertNotIn("verified suspended/stopped", result.stderr)
+        self.assertIn("could not prove the fail-closed quarantine", result.stderr)
+        self.assertFalse(any(call.startswith("curl ") for call in rendered))
+
+    def test_success_proves_no_api_pods_remain_before_restore(self) -> None:
+        result, calls, state = self.run_restore()
+        rendered = [self.operation(call) for call in calls]
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        delete_index = next(
+            index
+            for index, call in enumerate(rendered)
+            if "delete pods -l app.kubernetes.io/name=coop-api" in call
+        )
+        wait_index = next(
+            index
+            for index, call in enumerate(rendered)
+            if "wait --for=delete pod -l app.kubernetes.io/name=coop-api" in call
+        )
+        readback_index = next(
+            index
+            for index, call in enumerate(rendered)
+            if "get pods -l app.kubernetes.io/name=coop-api -o json" in call
+        )
+        restore_index = next(
+            index
+            for index, call in enumerate(rendered)
+            if "create -f - -o jsonpath={.metadata.name}" in call
+        )
+        self.assertLess(delete_index, wait_index)
+        self.assertLess(wait_index, readback_index)
+        self.assertLess(readback_index, restore_index)
+        self.assertEqual(state["api_pods"], 2)
 
     def test_success_resumes_and_reconciles_in_dependency_order(self) -> None:
         result, calls, state = self.run_restore()
@@ -423,7 +879,29 @@ class RestoreScriptTests(unittest.TestCase):
             )
         self.assertTrue(any("create -f - -o jsonpath={.metadata.name}" in call for call in rendered))
         self.assertTrue(any("delete pod coop-restore-generated" in call for call in rendered))
-        self.assertTrue(any("delete configmap coop-postgres-restore-lock" in call for call in rendered))
+        self.assertTrue(
+            any(
+                call.startswith("curl ")
+                and "-X DELETE" in call
+                and "http://localhost/api/v1/namespaces/coop-prod/configmaps/coop-postgres-restore-lock"
+                in call
+                and '"kind": "DeleteOptions"' in call
+                and '"uid": "lock-uid-1"' in call
+                and '"resourceVersion": "1"' in call
+                for call in rendered
+            )
+        )
+        self.assertTrue(
+            any(
+                "proxy" in call
+                and any(part.startswith("--unix-socket=") for part in calls[index])
+                and "--api-prefix=/" in calls[index]
+                for index, call in enumerate(rendered)
+            )
+        )
+        self.assertFalse(any("--preconditions=" in call for call in rendered))
+        self.assertGreaterEqual(state["lock_reads"], 2)
+        self.assertIsNone(state["lock"])
         for cronjob in (
             "coop-seed",
             "gmail-import-full",
@@ -442,9 +920,7 @@ class RestoreScriptTests(unittest.TestCase):
         self.assertFalse(any("--replicas=2" in call for call in rendered))
         self.assertNotIn("Restore completed", result.stdout)
         source = "gitrepository/coop-video-planning"
-        self.assertEqual(
-            state["observed_generation"][source] + 1, state["generation"][source]
-        )
+        self.assertEqual(state["observed_generation"][source], state["generation"][source])
         self.assertTrue(state["ready"][source])
         self.assertEqual(state["last_handled"][source], "old-request")
         self.assertTrue(all(state["suspended"].values()))
@@ -456,9 +932,7 @@ class RestoreScriptTests(unittest.TestCase):
         rendered = [self.operation(call) for call in calls]
         self.assertEqual(result.returncode, 10)
         self.assertIn(f"fresh reconciliation of {child}", result.stderr)
-        self.assertEqual(
-            state["observed_generation"][child] + 1, state["generation"][child]
-        )
+        self.assertEqual(state["observed_generation"][child], state["generation"][child])
         self.assertTrue(state["ready"][child])
         self.assertEqual(state["last_handled"][child], "old-request")
         self.assertFalse(any("--replicas=2" in call for call in rendered))
@@ -515,6 +989,14 @@ class RestoreScriptTests(unittest.TestCase):
         script = RESTORE.read_text(encoding="utf-8")
         terminate = next(line for line in script.splitlines() if "pg_terminate_backend" in line)
         self.assertNotIn("|| true", terminate)
+
+    def test_recurring_gmail_scheduler_comment_matches_dormant_state(self) -> None:
+        manifest = (
+            ROOT / "infrastructure/import/gmail-recurring-cronjobs.yaml"
+        ).read_text(encoding="utf-8")
+        comment = manifest.splitlines()[0].lower()
+        self.assertIn("bootstrap and delta remain dormant", comment)
+        self.assertNotIn("active", comment)
 
 
 class RegistryBootstrapTests(unittest.TestCase):

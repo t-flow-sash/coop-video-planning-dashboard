@@ -581,7 +581,7 @@ class RenderedSecurityContractTests(unittest.TestCase):
             rule = policies[name]["spec"][direction][0]
             self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": 5432}])
 
-    def test_import_jobs_are_suspended_hardened_and_share_one_immutable_image(
+    def test_import_schedulers_are_hardened_and_exactly_staged(
         self,
     ) -> None:
         objects = self.by_kind_name("infrastructure/import")
@@ -602,10 +602,15 @@ class RenderedSecurityContractTests(unittest.TestCase):
             "gmail-import-bootstrap": 3600,
             "gmail-import-delta": 900,
         }
+        expected_activation = {
+            "gmail-import-full": (True, "false"),
+            "gmail-import-bootstrap": (True, "false"),
+            "gmail-import-delta": (True, "false"),
+        }
         images = set()
         for name, cronjob in cronjobs.items():
             spec = cronjob["spec"]
-            self.assertTrue(spec["suspend"], name)
+            self.assertEqual(spec["suspend"], expected_activation[name][0], name)
             self.assertEqual(spec["concurrencyPolicy"], "Forbid", name)
             self.assertEqual(spec["jobTemplate"]["spec"]["backoffLimit"], 0, name)
             self.assertEqual(
@@ -624,7 +629,9 @@ class RenderedSecurityContractTests(unittest.TestCase):
             self.assertEqual(container["args"], expected_commands[name], name)
             images.add(container["image"])
             env = {item["name"]: item for item in container["env"]}
-            self.assertEqual(env["GMAIL_IMPORT_ARMED"]["value"], "false", name)
+            self.assertEqual(
+                env["GMAIL_IMPORT_ARMED"]["value"], expected_activation[name][1], name
+            )
             query = env["GMAIL_IMPORT_QUERY"]["value"]
             expected_query_hash = hashlib.sha256(
                 json.dumps(
@@ -660,48 +667,12 @@ class RenderedSecurityContractTests(unittest.TestCase):
             image,
         )
 
-    def test_operational_bootstrap_job_is_single_armed_commit_bound_run(self) -> None:
+    def test_completed_operational_bootstrap_job_is_removed_from_desired_state(
+        self,
+    ) -> None:
         objects = self.by_kind_name("infrastructure/import")
-        jobs = {
-            name: item for (kind, name), item in objects.items() if kind == "Job"
-        }
-        self.assertEqual(len(jobs), 1)
-        name, job = next(iter(jobs.items()))
-        self.assertRegex(name, r"^gmail-import-bootstrap-[0-9a-f]{12}$")
-        self.assertNotIn("ownerReferences", job["metadata"])
-        self.assertNotIn("ttlSecondsAfterFinished", job["spec"])
-        self.assertEqual(job["spec"]["backoffLimit"], 0)
-        self.assertEqual(job["spec"]["parallelism"], 1)
-        self.assertEqual(job["spec"]["completions"], 1)
-        self.assertEqual(job["spec"]["activeDeadlineSeconds"], 3600)
-        self.assertNotIn("gmail-import-pilot", job["metadata"].get("labels", {}))
-        pod = job["spec"]["template"]["spec"]
-        self.assertEqual(pod["restartPolicy"], "Never")
-        self.assertFalse(pod["automountServiceAccountToken"])
-        container = pod["containers"][0]
-        self.assertEqual(container["args"], ["bootstrap"])
-        env = {item["name"]: item for item in container["env"]}
-        self.assertEqual(env["GMAIL_IMPORT_ARMED"]["value"], "true")
-        dormant = objects[("CronJob", "gmail-import-bootstrap")]
-        dormant_container = dormant["spec"]["jobTemplate"]["spec"]["template"][
-            "spec"
-        ]["containers"][0]
-        dormant_env = {item["name"]: item for item in dormant_container["env"]}
-        self.assertEqual(container["image"], dormant_container["image"])
-        for key in (
-            "GMAIL_IMPORT_QUERY",
-            "GMAIL_IMPORT_QUERY_SHA256",
-            "GMAIL_ACCOUNT_SHA256",
-        ):
-            self.assertEqual(env[key], dormant_env[key])
-        self.assertEqual(
-            job["metadata"]["annotations"][
-                "coop.example.com/image-source-revision"
-            ],
-            dormant["metadata"]["annotations"][
-                "coop.example.com/image-source-revision"
-            ],
-        )
+        jobs = {name: item for (kind, name), item in objects.items() if kind == "Job"}
+        self.assertEqual(jobs, {})
 
     def test_import_egress_is_only_dns_postgres_and_controlled_proxy(self) -> None:
         objects = self.by_kind_name("infrastructure/import")
@@ -986,14 +957,16 @@ class RenderedSecurityContractTests(unittest.TestCase):
         self.assertIn(
             "infrastructure/import/gmail-full-pilot-admission.yaml", promotion
         )
-        self.assertIn("infrastructure/import/gmail-bootstrap-job.yaml", promotion)
-        self.assertIn("gmail-import-bootstrap-{short_sha}", promotion)
+        self.assertNotIn("infrastructure/import/gmail-bootstrap-job.yaml", promotion)
+        self.assertNotIn("gmail-import-bootstrap-{short_sha}", promotion)
         self.assertIn("pilot_image =", promotion)
         self.assertIn("coop-image-promotion-transaction", promotion)
         self.assertIn("Recovering interrupted image-promotion transaction", promotion)
         self.assertIn("coop-image-promotion-transaction.initializing", promotion)
         self.assertIn("flock -n 9", promotion)
-        self.assertIn('cp -a -- infrastructure "${initializing_dir}/staged/"', promotion)
+        self.assertIn(
+            'cp -a -- infrastructure "${initializing_dir}/staged/"', promotion
+        )
         self.assertIn('mv -- "$initializing_dir" "$transaction_dir"', promotion)
         self.assertIn('staged_dir="${transaction_dir}/staged/${dir}"', promotion)
         self.assertIn(
@@ -1089,7 +1062,7 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         self.assertIn("import app.database_access", workflow)
         self.assertIn("SELECT version_num FROM alembic_version", workflow)
         self.assertIn('source == ("gmail-open-coops-v1", "GMAIL", True)', workflow)
-        self.assertIn("d7f4b2a96c31", workflow)
+        self.assertIn("f9b2d4e6a801", workflow)
         self.assertIn("assert len(jobs) == 3", workflow)
 
     def test_global_render_image_gate_rejects_any_unpinned_image(self) -> None:

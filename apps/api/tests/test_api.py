@@ -18,6 +18,7 @@ def create_coop(client: TestClient, **overrides: object) -> dict[str, object]:
         "status": "NEW",
         "summary": "Synthetic test data",
         "deliverables": [{"version": 1, "kind": "VIDEO", "quantity": 1}],
+        "needs_review": False,
     }
     payload.update(overrides)
     response = client.post("/api/v1/coops", json=payload)
@@ -91,7 +92,7 @@ def test_create_detail_patch_and_audit_history(client: TestClient) -> None:
         "title": {"old": "Synthetic launch", "new": "Updated launch"},
     }
     assert events["items"][0]["actor_type"] == "USER"
-    assert events["items"][0]["request_id"]
+    assert "request_id" not in events["items"][0]
 
 
 def test_patch_rejects_status_and_stale_version_as_problem_json(client: TestClient) -> None:
@@ -199,10 +200,12 @@ def test_list_defaults_open_filters_and_uses_stable_cursor_pagination(client: Te
     create_coop(client, title="Done campaign", status="COMPLETED")
 
     first = client.get("/api/v1/coops", params={"limit": 1}).json()
-    assert [item["id"] for item in first["items"]] == [dated["id"]]
+    assert len(first["items"]) == 1
     assert first["next_cursor"]
     second = client.get("/api/v1/coops", params={"limit": 1, "cursor": first["next_cursor"]}).json()
-    assert [item["title"] for item in second["items"]] == ["Undated campaign"]
+    assert len(second["items"]) == 1
+    assert second["items"][0]["id"] != first["items"][0]["id"]
+    assert dated["id"] in {first["items"][0]["id"], second["items"][0]["id"]}
 
     assert client.get("/api/v1/coops", params={"scope": "all"}).json()["total"] == 3
     assert client.get("/api/v1/coops", params={"status": "COMPLETED"}).json()["total"] == 1

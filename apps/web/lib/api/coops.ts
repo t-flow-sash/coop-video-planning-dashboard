@@ -7,6 +7,7 @@ import type {
 } from "@/features/coops/domain";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "/api/v1";
+const MAX_LIST_PAGES = 100;
 
 function apiUrl(): string {
   return API_URL.replace(/\/$/, "");
@@ -96,27 +97,29 @@ export interface CoopRepository {
 
 export const apiRepository: CoopRepository = {
   async list() {
-    const summaries = items(
-      await request<Page<ApiCoop>>("/coops?scope=all&limit=100"),
-    );
-    // M1 list responses intentionally stay compact; enrich them through the typed detail endpoint.
-    return Promise.all(
-      summaries.map(async (summary) => {
-        if (
-          summary.brand ||
-          summary.brand_organization ||
-          (summary.contacts?.length ?? 0) > 0
-        )
-          return normalize(summary);
-        try {
-          return normalize(
-            await request<ApiCoop>(`/coops/${encodeURIComponent(summary.id)}`),
-          );
-        } catch {
-          return normalize(summary);
-        }
-      }),
-    );
+    const coops: Coop[] = [];
+    const seenCursors = new Set<string>();
+    let pageCount = 0;
+    let cursor: string | null = null;
+    do {
+      const path: string = `/coops?scope=all&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const page: Page<ApiCoop> = await request<Page<ApiCoop>>(path);
+      pageCount += 1;
+      coops.push(...items(page).map(normalize));
+      cursor = Array.isArray(page) ? null : (page.next_cursor ?? null);
+      if (cursor && seenCursors.has(cursor)) {
+        throw new Error(
+          "Cursor-Schleife beim Laden der Kooperationen erkannt.",
+        );
+      }
+      if (cursor && pageCount >= MAX_LIST_PAGES) {
+        throw new Error(
+          `Harte Obergrenze von ${MAX_LIST_PAGES} Seiten beim Laden der Kooperationen erreicht.`,
+        );
+      }
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    return coops;
   },
   async detail(id) {
     return normalize(
@@ -124,11 +127,27 @@ export const apiRepository: CoopRepository = {
     );
   },
   async audit(id) {
-    return items(
-      await request<Page<AuditEvent>>(
-        `/coops/${encodeURIComponent(id)}/audit-events?limit=100`,
-      ),
-    );
+    const events: AuditEvent[] = [];
+    const seenCursors = new Set<string>();
+    let pageCount = 0;
+    let cursor: string | null = null;
+    do {
+      const path: string = `/coops/${encodeURIComponent(id)}/audit-events?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const page: Page<AuditEvent> = await request<Page<AuditEvent>>(path);
+      pageCount += 1;
+      events.push(...items(page));
+      cursor = Array.isArray(page) ? null : (page.next_cursor ?? null);
+      if (cursor && seenCursors.has(cursor)) {
+        throw new Error("Cursor-Schleife beim Laden des Audits erkannt.");
+      }
+      if (cursor && pageCount >= MAX_LIST_PAGES) {
+        throw new Error(
+          `Harte Obergrenze von ${MAX_LIST_PAGES} Seiten beim Laden des Audits erreicht.`,
+        );
+      }
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    return events;
   },
   async transition(id, status, expectedVersion) {
     return normalize(

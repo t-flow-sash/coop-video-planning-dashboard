@@ -155,6 +155,117 @@ def reconcile_collector_access(admin_url: str) -> None:
             "WHERE nspname !~ '^pg_' AND nspname <> 'information_schema' ORDER BY nspname"
         )
         schemas = [row[0] for row in cursor.fetchall()]
+        cursor.execute("SELECT current_user")
+        function_owner = _required_row(cursor)[0]
+        cursor.execute(
+            sql.SQL(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE {} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
+            ).format(sql.Identifier(function_owner))
+        )
+        # Default privileges are owner-specific. A SECURITY DEFINER event trigger
+        # is therefore required to remove PostgreSQL's ambient PUBLIC EXECUTE
+        # from routines created later by any owner. Creating event triggers
+        # requires superuser privileges; failure is intentionally fail-closed.
+        cursor.execute(
+            """
+            CREATE OR REPLACE FUNCTION public.coop_enforce_no_public_routine_execute()
+            RETURNS event_trigger
+            LANGUAGE plpgsql
+            SECURITY DEFINER
+            SET search_path = pg_catalog
+            AS $function$
+            DECLARE
+                command record;
+                object_kind text;
+                role_name text;
+            BEGIN
+                IF TG_TAG = 'GRANT' THEN
+                    -- Suppress only the nested GRANT events emitted by this
+                    -- SECURITY DEFINER function. Unlike a custom GUC,
+                    -- session_replication_role cannot be changed by the
+                    -- unprivileged routine owners constrained here.
+                    PERFORM set_config('session_replication_role', 'replica', true);
+                    FOR command IN
+                        SELECT
+                            routine.oid AS routine_oid,
+                            namespace.nspname AS schema_name,
+                            routine.proname AS object_name,
+                            pg_get_function_identity_arguments(routine.oid) AS identity_arguments,
+                            routine.prokind AS routine_kind
+                        FROM pg_proc routine
+                        JOIN pg_namespace namespace ON namespace.oid = routine.pronamespace
+                        WHERE namespace.nspname !~ '^pg_'
+                          AND namespace.nspname <> 'information_schema'
+                    LOOP
+                        object_kind := CASE
+                            WHEN command.routine_kind = 'p' THEN 'PROCEDURE'
+                            ELSE 'FUNCTION'
+                        END;
+                        FOR role_name IN
+                            SELECT role.rolname
+                            FROM pg_roles role
+                            WHERE role.rolname <> 'coop_evidence_collector'
+                              AND has_function_privilege(
+                                  role.rolname,
+                                  command.routine_oid,
+                                  'EXECUTE'
+                              )
+                        LOOP
+                            EXECUTE format(
+                                'GRANT EXECUTE ON %s %I.%I(%s) TO %I',
+                                object_kind,
+                                command.schema_name,
+                                command.object_name,
+                                command.identity_arguments,
+                                role_name
+                            );
+                        END LOOP;
+                        EXECUTE format(
+                            'REVOKE EXECUTE ON %s %I.%I(%s) FROM PUBLIC, %I',
+                            object_kind,
+                            command.schema_name,
+                            command.object_name,
+                            command.identity_arguments,
+                            'coop_evidence_collector'
+                        );
+                    END LOOP;
+                    PERFORM set_config('session_replication_role', 'origin', true);
+                    RETURN;
+                END IF;
+                FOR command IN SELECT * FROM pg_event_trigger_ddl_commands()
+                LOOP
+                    IF command.object_type IN ('function', 'procedure', 'aggregate')
+                       AND command.schema_name IS NOT NULL
+                       AND command.schema_name !~ '^pg_'
+                       AND command.schema_name <> 'information_schema'
+                    THEN
+                        object_kind := CASE
+                            WHEN command.object_type = 'procedure' THEN 'PROCEDURE'
+                            ELSE 'FUNCTION'
+                        END;
+                        EXECUTE format(
+                            'REVOKE EXECUTE ON %s %s FROM PUBLIC, %I',
+                            object_kind,
+                            command.object_identity,
+                            'coop_evidence_collector'
+                        );
+                    END IF;
+                END LOOP;
+            END
+            $function$
+            """
+        )
+        cursor.execute(
+            "REVOKE ALL PRIVILEGES ON FUNCTION "
+            "public.coop_enforce_no_public_routine_execute() FROM PUBLIC"
+        )
+        cursor.execute("DROP EVENT TRIGGER IF EXISTS coop_enforce_no_public_routine_execute")
+        cursor.execute(
+            "CREATE EVENT TRIGGER coop_enforce_no_public_routine_execute "
+            "ON ddl_command_end "
+            "WHEN TAG IN ('CREATE FUNCTION', 'CREATE PROCEDURE', 'CREATE AGGREGATE', 'GRANT') "
+            "EXECUTE FUNCTION public.coop_enforce_no_public_routine_execute()"
+        )
         for schema in schemas:
             schema_id = sql.Identifier(schema)
             role_id = sql.Identifier(COLLECTOR_ROLE)
@@ -173,6 +284,38 @@ def reconcile_collector_access(admin_url: str) -> None:
                     schema_id, role_id
                 )
             )
+            # EXECUTE is granted to PUBLIC by default. Snapshot each existing
+            # non-collector role/function entitlement before removing that
+            # ambient grant, then restore those exact effective entitlements as
+            # explicit grants. This denies the collector without changing the
+            # capabilities of unrelated runtime or reporting roles.
+            cursor.execute(
+                "SELECT role.rolname, function.proname, "
+                "pg_get_function_identity_arguments(function.oid), function.prokind "
+                "FROM pg_roles role CROSS JOIN pg_proc function "
+                "JOIN pg_namespace namespace ON namespace.oid = function.pronamespace "
+                "WHERE namespace.nspname = %s AND role.rolname <> %s "
+                "AND has_function_privilege(role.oid, function.oid, 'EXECUTE') "
+                "ORDER BY role.rolname, function.oid",
+                (schema, COLLECTOR_ROLE),
+            )
+            preserved_function_grants = cursor.fetchall()
+            cursor.execute(
+                sql.SQL("REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA {} FROM PUBLIC").format(
+                    schema_id
+                )
+            )
+            for role, function_name, identity_arguments, routine_kind in preserved_function_grants:
+                object_kind = "PROCEDURE" if routine_kind == "p" else "FUNCTION"
+                cursor.execute(
+                    sql.SQL("GRANT EXECUTE ON {} {}.{}({}) TO {}").format(
+                        sql.SQL(object_kind),
+                        schema_id,
+                        sql.Identifier(function_name),
+                        sql.SQL(identity_arguments),
+                        sql.Identifier(role),
+                    )
+                )
             cursor.execute(
                 "SELECT type.typname FROM pg_type type "
                 "JOIN pg_namespace namespace ON namespace.oid = type.typnamespace "

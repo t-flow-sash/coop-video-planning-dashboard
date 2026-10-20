@@ -90,10 +90,10 @@ describe("öffentlicher Demo-Modus", () => {
     const row = within(table).getByText("Herbstküche Kurzvideo").closest("tr")!;
     row.focus();
     fireEvent.keyDown(row, { key: "Enter" });
-    expect(await screen.findByRole("complementary")).toBeVisible();
+    expect(await screen.findByRole("dialog")).toBeVisible();
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() =>
-      expect(screen.queryByRole("complementary")).not.toBeInTheDocument(),
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
     await waitFor(() => expect(row).toHaveFocus());
   });

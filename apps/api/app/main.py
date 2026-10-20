@@ -5,7 +5,7 @@ import binascii
 import re
 import secrets
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypeAlias
@@ -25,7 +25,7 @@ from app.config import Settings, get_settings
 from app.db import engine, get_session
 from app.domain import CoopStatus
 from app.errors import ApiProblem
-from app.models import AuditEvent, Coop
+from app.models import AuditEvent
 from app.schemas import (
     AuditEventPage,
     AuditEventRead,
@@ -193,9 +193,14 @@ def get_coops(
     coop_status: CoopStatus | None = Query(default=None, alias="status"),
     contact_id: UUID | None = None,
     organization_id: UUID | None = None,
+    contact_key: str | None = None,
+    organization_key: str | None = None,
     release_from: datetime | None = None,
     release_to: datetime | None = None,
     query: str | None = Query(default=None, max_length=200),
+    priority: Literal["P0", "P1", "P2"] | None = None,
+    needs_review: bool | None = None,
+    deadline_to: date | None = None,
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = None,
     session: Session = Depends(get_session),
@@ -206,21 +211,26 @@ def get_coops(
         status=coop_status,
         contact_id=contact_id,
         organization_id=organization_id,
+        contact_key=contact_key,
+        organization_key=organization_key,
         release_from=release_from,
         release_to=release_to,
         query=query,
+        priority=priority,
+        needs_review=needs_review,
+        deadline_to=deadline_to,
     )
     items, total = list_coops(session, limit=limit, offset=offset, filters=filters)
     next_cursor = encode_cursor(offset + len(items)) if offset + len(items) < total else None
     return {
-        "items": [CoopRead.model_validate(item).model_dump(mode="json") for item in items],
+        "items": [CoopDetail.model_validate(item) for item in items],
         "next_cursor": next_cursor,
         "total": total,
     }
 
 
 @app.get("/api/v1/coops/{coop_id}", response_model=CoopDetail)
-def get_coop(coop_id: UUID, session: Session = Depends(get_session)) -> CoopDetail:
+def get_coop(coop_id: str, session: Session = Depends(get_session)) -> CoopDetail:
     coop = session.scalar(detail_statement(coop_id))
     if coop is None:
         raise ApiProblem(
@@ -231,7 +241,7 @@ def get_coop(coop_id: UUID, session: Session = Depends(get_session)) -> CoopDeta
 
 @app.patch("/api/v1/coops/{coop_id}", response_model=CoopRead)
 def patch_coop(
-    coop_id: UUID,
+    coop_id: str,
     payload: CoopPatch,
     request: Request,
     session: WriteSession,
@@ -241,7 +251,7 @@ def patch_coop(
 
 @app.post("/api/v1/coops/{coop_id}/transitions", response_model=CoopRead)
 def post_transition(
-    coop_id: UUID,
+    coop_id: str,
     payload: TransitionRequest,
     request: Request,
     session: WriteSession,
@@ -260,7 +270,7 @@ def post_transition(
 
 @app.post("/api/v1/coops/{coop_id}/reopen", response_model=CoopRead)
 def post_reopen(
-    coop_id: UUID,
+    coop_id: str,
     payload: ReopenRequest,
     request: Request,
     session: WriteSession,
@@ -274,26 +284,27 @@ def post_reopen(
 
 @app.get("/api/v1/coops/{coop_id}/audit-events", response_model=AuditEventPage)
 def get_audit_events(
-    coop_id: UUID,
+    coop_id: str,
     limit: int = Query(default=50, ge=1, le=100),
     cursor: str | None = None,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    if session.get(Coop, coop_id) is None:
+    coop = session.scalar(detail_statement(coop_id))
+    if coop is None:
         raise ApiProblem(
             404, "coop_not_found", "Coop not found", "The requested coop does not exist."
         )
     offset = decode_cursor(cursor)
     total = (
         session.scalar(
-            select(func.count()).select_from(AuditEvent).where(AuditEvent.coop_id == coop_id)
+            select(func.count()).select_from(AuditEvent).where(AuditEvent.coop_id == coop.id)
         )
         or 0
     )
     events = list(
         session.scalars(
             select(AuditEvent)
-            .where(AuditEvent.coop_id == coop_id)
+            .where(AuditEvent.coop_id == coop.id)
             .order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
             .offset(offset)
             .limit(limit)

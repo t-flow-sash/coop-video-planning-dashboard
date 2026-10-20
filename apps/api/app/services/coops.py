@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import Select, func, or_, select
@@ -28,8 +28,17 @@ def _problem_not_found() -> ApiProblem:
     return ApiProblem(404, "coop_not_found", "Coop not found", "The requested coop does not exist.")
 
 
-def _get_coop(session: Session, coop_id: UUID, *, lock: bool = False) -> Coop:
-    statement = select(Coop).where(Coop.id == coop_id)
+def _get_coop(session: Session, identifier: str | UUID, *, lock: bool = False) -> Coop:
+    try:
+        coop_id = UUID(str(identifier))
+    except ValueError:
+        coop_id = None
+    criterion = (
+        or_(Coop.id == coop_id, Coop.record_key == str(identifier))
+        if coop_id is not None
+        else Coop.record_key == str(identifier)
+    )
+    statement = select(Coop).where(criterion)
     if lock:
         statement = statement.with_for_update()
     coop = session.scalar(statement)
@@ -65,15 +74,30 @@ def _audit(
 
 
 def create_organization(session: Session, data: OrganizationCreate) -> Organization:
-    organization = Organization(**data.model_dump(), normalized_name=normalize_name(data.name))
+    values = data.model_dump()
+    values["record_key"] = values["record_key"] or f"org-{uuid4().hex}"
+    organization = Organization(**values, normalized_name=normalize_name(data.name))
     session.add(organization)
     session.flush()
     return organization
 
 
 def create_contact(session: Session, data: ContactCreate) -> Contact:
+    values = data.model_dump(exclude={"organization_id", "organization_key"})
+    values["record_key"] = values["record_key"] or f"contact-{uuid4().hex}"
+    organization_id = data.organization_id
+    if data.organization_key:
+        organization = session.scalar(
+            select(Organization).where(Organization.record_key == data.organization_key)
+        )
+        if organization is None:
+            raise ApiProblem(
+                404, "organization_not_found", "Organization not found", data.organization_key
+            )
+        organization_id = organization.id
     contact = Contact(
-        **data.model_dump(),
+        **values,
+        organization_id=organization_id,
         normalized_email=normalize_email(data.email) if data.email else None,
     )
     session.add(contact)
@@ -82,25 +106,48 @@ def create_contact(session: Session, data: ContactCreate) -> Contact:
 
 
 def create_coop(session: Session, data: CoopCreate, request_id: str) -> Coop:
-    values = data.model_dump(exclude={"contact_ids"}, mode="json")
+    values = data.model_dump(
+        exclude={"contact_ids", "contact_keys", "brand_key", "agency_key"}, mode="json"
+    )
+    values["record_key"] = values["record_key"] or f"coop-{uuid4().hex}"
     values["status"] = data.status.value
     values["deliverables"] = (
         [item.model_dump(mode="json") for item in data.deliverables]
         if data.deliverables is not None
         else None
     )
+    for key_field, id_field in (
+        ("brand_key", "brand_organization_id"),
+        ("agency_key", "agency_organization_id"),
+    ):
+        record_key = getattr(data, key_field)
+        if record_key:
+            organization = session.scalar(
+                select(Organization).where(Organization.record_key == record_key)
+            )
+            if organization is None:
+                raise ApiProblem(
+                    404, "organization_not_found", "Organization not found", record_key
+                )
+            values[id_field] = organization.id
     coop = Coop(**values)
     if data.status is CoopStatus.COMPLETED:
         coop.completed_at = datetime.now(UTC)
     session.add(coop)
     session.flush()
-    for index, contact_id in enumerate(dict.fromkeys(data.contact_ids)):
-        if session.get(Contact, contact_id) is None:
-            raise ApiProblem(404, "contact_not_found", "Contact not found", str(contact_id))
+    contact_identifiers: list[str | UUID] = [*data.contact_ids, *data.contact_keys]
+    for index, contact_identifier in enumerate(dict.fromkeys(contact_identifiers)):
+        contact = (
+            session.get(Contact, contact_identifier)
+            if isinstance(contact_identifier, UUID)
+            else session.scalar(select(Contact).where(Contact.record_key == contact_identifier))
+        )
+        if contact is None:
+            raise ApiProblem(404, "contact_not_found", "Contact not found", str(contact_identifier))
         session.add(
             CoopContact(
                 coop_id=coop.id,
-                contact_id=contact_id,
+                contact_id=contact.id,
                 role="PRIMARY" if index == 0 else "OTHER",
             )
         )
@@ -115,11 +162,27 @@ def create_coop(session: Session, data: CoopCreate, request_id: str) -> Coop:
     return coop
 
 
-def update_coop(session: Session, coop_id: UUID, data: CoopPatch, request_id: str) -> Coop:
-    coop = _get_coop(session, coop_id, lock=True)
+def update_coop(session: Session, record_key: str, data: CoopPatch, request_id: str) -> Coop:
+    coop = _get_coop(session, record_key, lock=True)
     if coop.version != data.version:
         raise ApiProblem(409, "stale_version", "Version conflict", "The coop was modified.")
-    updates = data.model_dump(exclude={"version"}, exclude_unset=True, mode="json")
+    updates = data.model_dump(
+        exclude={"version", "brand_key", "agency_key"}, exclude_unset=True, mode="json"
+    )
+    for key_field, id_field in (
+        ("brand_key", "brand_organization_id"),
+        ("agency_key", "agency_organization_id"),
+    ):
+        if key_field not in data.model_fields_set:
+            continue
+        value = getattr(data, key_field)
+        if value is None:
+            updates[id_field] = None
+            continue
+        organization = session.scalar(select(Organization).where(Organization.record_key == value))
+        if organization is None:
+            raise ApiProblem(404, "organization_not_found", "Organization not found", value)
+        updates[id_field] = organization.id
     if "deliverables" in updates and data.deliverables is not None:
         updates["deliverables"] = [item.model_dump(mode="json") for item in data.deliverables]
     candidate_amount = updates.get("fee_amount_minor", coop.fee_amount_minor)
@@ -139,6 +202,17 @@ def update_coop(session: Session, coop_id: UUID, data: CoopPatch, request_id: st
             "Invalid coop state",
             "A scheduled coop requires release_at.",
         )
+    candidate_needs_review = updates.get("needs_review", coop.needs_review)
+    candidate_uncertainty = updates.get("uncertainty", coop.uncertainty)
+    if candidate_needs_review and not (
+        isinstance(candidate_uncertainty, str) and candidate_uncertainty.strip()
+    ):
+        raise ApiProblem(
+            422,
+            "validation_error",
+            "Validation error",
+            "Uncertainty is required when needs_review is true.",
+        )
     changes: dict[str, Any] = {}
     for field, new_value in updates.items():
         old_value = getattr(coop, field)
@@ -155,13 +229,13 @@ def update_coop(session: Session, coop_id: UUID, data: CoopPatch, request_id: st
 
 def transition_coop(
     session: Session,
-    coop_id: UUID,
+    record_key: str,
     target: CoopStatus,
     expected_version: int,
     request_id: str,
     reason: str | None,
 ) -> Coop:
-    coop = _get_coop(session, coop_id, lock=True)
+    coop = _get_coop(session, record_key, lock=True)
     if coop.version != expected_version:
         raise ApiProblem(409, "stale_version", "Version conflict", "The coop was modified.")
     current = CoopStatus(coop.status)
@@ -184,9 +258,9 @@ def transition_coop(
 
 
 def reopen_coop(
-    session: Session, coop_id: UUID, expected_version: int, request_id: str, reason: str
+    session: Session, record_key: str, expected_version: int, request_id: str, reason: str
 ) -> Coop:
-    coop = _get_coop(session, coop_id, lock=True)
+    coop = _get_coop(session, record_key, lock=True)
     if coop.version != expected_version:
         raise ApiProblem(409, "stale_version", "Version conflict", "The coop was modified.")
     current = CoopStatus(coop.status)
@@ -210,10 +284,19 @@ def reopen_coop(
     return coop
 
 
-def detail_statement(coop_id: UUID) -> Select[Any]:
+def detail_statement(identifier: str | UUID) -> Select[Any]:
+    try:
+        coop_id = UUID(str(identifier))
+    except ValueError:
+        coop_id = None
+    criterion = (
+        or_(Coop.id == coop_id, Coop.record_key == str(identifier))
+        if coop_id is not None
+        else Coop.record_key == str(identifier)
+    )
     return (
         select(Coop)
-        .where(Coop.id == coop_id)
+        .where(criterion)
         .options(
             selectinload(Coop.brand_organization),
             selectinload(Coop.agency_organization),
@@ -248,9 +331,14 @@ def coop_filters(
     status: CoopStatus | None,
     contact_id: UUID | None,
     organization_id: UUID | None,
+    contact_key: str | None,
+    organization_key: str | None,
     release_from: datetime | None,
     release_to: datetime | None,
     query: str | None,
+    priority: str | None = None,
+    needs_review: bool | None = None,
+    deadline_to: date | None = None,
 ) -> list[Any]:
     filters: list[Any] = []
     if status is not None:
@@ -259,6 +347,10 @@ def coop_filters(
         filters.append(Coop.status.in_([item.value for item in OPEN_STATUSES]))
     if contact_id is not None:
         filters.append(Coop.contact_links.any(CoopContact.contact_id == contact_id))
+    elif contact_key is not None:
+        filters.append(
+            Coop.contact_links.any(CoopContact.contact.has(Contact.record_key == contact_key))
+        )
     if organization_id is not None:
         filters.append(
             or_(
@@ -266,13 +358,51 @@ def coop_filters(
                 Coop.agency_organization_id == organization_id,
             )
         )
+    elif organization_key is not None:
+        organization_ids = select(Organization.id).where(
+            Organization.record_key == organization_key
+        )
+        filters.append(
+            or_(
+                Coop.brand_organization_id.in_(organization_ids),
+                Coop.agency_organization_id.in_(organization_ids),
+            )
+        )
     if release_from is not None:
         filters.append(Coop.release_at >= release_from)
     if release_to is not None:
         filters.append(Coop.release_at <= release_to)
-    if query:
-        pattern = f"%{query.strip()}%"
-        filters.append(or_(Coop.title.ilike(pattern), Coop.summary.ilike(pattern)))
+    if query and (search_term := query.strip()):
+        pattern = f"%{search_term}%"
+        organization_name_matches = select(Organization.id).where(Organization.name.ilike(pattern))
+        contact_matches = Coop.contact_links.any(
+            CoopContact.contact.has(
+                or_(
+                    Contact.display_name.ilike(pattern),
+                    Contact.first_name.ilike(pattern),
+                    Contact.last_name.ilike(pattern),
+                    Contact.email.ilike(pattern),
+                    Contact.organization.has(Organization.name.ilike(pattern)),
+                )
+            )
+        )
+        filters.append(
+            or_(
+                Coop.title.ilike(pattern),
+                Coop.summary.ilike(pattern),
+                Coop.owner.ilike(pattern),
+                Coop.next_action.ilike(pattern),
+                Coop.brand_organization_id.in_(organization_name_matches),
+                Coop.agency_organization_id.in_(organization_name_matches),
+                contact_matches,
+            )
+        )
+    if priority is not None:
+        filters.append(Coop.priority == priority)
+    if needs_review is not None:
+        filters.append(Coop.needs_review.is_(needs_review))
+    if deadline_to is not None:
+        filters.append(Coop.deadline <= deadline_to)
     return filters
 
 
@@ -283,7 +413,17 @@ def list_coops(
     statement = (
         select(Coop)
         .where(*filters)
-        .order_by(Coop.release_at.asc().nulls_last(), Coop.updated_at.desc(), Coop.id.asc())
+        .options(
+            selectinload(Coop.brand_organization),
+            selectinload(Coop.agency_organization),
+            selectinload(Coop.contact_links).selectinload(CoopContact.contact),
+        )
+        .order_by(
+            Coop.priority.asc(),
+            Coop.deadline.asc().nulls_last(),
+            Coop.updated_at.desc(),
+            Coop.id.asc(),
+        )
         .offset(offset)
         .limit(limit)
     )

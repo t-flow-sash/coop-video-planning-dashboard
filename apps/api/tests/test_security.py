@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import cast
 from uuid import UUID
 
@@ -15,6 +17,11 @@ from sqlalchemy.engine import Connection, Engine
 from app.config import Settings
 from app.db import engine
 from app.main import app, create_app
+
+
+def test_checked_in_openapi_contract_matches_runtime_schema() -> None:
+    contract_path = Path(__file__).parents[3] / "packages/api-client/openapi.json"
+    assert json.loads(contract_path.read_text(encoding="utf-8")) == app.openapi()
 
 
 def basic_auth(username: str = "api-user", password: str = "api-password") -> dict[str, str]:

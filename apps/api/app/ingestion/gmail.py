@@ -36,15 +36,6 @@ LOCK_KEY = 764239817
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 EXPECTED_QUERY_SHA256 = "e362825c8b3be3c500d6da685c7e0b2043641fa2136fd801acf57395154f967d"
 EXPECTED_ACCOUNT_SHA256 = "d260486537baa3f006b0e0e3168df3ba58b784b56f0846e150690af7457b14bb"
-IDENTITY_SCOPES = frozenset(
-    {
-        "openid",
-        "email",
-        "profile",
-        "https://www.googleapis.com/auth/userinfo.email",
-        "https://www.googleapis.com/auth/userinfo.profile",
-    }
-)
 DEFAULT_IMPORT_QUERY = (
     "in:anywhere -in:chats after:2026/01/01 "
     "{label:Legal to:legal@tsh-social.com from:legal@tsh-social.com}"
@@ -360,9 +351,10 @@ class GmailClient:
             raise GmailAuthError("tokeninfo_failed")
         raw_scope = self._required_text(tokeninfo, "scope", "scope_missing")
         scopes = set(raw_scope.split())
-        # The production token is deliberately reused from the Influencer agent and
-        # therefore has additional grants. Runtime capability stays read-only: this
-        # adapter only implements GETs and still requires gmail.readonly explicitly.
+        # Product-owner decision: the production OAuth credential may carry
+        # additional Gmail/Drive/Calendar capabilities for future, separately
+        # confirmed features. This collector still requires gmail.readonly and
+        # its Gmail transport surface remains GET-only.
         if GMAIL_READONLY_SCOPE not in scopes:
             raise GmailAuthError("scope_invalid")
         if "email" in tokeninfo:

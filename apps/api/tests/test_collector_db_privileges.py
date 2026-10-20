@@ -155,6 +155,139 @@ def test_acl_reconciler_fails_closed_on_public_business_privilege(test_engine: E
 
 
 @pytest.mark.integration
+def test_acl_reconciler_preserves_existing_function_access_for_unrelated_roles(
+    test_engine: Engine,
+) -> None:
+    role = f"unrelated_reader_{uuid.uuid4().hex}"
+    with test_engine.begin() as connection:
+        connection.exec_driver_sql(f'CREATE ROLE "{role}"')
+        connection.execute(
+            text("GRANT EXECUTE ON FUNCTION public.similarity(text, text) TO PUBLIC")
+        )
+        assert connection.scalar(
+            text("SELECT has_function_privilege(:role, 'public.similarity(text,text)', 'EXECUTE')"),
+            {"role": role},
+        )
+        assert connection.scalar(
+            text(
+                "SELECT has_function_privilege('pg_monitor', "
+                "'public.similarity(text,text)', 'EXECUTE')"
+            )
+        )
+    try:
+        database_access.reconcile_collector_access(
+            test_engine.url.render_as_string(hide_password=False)
+        )
+        with test_engine.connect() as connection:
+            assert connection.scalar(
+                text(
+                    "SELECT has_function_privilege(:role, "
+                    "'public.similarity(text,text)', 'EXECUTE')"
+                ),
+                {"role": role},
+            )
+            assert connection.scalar(
+                text(
+                    "SELECT has_function_privilege('pg_monitor', "
+                    "'public.similarity(text,text)', 'EXECUTE')"
+                )
+            )
+    finally:
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(f'DROP OWNED BY "{role}"')
+            connection.exec_driver_sql(f'DROP ROLE IF EXISTS "{role}"')
+
+
+@pytest.mark.integration
+def test_acl_reconciler_denies_collector_execute_on_future_functions(
+    test_engine: Engine,
+) -> None:
+    function_name = f"acl_future_probe_{uuid.uuid4().hex}"
+    database_access.reconcile_collector_access(
+        test_engine.url.render_as_string(hide_password=False)
+    )
+    try:
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(
+                f'CREATE FUNCTION public."{function_name}"() RETURNS integer '
+                "LANGUAGE sql IMMUTABLE AS 'SELECT 42'"
+            )
+            assert not connection.scalar(
+                text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                {"role": COLLECTOR_ROLE, "function": f"public.{function_name}()"},
+            )
+    finally:
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(f'DROP FUNCTION IF EXISTS public."{function_name}"()')
+
+
+@pytest.mark.integration
+def test_acl_reconciler_denies_collector_execute_on_future_cross_owner_functions(
+    test_engine: Engine,
+) -> None:
+    role = f"future_function_owner_{uuid.uuid4().hex}"
+    function_name = f"cross_owner_future_probe_{uuid.uuid4().hex}"
+    procedure_name = f"cross_owner_future_proc_{uuid.uuid4().hex}"
+    database_access.reconcile_collector_access(
+        test_engine.url.render_as_string(hide_password=False)
+    )
+    with test_engine.begin() as connection:
+        connection.exec_driver_sql(f'CREATE ROLE "{role}"')
+        connection.exec_driver_sql(f'GRANT USAGE, CREATE ON SCHEMA public TO "{role}"')
+    try:
+        with pytest.raises(DBAPIError), test_engine.begin() as connection:
+            connection.exec_driver_sql(f'SET ROLE "{role}"')
+            connection.exec_driver_sql("SET LOCAL session_replication_role = 'replica'")
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(f'SET ROLE "{role}"')
+            connection.exec_driver_sql(
+                f'CREATE FUNCTION public."{function_name}"() RETURNS integer '
+                "LANGUAGE sql IMMUTABLE AS 'SELECT 42'"
+            )
+            connection.exec_driver_sql(
+                f'CREATE PROCEDURE public."{procedure_name}"() '
+                "LANGUAGE plpgsql AS 'BEGIN NULL; END'"
+            )
+            connection.exec_driver_sql("SET LOCAL coop.enforcing_routine_acl = 'on'")
+            connection.exec_driver_sql(
+                f'GRANT EXECUTE ON FUNCTION public."{function_name}"() TO PUBLIC'
+            )
+            connection.exec_driver_sql(
+                f'GRANT EXECUTE ON PROCEDURE public."{procedure_name}"() TO PUBLIC'
+            )
+            connection.exec_driver_sql(
+                f'GRANT EXECUTE ON FUNCTION public."{function_name}"() TO {COLLECTOR_ROLE}'
+            )
+            connection.exec_driver_sql("RESET ROLE")
+            assert not connection.scalar(
+                text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                {"role": COLLECTOR_ROLE, "function": f"public.{function_name}()"},
+            )
+            assert not connection.scalar(
+                text("SELECT has_function_privilege(:role, :procedure, 'EXECUTE')"),
+                {"role": COLLECTOR_ROLE, "procedure": f"public.{procedure_name}()"},
+            )
+        database_access.reconcile_collector_access(
+            test_engine.url.render_as_string(hide_password=False)
+        )
+        with test_engine.connect() as connection:
+            assert not connection.scalar(
+                text("SELECT has_function_privilege(:role, :function, 'EXECUTE')"),
+                {"role": COLLECTOR_ROLE, "function": f"public.{function_name}()"},
+            )
+            assert not connection.scalar(
+                text("SELECT has_function_privilege(:role, :procedure, 'EXECUTE')"),
+                {"role": COLLECTOR_ROLE, "procedure": f"public.{procedure_name}()"},
+            )
+    finally:
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(f'DROP PROCEDURE IF EXISTS public."{procedure_name}"()')
+            connection.exec_driver_sql(f'DROP FUNCTION IF EXISTS public."{function_name}"()')
+            connection.exec_driver_sql(f'DROP OWNED BY "{role}"')
+            connection.exec_driver_sql(f'DROP ROLE IF EXISTS "{role}"')
+
+
+@pytest.mark.integration
 def test_acl_reconciler_fails_closed_on_collector_owned_schema(test_engine: Engine) -> None:
     database_name = test_engine.url.database
     assert database_name is not None

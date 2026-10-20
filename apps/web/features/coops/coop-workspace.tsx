@@ -6,6 +6,8 @@ import {
   STATUSES,
   TERMINAL_STATUSES,
   allowedTransitionTargets,
+  coopKey,
+  entityKey,
   filterAndSortCoops,
   formatDate,
   formatMoney,
@@ -13,6 +15,7 @@ import {
   matchesRelease,
   relationshipIndex,
   statusLabel,
+  urgencyLabel,
   type AuditEvent,
   type Coop,
   type CoopStatus,
@@ -35,7 +38,7 @@ const DEFAULT_QUERY: QueryState = {
   q: "",
   scope: "open",
   statuses: [],
-  sort: "updated",
+  sort: "priority",
   release: null,
   quality: null,
   contact: null,
@@ -59,7 +62,9 @@ function readQuery(): QueryState & { coop: string | null } {
   ) as ReleaseFilter;
   const qualityRaw = params.get("quality");
   const quality = (
-    ["missing-release", "missing-fee", "sync-issue"].includes(qualityRaw ?? "")
+    ["missing-release", "missing-fee", "sync-issue", "needs-review"].includes(
+      qualityRaw ?? "",
+    )
       ? qualityRaw
       : null
   ) as QualityFilter;
@@ -67,9 +72,16 @@ function readQuery(): QueryState & { coop: string | null } {
     q: params.get("q") ?? "",
     scope: params.get("scope") === "all" ? "all" : "open",
     statuses,
-    sort: ["release", "status", "brand", "fee"].includes(sort ?? "")
+    sort: [
+      "priority",
+      "deadline",
+      "updated",
+      "status",
+      "brand",
+      "fee",
+    ].includes(sort ?? "")
       ? sort!
-      : "updated",
+      : "priority",
     release,
     quality,
     contact: params.get("contact"),
@@ -90,7 +102,7 @@ function setUrl(
   if (query.contact) params.set("contact", query.contact);
   if (query.agency) params.set("agency", query.agency);
   if (query.quality) params.set("quality", query.quality);
-  if (query.sort !== "updated") params.set("sort", query.sort);
+  if (query.sort !== "priority") params.set("sort", query.sort);
   if (query.scope === "all") params.set("scope", "all");
   if (coop) params.set("coop", coop);
   const next = `${window.location.pathname}${params.size ? `?${params}` : ""}`;
@@ -144,6 +156,7 @@ export function CoopWorkspace({
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(!initialCoops);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailRequest, setDetailRequest] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
@@ -190,6 +203,7 @@ export function CoopWorkspace({
       setSearchDraft(state.q);
       setDetail(null);
       setAudit([]);
+      setDetailError(null);
       setDetailLoading(Boolean(state.coop));
       setSelectedId(state.coop);
     };
@@ -215,7 +229,7 @@ export function CoopWorkspace({
     return () => {
       active = false;
     };
-  }, [repository, selectedId]);
+  }, [repository, selectedId, detailRequest]);
 
   const updateQuery = (patch: Partial<QueryState>) => {
     const next = { ...query, ...patch };
@@ -252,12 +266,22 @@ export function CoopWorkspace({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   });
+  useEffect(() => {
+    if (!selectedId) return;
+    const shellNavigation = Array.from(
+      document.querySelectorAll<HTMLElement>(".sidebar, .mobile-topbar"),
+    );
+    shellNavigation.forEach((element) => element.setAttribute("inert", ""));
+    return () => {
+      shellNavigation.forEach((element) => element.removeAttribute("inert"));
+    };
+  }, [selectedId]);
   const reset = () => {
     const next: QueryState = {
       q: "",
       scope: "open",
       statuses: [],
-      sort: "updated",
+      sort: "priority",
       release: null,
       quality: null,
       contact: null,
@@ -282,21 +306,20 @@ export function CoopWorkspace({
       !window.confirm(`Status wirklich auf „${statusLabel(target)}“ ändern?`)
     )
       return;
-    setSavingId(coop.id);
+    const key = coopKey(coop);
+    setSavingId(key);
     setNotice(null);
     try {
-      const updated = await repository.transition(
-        coop.id,
-        target,
-        coop.version,
-      );
+      const updated = await repository.transition(key, target, coop.version);
       setCoops((current) =>
-        current.map((item) => (item.id === updated.id ? updated : item)),
+        current.map((item) =>
+          coopKey(item) === coopKey(updated) ? updated : item,
+        ),
       );
-      if (detail?.id === updated.id) setDetail(updated);
+      if (detail && coopKey(detail) === coopKey(updated)) setDetail(updated);
       setNotice({ tone: "success", text: "Coop gespeichert." });
-      if (selectedId === updated.id)
-        setAudit(await repository.audit(updated.id));
+      if (selectedId === coopKey(updated))
+        setAudit(await repository.audit(coopKey(updated)));
     } catch (reason) {
       const stale =
         (reason as { status?: number; code?: string }).status === 409 &&
@@ -318,7 +341,7 @@ export function CoopWorkspace({
   );
   const relationships = useMemo(() => relationshipIndex(coops), [coops]);
   const selected =
-    detail ?? coops.find((item) => item.id === selectedId) ?? null;
+    detail ?? coops.find((item) => coopKey(item) === selectedId) ?? null;
   const today = new Date();
   const observations = [
     {
@@ -350,11 +373,13 @@ export function CoopWorkspace({
     },
   ];
   const contactName = query.contact
-    ? coops.flatMap((c) => c.contacts).find((c) => c.id === query.contact)
-        ?.display_name
+    ? coops
+        .flatMap((c) => c.contacts)
+        .find((c) => entityKey(c) === query.contact)?.display_name
     : null;
   const agencyName = query.agency
-    ? coops.find((c) => c.agency?.id === query.agency)?.agency?.name
+    ? coops.find((c) => c.agency && entityKey(c.agency) === query.agency)
+        ?.agency?.name
     : null;
   const activeCount =
     query.statuses.length +
@@ -366,7 +391,11 @@ export function CoopWorkspace({
 
   return (
     <div className={`workspace ${selectedId ? "has-detail" : ""}`}>
-      <section className="list-pane" aria-label="Kooperationsarbeitsbereich">
+      <section
+        className="list-pane"
+        aria-label="Kooperationsarbeitsbereich"
+        inert={selectedId ? true : undefined}
+      >
         <header className="page-heading">
           <div>
             <h1>Kooperationen</h1>
@@ -389,11 +418,13 @@ export function CoopWorkspace({
         <div className="environment-note" role="note">
           <span>
             <strong>
-              {demoMode ? "Öffentliche Demo:" : "Lokale M1-Vorschau:"}
+              {demoMode
+                ? "Öffentliche Demo:"
+                : "Stand 19.10.2026 · Delta pausiert:"}
             </strong>{" "}
             {demoMode
               ? "Ausschließlich synthetische Beispieldaten · keine API, Gmail- oder Agentenbearbeitung · Änderungen nur in diesem Browser."
-              : "Keine Live-Gmail-Verbindung oder automatische Agentenbearbeitung aktiv."}
+              : "Fachlich geprüfter Stand vom 19.10.2026. Der automatische Delta-Import bleibt pausiert und unarmed."}
           </span>
           {demoMode && repository.reset && (
             <button
@@ -487,6 +518,7 @@ export function CoopWorkspace({
                   <option value="missing-release">Release fehlt</option>
                   <option value="missing-fee">Honorar fehlt</option>
                   <option value="sync-issue">Sync prüfen</option>
+                  <option value="needs-review">Unsicherheit prüfen</option>
                 </select>
               </label>
               <label>
@@ -507,8 +539,9 @@ export function CoopWorkspace({
               value={query.sort}
               onChange={(e) => updateQuery({ sort: e.target.value as SortKey })}
             >
+              <option value="priority">Priorität P0 → P2</option>
+              <option value="deadline">Deadline</option>
               <option value="updated">Zuletzt aktualisiert</option>
-              <option value="release">Release-Datum</option>
               <option value="status">Status im Workflow</option>
               <option value="brand">Marke A–Z</option>
               <option value="fee">Honorar (höchstes zuerst)</option>
@@ -619,8 +652,11 @@ export function CoopWorkspace({
           saving={savingId === selectedId}
           onClose={closeDetail}
           onRetry={() => {
-            setSelectedId(null);
-            setTimeout(() => setSelectedId(selectedId), 0);
+            setDetail(null);
+            setAudit([]);
+            setDetailError(null);
+            setDetailLoading(true);
+            setDetailRequest((request) => request + 1);
           }}
           onOpen={openDetail}
           onTransition={transition}
@@ -738,10 +774,10 @@ function RelationCells({
 }) {
   const contact = primaryContact(coop);
   const contactCount = contact
-    ? (relationships.contacts.get(contact.id)?.length ?? 0)
+    ? (relationships.contacts.get(entityKey(contact))?.length ?? 0)
     : 0;
   const agencyCount = coop.agency
-    ? (relationships.agencies.get(coop.agency.id)?.length ?? 0)
+    ? (relationships.agencies.get(entityKey(coop.agency))?.length ?? 0)
     : 0;
   return (
     <div className="entities">
@@ -752,7 +788,7 @@ function RelationCells({
           aria-label={`Kontakt: ${contact.display_name}${contactCount > 1 ? `, ${contactCount} offene Coops` : ""}`}
           onClick={(e) => {
             e.stopPropagation();
-            onEntity("contact", contact.id);
+            onEntity("contact", entityKey(contact));
           }}
         >
           {contact.display_name}
@@ -766,7 +802,7 @@ function RelationCells({
           aria-label={`Agentur: ${coop.agency.name}${agencyCount > 1 ? `, ${agencyCount} offene Coops` : ""}`}
           onClick={(e) => {
             e.stopPropagation();
-            onEntity("agency", coop.agency!.id);
+            onEntity("agency", entityKey(coop.agency!));
           }}
         >
           {coop.agency.name}
@@ -785,10 +821,10 @@ function RelationshipNote({
 }) {
   const contact = primaryContact(coop);
   const contactCount = contact
-    ? (relationships.contacts.get(contact.id)?.length ?? 0)
+    ? (relationships.contacts.get(entityKey(contact))?.length ?? 0)
     : 0;
   const agencyCount = coop.agency
-    ? (relationships.agencies.get(coop.agency.id)?.length ?? 0)
+    ? (relationships.agencies.get(entityKey(coop.agency))?.length ?? 0)
     : 0;
   if (contactCount < 2 && agencyCount < 2) return null;
   return (
@@ -871,63 +907,88 @@ function CoopTable({
         <caption className="sr-only">Offene Kooperationen</caption>
         <thead>
           <tr>
-            <th scope="col">Coop</th>
+            <th scope="col">Prio</th>
+            <th scope="col">Coop / nächste Aktion</th>
             <th scope="col">Status</th>
-            <th scope="col">Release</th>
+            <th scope="col">Deadline</th>
             <th scope="col">Honorar</th>
             <th scope="col">Kontakt / Agentur</th>
-            <th scope="col" aria-sort="descending">
-              Aktualisiert
-            </th>
-            <th scope="col">Sync</th>
+            <th scope="col">Owner</th>
+            <th scope="col">Review</th>
           </tr>
         </thead>
         <tbody>
-          {coops.map((coop) => (
-            <tr
-              key={coop.id}
-              tabIndex={0}
-              aria-selected={coop.id === selectedId}
-              onKeyDown={(e) => rowKey(e, coop.id)}
-            >
-              <td>
-                <button
-                  className="title-link"
-                  type="button"
-                  onClick={() => onOpen(coop.id)}
-                >
-                  {coop.title}
-                </button>
-                <span>{coop.brand?.name ?? "Marke nicht erfasst"}</span>
-                <RelationshipNote coop={coop} relationships={relationships} />
-              </td>
-              <td>
-                <StatusSelect
-                  coop={coop}
-                  saving={savingId === coop.id}
-                  onTransition={onTransition}
-                />
-              </td>
-              <td>{formatDate(coop.release_at)}</td>
-              <td>{formatMoney(coop)}</td>
-              <td>
-                <RelationCells
-                  coop={coop}
-                  relationships={relationships}
-                  onEntity={onEntity}
-                />
-              </td>
-              <td
-                title={new Date(coop.updated_at).toLocaleString("de-DE")}
-                aria-label={`Aktualisiert ${new Date(coop.updated_at).toLocaleString("de-DE")}`}
+          {coops.map((coop) => {
+            const key = coopKey(coop);
+            return (
+              <tr
+                key={key}
+                tabIndex={0}
+                aria-selected={key === selectedId}
+                onKeyDown={(e) => rowKey(e, key)}
               >
-                {relative(coop.updated_at)}
-              </td>
-              <td>
-                <Sync coop={coop} />
-              </td>
-            </tr>
-          ))}
+                <td>
+                  <strong
+                    className={`priority priority-${coop.priority ?? "P2"}`}
+                  >
+                    {coop.priority ?? "P2"}
+                  </strong>
+                </td>
+                <td>
+                  <button
+                    className="title-link"
+                    type="button"
+                    onClick={() => onOpen(key)}
+                  >
+                    {coop.title}
+                  </button>
+                  <span>
+                    {coop.next_action ??
+                      coop.brand?.name ??
+                      "Nächste Aktion offen"}
+                  </span>
+                  <RelationshipNote coop={coop} relationships={relationships} />
+                </td>
+                <td>
+                  <StatusSelect
+                    coop={coop}
+                    saving={savingId === key}
+                    onTransition={onTransition}
+                  />
+                </td>
+                <td>
+                  <strong
+                    className={`urgency urgency-${coop.urgency ?? "NONE"}`}
+                  >
+                    {urgencyLabel(coop)}
+                  </strong>
+                  <span>{formatDate(coop.deadline)}</span>
+                </td>
+                <td>
+                  {formatMoney(coop)}
+                  <span>{coop.fee_status ?? "UNKNOWN"}</span>
+                </td>
+                <td>
+                  <RelationCells
+                    coop={coop}
+                    relationships={relationships}
+                    onEntity={onEntity}
+                  />
+                </td>
+                <td>{coop.owner ?? "Nicht zugewiesen"}</td>
+                <td>
+                  {coop.needs_review ? (
+                    <span className="review-warning">
+                      Prüfung erforderlich
+                      {coop.uncertainty && <small>{coop.uncertainty}</small>}
+                    </span>
+                  ) : (
+                    <span>Kein Prüfhinweis</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -947,6 +1008,9 @@ function CoopCards({
           <article onClick={() => onOpen(coop.id)}>
             <div className="card-top">
               <span className="status-badge">{statusLabel(coop.status)}</span>
+              <strong className={`priority priority-${coop.priority ?? "P2"}`}>
+                {coop.priority ?? "P2"}
+              </strong>
               <Sync coop={coop} />
             </div>
             <button
@@ -958,6 +1022,37 @@ function CoopCards({
             </button>
             <p>{coop.brand?.name ?? "Marke nicht erfasst"}</p>
             <dl>
+              <div>
+                <dt>Deadline</dt>
+                <dd>
+                  <strong
+                    className={`urgency urgency-${coop.urgency ?? "NONE"}`}
+                  >
+                    {urgencyLabel(coop)}
+                  </strong>{" "}
+                  {formatDate(coop.deadline)}
+                </dd>
+              </div>
+              <div>
+                <dt>Nächste Aktion</dt>
+                <dd>{coop.next_action ?? "Noch nicht erfasst"}</dd>
+              </div>
+              <div>
+                <dt>Owner</dt>
+                <dd>{coop.owner ?? "Nicht zugewiesen"}</dd>
+              </div>
+              <div>
+                <dt>Letzter Kontakt</dt>
+                <dd>{formatDate(coop.last_contact_date)}</dd>
+              </div>
+              <div>
+                <dt>Review</dt>
+                <dd>
+                  {coop.needs_review
+                    ? `Prüfung erforderlich${coop.uncertainty ? `: ${coop.uncertainty}` : ""}`
+                    : "Kein Prüfhinweis"}
+                </dd>
+              </div>
               <div>
                 <dt>Release</dt>
                 <dd>{formatDate(coop.release_at)}</dd>
@@ -1018,23 +1113,63 @@ function DetailPanel({
   onTransition: (coop: Coop, target: CoopStatus) => void;
   demoMode: boolean;
 }) {
+  const panel = useRef<HTMLElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const trapFocus = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]',
+      ),
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      event.currentTarget.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    if (!focusable.includes(active as HTMLElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
   useEffect(() => {
-    heading.current?.focus();
-  }, [coop?.id]);
+    (heading.current ?? panel.current)?.focus();
+  }, [coop?.id, error, loading]);
   if (loading && !coop)
     return (
       <aside
+        ref={panel}
         className="detail-panel"
+        role="dialog"
+        aria-modal="true"
         aria-label="Coop-Details"
         aria-busy="true"
+        tabIndex={-1}
+        onKeyDown={trapFocus}
       >
         <p>Details werden geladen …</p>
       </aside>
     );
   if (!coop)
     return (
-      <aside className="detail-panel" aria-label="Coop-Details">
+      <aside
+        ref={panel}
+        className="detail-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Coop-Details"
+        tabIndex={-1}
+        onKeyDown={trapFocus}
+      >
         <div className="state-block">
           <h2>{error ?? "Details konnten nicht geladen werden."}</h2>
           <button onClick={onRetry}>Erneut versuchen</button>
@@ -1051,7 +1186,16 @@ function DetailPanel({
         (coop.agency && item.agency?.id === coop.agency.id)),
   );
   return (
-    <aside className="detail-panel" aria-labelledby="coop-detail-title">
+    <aside
+      ref={panel}
+      className="detail-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="coop-detail-title"
+      aria-busy={loading || undefined}
+      tabIndex={-1}
+      onKeyDown={trapFocus}
+    >
       {demoMode && (
         <p className="detail-demo-note" role="note">
           <strong>Öffentliche Demo:</strong> Synthetische Daten · keine API,
@@ -1069,6 +1213,7 @@ function DetailPanel({
           ×
         </button>
       </div>
+      {loading && <p role="status">Details werden geladen …</p>}
       {error && (
         <div role="alert" className="inline-error">
           {error} <button onClick={onRetry}>Erneut versuchen</button>
@@ -1078,6 +1223,37 @@ function DetailPanel({
         Aktualisiert {new Date(coop.updated_at).toLocaleString("de-DE")} ·
         Version {coop.version}
       </p>
+      <section>
+        <h3>Priorität &amp; nächste Aktion</h3>
+        <dl>
+          <div>
+            <dt>Priorität</dt>
+            <dd>{coop.priority ?? "P2"}</dd>
+          </div>
+          <div>
+            <dt>Deadline</dt>
+            <dd>{formatDate(coop.deadline)}</dd>
+          </div>
+          <div>
+            <dt>Nächste Aktion</dt>
+            <dd>{coop.next_action ?? "Noch nicht erfasst"}</dd>
+          </div>
+          <div>
+            <dt>Owner</dt>
+            <dd>{coop.owner ?? "Nicht zugewiesen"}</dd>
+          </div>
+          <div>
+            <dt>Letzter Kontakt</dt>
+            <dd>{formatDate(coop.last_contact_date)}</dd>
+          </div>
+          {coop.needs_review && (
+            <div>
+              <dt>Unsicherheit</dt>
+              <dd>{coop.uncertainty ?? "Prüfung erforderlich"}</dd>
+            </div>
+          )}
+        </dl>
+      </section>
       <section>
         <h3>Planung</h3>
         <dl>

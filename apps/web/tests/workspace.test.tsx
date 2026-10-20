@@ -101,6 +101,172 @@ describe("CoopWorkspace", () => {
     ).toBeInTheDocument();
   });
 
+  it("öffnet Details als modalen Dialog, inertisiert den Hintergrund und setzt den Fokus", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <CoopWorkspace repository={repository} initialCoops={coops} />,
+    );
+    await user.click(
+      within(
+        screen.getByRole("table", { name: "Offene Kooperationen" }),
+      ).getByRole("button", { name: "Launch Reel" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", { name: "Launch Reel" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(container.querySelector(".list-pane")).toHaveAttribute("inert");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Launch Reel" }),
+      ).toHaveFocus(),
+    );
+  });
+
+  it("fokussiert schon den Ladedialog und inertisiert die globale Navigation", async () => {
+    const user = userEvent.setup();
+    const pending = new Promise<Coop>(() => undefined);
+    const loadingRepository = { ...repository, detail: vi.fn(() => pending) };
+    const { container } = render(
+      <>
+        <nav className="sidebar">Desktop navigation</nav>
+        <nav className="mobile-topbar">Mobile navigation</nav>
+        <CoopWorkspace repository={loadingRepository} initialCoops={coops} />
+      </>,
+    );
+    await user.click(
+      within(
+        screen.getByRole("table", { name: "Offene Kooperationen" }),
+      ).getByRole("button", { name: "Launch Reel" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", { name: "Launch Reel" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Launch Reel" }),
+      ).toHaveFocus(),
+    );
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(container.querySelector(".sidebar")).toHaveAttribute("inert");
+    expect(container.querySelector(".mobile-topbar")).toHaveAttribute("inert");
+  });
+
+  it("fokussiert den Fehlerdialog bei einem ungültigen Deep-Link", async () => {
+    window.history.replaceState({}, "", "/coops?coop=missing-record");
+    const failedDetailRepository = {
+      ...repository,
+      detail: vi.fn(async () => {
+        throw new Error("missing");
+      }),
+      audit: vi.fn(async () => []),
+    };
+    render(
+      <CoopWorkspace
+        repository={failedDetailRepository}
+        initialCoops={coops}
+      />,
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Coop-Details",
+    });
+    await waitFor(() => expect(dialog).toHaveFocus());
+    window.history.replaceState({}, "", "/coops");
+  });
+
+  it("entfernt beim Detail-Retry den alten Fehler und zeigt den Ladezustand", async () => {
+    const user = userEvent.setup();
+    let resolveRetry: ((coop: Coop) => void) | undefined;
+    const retryRepository = {
+      ...repository,
+      detail: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("temporary"))
+        .mockImplementationOnce(
+          () =>
+            new Promise<Coop>((resolve) => {
+              resolveRetry = resolve;
+            }),
+        ),
+      audit: vi.fn(async () => []),
+    };
+    render(<CoopWorkspace repository={retryRepository} initialCoops={coops} />);
+    await user.click(
+      within(
+        screen.getByRole("table", { name: "Offene Kooperationen" }),
+      ).getByRole("button", { name: "Launch Reel" }),
+    );
+    expect(
+      await screen.findByText("Details konnten nicht geladen werden."),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Erneut versuchen" }));
+
+    expect(
+      screen.queryByText("Details konnten nicht geladen werden."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Details werden geladen …")).toBeInTheDocument();
+    resolveRetry?.(coops[0]);
+    expect(
+      await screen.findByRole("dialog", { name: "Launch Reel" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Details konnten nicht geladen werden."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hält den Tastaturfokus im Detaildialog", async () => {
+    const user = userEvent.setup();
+    render(<CoopWorkspace repository={repository} initialCoops={coops} />);
+    await user.click(
+      within(
+        screen.getByRole("table", { name: "Offene Kooperationen" }),
+      ).getByRole("button", { name: "Launch Reel" }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Launch Reel" });
+    const focusable = Array.from(
+      dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], select:not([disabled]), [tabindex="0"]',
+      ),
+    );
+    const first = focusable[0];
+    const last = focusable.at(-1)!;
+
+    expect(screen.getByRole("heading", { name: "Launch Reel" })).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(last).toHaveFocus();
+
+    last.focus();
+    await user.tab();
+    expect(first).toHaveFocus();
+    first.focus();
+    await user.tab({ shift: true });
+    expect(last).toHaveFocus();
+  });
+
+  it("schließt per Escape und Schließen und stellt den Auslöserfokus wieder her", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <CoopWorkspace repository={repository} initialCoops={coops} />,
+    );
+    const trigger = within(
+      screen.getByRole("table", { name: "Offene Kooperationen" }),
+    ).getByRole("button", { name: "Launch Reel" });
+
+    await user.click(trigger);
+    await screen.findByRole("dialog", { name: "Launch Reel" });
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(container.querySelector(".list-pane")).not.toHaveAttribute("inert");
+
+    await user.click(trigger);
+    await user.click(
+      await screen.findByRole("button", { name: "Details schließen" }),
+    );
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
   it("unterscheidet Lade-, leeren und Fehlerzustand", async () => {
     const pending = new Promise<Coop[]>(() => undefined);
     const loadingRepository = { ...repository, list: vi.fn(() => pending) };

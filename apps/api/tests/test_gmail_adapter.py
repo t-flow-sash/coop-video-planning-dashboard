@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import socketserver
 import threading
@@ -135,6 +137,29 @@ def authorized_responses(
             (200, {"emailAddress": email, "historyId": "100"})
         ],
     }
+
+
+@pytest.mark.no_db
+def test_gmail_client_static_http_inventory_has_no_mutation_method() -> None:
+    tree = ast.parse(inspect.getsource(GmailClient))
+    calls: list[tuple[str, str]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_json"
+            and len(node.args) >= 2
+        ):
+            continue
+        method = node.args[0]
+        assert isinstance(method, ast.Constant) and isinstance(method.value, str)
+        calls.append((method.value, ast.unparse(node.args[1])))
+
+    assert calls
+    assert [(method, target) for method, target in calls if method != "GET"] == [
+        ("POST", "TOKEN_URL")
+    ]
+    assert all(method == "GET" for method, target in calls if "GMAIL_API" in target)
 
 
 @pytest.mark.no_db
@@ -319,7 +344,7 @@ def test_authorize_rejects_tokens_without_gmail_readonly(scope: str) -> None:
 
 
 @pytest.mark.no_db
-def test_authorize_accepts_explicitly_approved_broad_influencer_token() -> None:
+def test_authorize_accepts_approved_broad_credential_but_uses_only_reading_gmail_calls() -> None:
     scope = " ".join(
         [
             GMAIL_READONLY_SCOPE,
@@ -329,10 +354,16 @@ def test_authorize_accepts_explicitly_approved_broad_influencer_token() -> None:
             "https://www.googleapis.com/auth/calendar",
         ]
     )
+    transport = FakeTransport(authorized_responses(scope=scope))
 
-    authorized = GmailClient(config(), FakeTransport(authorized_responses(scope=scope))).authorize()
+    authorized = GmailClient(config(), transport).authorize()
 
     assert authorized.history_id == "100"
+    gmail_calls = [
+        (method, url) for method, url, _, _ in transport.calls if "gmail.googleapis.com" in url
+    ]
+    assert gmail_calls
+    assert all(method == "GET" for method, _ in gmail_calls)
 
 
 @pytest.mark.no_db
@@ -384,6 +415,9 @@ def test_full_scan_paginates_deduplicates_and_uses_metadata_fields_only() -> Non
     assert snapshot.start_history_id == "100"
     assert snapshot.end_history_id == "105"
     assert [message.message_id for message in snapshot.messages] == ["m1", "m2", "m3"]
+    assert all(
+        method == "GET" for method, url, _, _ in transport.calls if "gmail.googleapis.com" in url
+    )
     list_urls = [url for _, url, _, _ in transport.calls if "users/me/messages?" in url]
     assert len(list_urls) == 2
     assert "pageToken=next" in list_urls[1]
@@ -462,6 +496,9 @@ def test_delta_snapshot_paginates_all_event_shapes_and_applies_query_boundary() 
     assert snapshot.start_history_id == "100"
     assert snapshot.end_history_id == "110"
     assert [message.message_id for message in snapshot.messages] == ["m2", "m4"]
+    assert all(
+        method == "GET" for method, url, _, _ in transport.calls if "gmail.googleapis.com" in url
+    )
     history_urls = [url for method, url, _, _ in transport.calls if "/history?" in url]
     assert len(history_urls) == 2
     assert "startHistoryId=100" in history_urls[0]

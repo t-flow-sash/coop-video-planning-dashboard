@@ -75,8 +75,11 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
                 ),
                 {"id": organization_id},
             )
-            for number in range(6):
-                coop_id = uuid.uuid4()
+            known_seed_ids = [
+                uuid.UUID(f"00000000-0000-4000-8000-{number:012d}") for number in range(301, 307)
+            ]
+            genuine_user_id = uuid.uuid4()
+            for number, coop_id in enumerate([*known_seed_ids, genuine_user_id]):
                 connection.execute(
                     text(
                         "INSERT INTO coop (id, title, status, brand_organization_id) "
@@ -84,7 +87,11 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
                     ),
                     {
                         "id": coop_id,
-                        "title": f"Migration seed {number}",
+                        "title": (
+                            f"Migration seed {number}"
+                            if coop_id in known_seed_ids
+                            else "Genuine user cooperation"
+                        ),
                         "organization_id": organization_id,
                     },
                 )
@@ -135,7 +142,35 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
             ).all()
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("d7f4b2a96c31")
+            ).scalar_one() == ("f9b2d4e6a801")
+            record_keys = connection.execute(
+                text(
+                    "SELECT id, record_key, priority, fee_status, is_synthetic_seed, "
+                    "needs_review, uncertainty "
+                    "FROM coop ORDER BY title"
+                )
+            ).all()
+            assert len({row.record_key for row in record_keys}) == 7
+            assert all(row.record_key.startswith("coop-") for row in record_keys)
+            assert all((row.priority, row.fee_status) == ("P2", "UNKNOWN") for row in record_keys)
+            assert all(row.needs_review is True for row in record_keys)
+            assert all(
+                row.uncertainty == "Migrated record has not been explicitly reviewed."
+                for row in record_keys
+            )
+            assert {row.id for row in record_keys if row.is_synthetic_seed} == set(known_seed_ids)
+            assert (
+                next(row for row in record_keys if row.id == genuine_user_id).is_synthetic_seed
+                is False
+            )
+            assert {"manual_import_batch", "coop_import_state"} <= set(
+                connection.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = current_schema()"
+                    )
+                ).scalars()
+            )
             source = connection.execute(
                 text(
                     "SELECT source_key, kind, enabled FROM ingestion_source "
@@ -161,7 +196,7 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
             } <= constraints
         assert after == before
         assert audit_after == audit_before
-        assert len(after) == 6
+        assert len(after) == 7
     finally:
         isolated.dispose()
         with admin.begin() as connection:
@@ -245,7 +280,7 @@ def test_operational_source_activation_downgrade_is_consumption_safe() -> None:
             _downgrade_alembic(isolated_url, "c2d7a91f4e60")
         with isolated.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "d7f4b2a96c31"
+                "f9b2d4e6a801"
             )
             assert (
                 connection.scalar(

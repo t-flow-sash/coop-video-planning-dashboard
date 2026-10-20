@@ -14,6 +14,7 @@ LOCK_NAME="coop-postgres-restore-lock"
 [[ "$CONFIRM" == "--yes" ]] || { echo "Restore is destructive; pass --yes." >&2; exit 2; }
 command -v kubectl >/dev/null || { echo "kubectl is required" >&2; exit 127; }
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 127; }
+command -v curl >/dev/null || { echo "curl is required" >&2; exit 127; }
 
 readonly suspend_order=(
   kustomization/coop-root
@@ -38,6 +39,8 @@ readonly resume_order=(
 declare -A was_suspended=()
 pod=""
 lock_acquired=false
+lock_uid=""
+lock_resource_version=""
 restore_succeeded=false
 maintenance_started=false
 
@@ -49,20 +52,191 @@ suspend_resource() {
     -p '{"spec":{"suspend":true}}' >/dev/null
 }
 
+wait_for_flux_quiescence() {
+  local resource="$1" kind name resource_json attempt
+  kind="${resource%%/*}"
+  name="${resource#*/}"
+  for ((attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt++)); do
+    resource_json="$(kubectl -n flux-system get "$kind" "$name" -o json)"
+    if python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+generation = obj.get("metadata", {}).get("generation")
+observed_generation = obj.get("status", {}).get("observedGeneration")
+reconciling = any(
+    condition.get("type") == "Reconciling" and condition.get("status") == "True"
+    for condition in (obj.get("status", {}).get("conditions") or [])
+)
+acknowledged = (
+    isinstance(generation, int)
+    and isinstance(observed_generation, int)
+    and observed_generation >= generation
+)
+raise SystemExit(0 if acknowledged and not reconciling else 1)
+' <<<"$resource_json"; then
+      return 0
+    fi
+    sleep "$RECONCILE_POLL_SECONDS"
+  done
+  echo "Timed out waiting for Flux quiescence of ${resource}." >&2
+  return 10
+}
+
+verify_delta_quarantine() {
+  local delta_json
+  delta_json="$(kubectl -n "$NAMESPACE" get cronjob gmail-import-delta -o json)"
+  python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+annotations = obj.get("metadata", {}).get("annotations") or {}
+valid = (
+    obj.get("spec", {}).get("suspend") is True
+    and annotations.get("kustomize.toolkit.fluxcd.io/reconcile") == "disabled"
+)
+raise SystemExit(0 if valid else 1)
+' <<<"$delta_json"
+}
+
+lock_identity_matches() {
+  local lock_json="$1"
+  python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+valid = (
+    obj.get("metadata", {}).get("uid") == sys.argv[1]
+    and obj.get("metadata", {}).get("resourceVersion") == sys.argv[2]
+    and obj.get("data", {}).get("holder") == sys.argv[3]
+)
+raise SystemExit(0 if valid else 1)
+' "$lock_uid" "$lock_resource_version" "$lock_holder" <<<"$lock_json"
+}
+
+verify_lock_ownership() {
+  local lock_json
+  lock_json="$(kubectl -n "$NAMESPACE" get configmap "$LOCK_NAME" -o json)" || return 1
+  lock_identity_matches "$lock_json"
+}
+
+delete_owned_lock() {
+  local proxy_dir proxy_socket proxy_pid delete_options attempt status=0
+  proxy_dir="$(mktemp -d)"
+  proxy_socket="${proxy_dir}/kubernetes.sock"
+  kubectl proxy --unix-socket="$proxy_socket" --api-prefix=/ \
+    >"${proxy_dir}/proxy.log" 2>&1 &
+  proxy_pid=$!
+  for ((attempt = 1; attempt <= 50; attempt++)); do
+    [[ -S "$proxy_socket" ]] && break
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      status=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ ! -S "$proxy_socket" ]]; then
+    status=1
+  fi
+  if ((status == 0)); then
+    delete_options="$(python3 -c '
+import json, sys
+print(json.dumps({
+    "apiVersion": "v1",
+    "kind": "DeleteOptions",
+    "preconditions": {"uid": sys.argv[1], "resourceVersion": sys.argv[2]},
+}))
+' "$lock_uid" "$lock_resource_version")" || status=1
+  fi
+  if ((status == 0)) && ! curl --silent --show-error --fail-with-body \
+    --unix-socket "$proxy_socket" -X DELETE \
+    -H 'Content-Type: application/json' --data-binary @- \
+    "http://localhost/api/v1/namespaces/${NAMESPACE}/configmaps/${LOCK_NAME}" \
+    <<<"$delete_options" >/dev/null; then
+    status=1
+  fi
+  kill "$proxy_pid" >/dev/null 2>&1 || true
+  wait "$proxy_pid" >/dev/null 2>&1 || true
+  rm -rf "$proxy_dir"
+  return "$status"
+}
+
+verify_api_pods_absent() {
+  local selector='app.kubernetes.io/name=coop-api' pods_json
+  local absence_proven=true
+  if ! kubectl -n "$NAMESPACE" delete pods -l "$selector" \
+    --wait=true --timeout=180s >/dev/null 2>&1; then
+    absence_proven=false
+  fi
+  if ! kubectl -n "$NAMESPACE" wait --for=delete pod -l "$selector" \
+    --timeout=180s >/dev/null 2>&1; then
+    absence_proven=false
+  fi
+  if ! pods_json="$(kubectl -n "$NAMESPACE" get pods -l "$selector" -o json)"; then
+    absence_proven=false
+  elif ! python3 -c '
+import json, sys
+pods = json.load(sys.stdin).get("items")
+raise SystemExit(0 if isinstance(pods, list) and not pods else 1)
+' <<<"$pods_json"; then
+    # The unfiltered list includes terminating Pods. Any item is unsafe.
+    absence_proven=false
+  fi
+  [[ "$absence_proven" == true ]]
+}
+
 fail_closed() {
-  local resource
+  local resource kind name cronjob
+  local quarantine_proven=true
+  # Quarantine before and after draining. A reconcile that already observed the
+  # active desired state can otherwise overwrite the first emergency patch.
+  if ! kubectl -n "$NAMESPACE" patch cronjob gmail-import-delta --type=merge \
+    -p '{"metadata":{"annotations":{"kustomize.toolkit.fluxcd.io/reconcile":"disabled"}},"spec":{"suspend":true}}' >/dev/null 2>&1; then
+    quarantine_proven=false
+  fi
   for resource in "${suspend_order[@]}"; do
-    suspend_resource "$resource" >/dev/null 2>&1 || true
+    if ! suspend_resource "$resource" >/dev/null 2>&1; then
+      quarantine_proven=false
+    fi
   done
-  kubectl -n "$NAMESPACE" patch cronjob postgres-backup --type=merge \
-    -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
-  kubectl -n "$NAMESPACE" patch cronjob coop-seed --type=merge \
-    -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
-  for cronjob in gmail-import-full gmail-import-bootstrap gmail-import-delta; do
-    kubectl -n "$NAMESPACE" patch cronjob "$cronjob" --type=merge \
-      -p '{"spec":{"suspend":true}}' >/dev/null 2>&1 || true
+  for resource in "${suspend_order[@]}"; do
+    if ! wait_for_flux_quiescence "$resource" >/dev/null 2>&1; then
+      quarantine_proven=false
+    fi
   done
-  kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas=0 >/dev/null 2>&1 || true
+  for resource in "${suspend_order[@]}"; do
+    kind="${resource%%/*}"
+    name="${resource#*/}"
+    if [[ "$(kubectl -n flux-system get "$kind" "$name" -o jsonpath='{.spec.suspend}' 2>/dev/null || true)" != true ]]; then
+      quarantine_proven=false
+    fi
+  done
+  for cronjob in postgres-backup coop-seed gmail-import-full gmail-import-bootstrap gmail-import-delta; do
+    if ! kubectl -n "$NAMESPACE" patch cronjob "$cronjob" --type=merge \
+      -p '{"spec":{"suspend":true}}' >/dev/null 2>&1; then
+      quarantine_proven=false
+    fi
+    if [[ "$(kubectl -n "$NAMESPACE" get cronjob "$cronjob" -o jsonpath='{.spec.suspend}' 2>/dev/null || true)" != true ]]; then
+      quarantine_proven=false
+    fi
+  done
+  if ! kubectl -n "$NAMESPACE" patch cronjob gmail-import-delta --type=merge \
+    -p '{"metadata":{"annotations":{"kustomize.toolkit.fluxcd.io/reconcile":"disabled"}},"spec":{"suspend":true}}' >/dev/null 2>&1; then
+    quarantine_proven=false
+  fi
+  if ! verify_delta_quarantine >/dev/null 2>&1; then
+    quarantine_proven=false
+  fi
+  if ! kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas=0 >/dev/null 2>&1; then
+    quarantine_proven=false
+  fi
+  if ! kubectl -n "$NAMESPACE" rollout status deployment/coop-api --timeout=180s >/dev/null 2>&1; then
+    quarantine_proven=false
+  fi
+  if ! verify_api_pods_absent; then
+    quarantine_proven=false
+  fi
+  if [[ "$(kubectl -n "$NAMESPACE" get deployment coop-api -o jsonpath='{.spec.replicas}' 2>/dev/null || true)" != 0 ]]; then
+    quarantine_proven=false
+  fi
+  [[ "$quarantine_proven" == true ]]
 }
 
 cleanup() {
@@ -72,11 +246,29 @@ cleanup() {
     kubectl -n "$NAMESPACE" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
   if [[ "$maintenance_started" == true && "$restore_succeeded" != true ]]; then
-    fail_closed
-    echo "Restore failed: Flux root, source, workload Kustomizations, and coop-api remain suspended/stopped." >&2
+    if fail_closed; then
+      echo "Restore failed: Flux root, source, workload Kustomizations, schedulers, and coop-api are verified suspended/stopped." >&2
+    else
+      if verify_lock_ownership; then
+        echo "Restore failed and could not prove the fail-closed quarantine; the restore lock remains held for operator containment." >&2
+        lock_acquired=false
+      else
+        echo "Restore failed, quarantine is unproven, and restore lock ownership was lost; refusing to claim containment." >&2
+      fi
+    fi
   fi
   if [[ "$lock_acquired" == true ]]; then
-    kubectl -n "$NAMESPACE" delete configmap "$LOCK_NAME" --ignore-not-found >/dev/null 2>&1 || true
+    if ! verify_lock_ownership; then
+      echo "Restore lock ownership was lost; refusing to delete an unverified lock (fail-closed)." >&2
+      if ((status == 0)); then
+        status=11
+      fi
+    elif ! delete_owned_lock; then
+      echo "Restore lock deletion failed its UID precondition or resourceVersion precondition; a changed lock was preserved (fail-closed)." >&2
+      if ((status == 0)); then
+        status=11
+      fi
+    fi
   fi
   exit "$status"
 }
@@ -85,9 +277,28 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 lock_holder="$(date -u +%Y%m%dT%H%M%S)-$$-${RANDOM}"
-if ! kubectl -n "$NAMESPACE" create configmap "$LOCK_NAME" \
-  --from-literal="holder=${lock_holder}" >/dev/null; then
+if ! lock_create_json="$(kubectl -n "$NAMESPACE" create configmap "$LOCK_NAME" \
+  --from-literal="holder=${lock_holder}" -o json)"; then
   echo "Could not acquire cluster-wide PostgreSQL restore lock; another restore may be running." >&2
+  exit 8
+fi
+if ! read -r lock_uid lock_resource_version < <(python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+uid = obj.get("metadata", {}).get("uid")
+resource_version = obj.get("metadata", {}).get("resourceVersion")
+holder = obj.get("data", {}).get("holder")
+if (
+    not isinstance(uid, str)
+    or not uid
+    or not isinstance(resource_version, str)
+    or not resource_version
+    or holder != sys.argv[1]
+):
+    raise SystemExit(1)
+print(uid, resource_version)
+' "$lock_holder" <<<"$lock_create_json") || ! verify_lock_ownership; then
+  echo "Could not verify ownership of PostgreSQL restore lock; refusing to continue or delete it." >&2
   exit 8
 fi
 lock_acquired=true
@@ -118,6 +329,20 @@ for resource in "${suspend_order[@]}"; do
     exit 5
   }
 done
+# spec.suspend prevents new reconciles but does not cancel one already applying
+# objects. Drain every in-flight Flux operation, then re-read all suspension
+# boundaries before touching CronJobs or querying PostgreSQL writers.
+for resource in "${suspend_order[@]}"; do
+  wait_for_flux_quiescence "$resource"
+done
+for resource in "${suspend_order[@]}"; do
+  kind="${resource%%/*}"
+  name="${resource#*/}"
+  [[ "$(kubectl -n flux-system get "$kind" "$name" -o jsonpath='{.spec.suspend}')" == true ]] || {
+    echo "Flux boundary ${resource} changed while draining reconciliation." >&2
+    exit 5
+  }
+done
 # CronJobs remain live objects after their owning Flux Kustomization is
 # suspended. Close every schedule race explicitly before the first writer
 # query; seed and every Gmail collector are never resumed here.
@@ -129,6 +354,18 @@ for cronjob in postgres-backup coop-seed gmail-import-full gmail-import-bootstra
     exit 5
   }
 done
+
+# The reviewed desired state keeps Delta dormant until a separate least-privilege
+# activation release. During restore the live CronJob must remain suspended while
+# coop-import is reconciled. Flux's
+# resource-level quarantine prevents both apply and prune until a separately
+# reviewed post-restore recovery removes this annotation.
+kubectl -n "$NAMESPACE" patch cronjob gmail-import-delta --type=merge \
+  -p '{"metadata":{"annotations":{"kustomize.toolkit.fluxcd.io/reconcile":"disabled"}},"spec":{"suspend":true}}' >/dev/null
+verify_delta_quarantine || {
+  echo "Failed to establish Flux quarantine for cronjob/gmail-import-delta." >&2
+  exit 5
+}
 
 assert_no_active_writers() {
   local jobs_json dangerous_jobs
@@ -161,6 +398,10 @@ for job in jobs:
 assert_no_active_writers
 kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas=0
 kubectl -n "$NAMESPACE" rollout status deployment/coop-api --timeout=180s
+verify_api_pods_absent || {
+  echo "coop-api Pods, including terminating Pods, did not become absent; refusing restore." >&2
+  exit 7
+}
 # Close the boundary against a Job which appeared while an already-running
 # reconciliation was winding down after suspension.
 assert_no_active_writers
@@ -286,6 +527,12 @@ resume_and_reconcile() {
 
 for resource in "${resume_order[@]}"; do
   resume_and_reconcile "$resource"
+  if [[ "$resource" == kustomization/coop-import ]]; then
+    verify_delta_quarantine || {
+      echo "Flux quarantine for cronjob/gmail-import-delta was lost during coop-import reconciliation." >&2
+      exit 5
+    }
+  fi
   if [[ "$resource" == kustomization/coop-apps ]]; then
     kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas="${replicas:-2}"
     kubectl -n "$NAMESPACE" rollout status deployment/coop-api --timeout=300s
@@ -298,5 +545,9 @@ else
 fi
 kubectl -n "$NAMESPACE" patch cronjob postgres-backup --type=merge \
   -p "{\"spec\":{\"suspend\":${cron_suspend}}}" >/dev/null
+verify_delta_quarantine || {
+  echo "Flux quarantine for cronjob/gmail-import-delta did not survive reconciliation." >&2
+  exit 5
+}
 restore_succeeded=true
 echo "Restore completed from ${DUMP}; API replicas restored to ${replicas}."
