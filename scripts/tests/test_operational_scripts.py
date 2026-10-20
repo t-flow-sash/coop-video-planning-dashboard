@@ -990,13 +990,12 @@ class RestoreScriptTests(unittest.TestCase):
         terminate = next(line for line in script.splitlines() if "pg_terminate_backend" in line)
         self.assertNotIn("|| true", terminate)
 
-    def test_recurring_gmail_scheduler_comment_matches_dormant_state(self) -> None:
+    def test_recurring_gmail_scheduler_comment_matches_dormant_delta_state(self) -> None:
         manifest = (
             ROOT / "infrastructure/import/gmail-recurring-cronjobs.yaml"
         ).read_text(encoding="utf-8")
         comment = manifest.splitlines()[0].lower()
-        self.assertIn("bootstrap and delta remain dormant", comment)
-        self.assertNotIn("active", comment)
+        self.assertIn("both recurring collectors remain dormant", comment)
 
 
 class RegistryBootstrapTests(unittest.TestCase):

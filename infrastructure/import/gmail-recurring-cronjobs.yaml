@@ -1,4 +1,4 @@
-# Reviewed Gmail collectors: bootstrap and delta remain dormant.
+# Source candidate only: both recurring collectors remain dormant until reviewed image promotion.
 apiVersion: batch/v1
 kind: CronJob
 metadata:

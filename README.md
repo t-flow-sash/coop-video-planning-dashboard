@@ -51,8 +51,10 @@ uv run --project apps/api alembic check
 `make openapi` exportiert den versionierten Vertrag nach `packages/api-client/openapi.json`. Der Frontend-Adapter ist explizit gegen diese API-Modelle typisiert; FastAPI bleibt die alleinige fachliche Schreibgrenze.
 
 Der kontrollierte CLI-Import für den fachlichen Stand **19.10.2026** ist in
-[`docs/manual-coop-import.md`](docs/manual-coop-import.md) beschrieben. Der automatische
-Delta-Lauf bleibt pausiert, suspendiert und unarmed.
+[`docs/manual-coop-import.md`](docs/manual-coop-import.md) beschrieben. Dieser CLI-Pfad
+aktiviert keinen Scheduler. Der separate Gmail-Delta-Scheduler ist im aktuellen
+GitOps-Aktivierungskandidaten bewaffnet und deklarativ aktiv, jedoch ohne Merge oder
+Live-Aktivierung noch nicht produktiv. Siehe [`docs/gmail-import-operations.md`](docs/gmail-import-operations.md).
 
 ## Statusmodell
 
