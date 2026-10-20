@@ -156,6 +156,7 @@ export function CoopWorkspace({
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [loading, setLoading] = useState(!initialCoops);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailRequest, setDetailRequest] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
@@ -202,6 +203,7 @@ export function CoopWorkspace({
       setSearchDraft(state.q);
       setDetail(null);
       setAudit([]);
+      setDetailError(null);
       setDetailLoading(Boolean(state.coop));
       setSelectedId(state.coop);
     };
@@ -227,7 +229,7 @@ export function CoopWorkspace({
     return () => {
       active = false;
     };
-  }, [repository, selectedId]);
+  }, [repository, selectedId, detailRequest]);
 
   const updateQuery = (patch: Partial<QueryState>) => {
     const next = { ...query, ...patch };
@@ -650,8 +652,11 @@ export function CoopWorkspace({
           saving={savingId === selectedId}
           onClose={closeDetail}
           onRetry={() => {
-            setSelectedId(null);
-            setTimeout(() => setSelectedId(selectedId), 0);
+            setDetail(null);
+            setAudit([]);
+            setDetailError(null);
+            setDetailLoading(true);
+            setDetailRequest((request) => request + 1);
           }}
           onOpen={openDetail}
           onTransition={transition}
@@ -1187,6 +1192,7 @@ function DetailPanel({
       role="dialog"
       aria-modal="true"
       aria-labelledby="coop-detail-title"
+      aria-busy={loading || undefined}
       tabIndex={-1}
       onKeyDown={trapFocus}
     >
@@ -1207,6 +1213,7 @@ function DetailPanel({
           ×
         </button>
       </div>
+      {loading && <p role="status">Details werden geladen …</p>}
       {error && (
         <div role="alert" className="inline-error">
           {error} <button onClick={onRetry}>Erneut versuchen</button>

@@ -173,6 +173,47 @@ describe("CoopWorkspace", () => {
     window.history.replaceState({}, "", "/coops");
   });
 
+  it("entfernt beim Detail-Retry den alten Fehler und zeigt den Ladezustand", async () => {
+    const user = userEvent.setup();
+    let resolveRetry: ((coop: Coop) => void) | undefined;
+    const retryRepository = {
+      ...repository,
+      detail: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("temporary"))
+        .mockImplementationOnce(
+          () =>
+            new Promise<Coop>((resolve) => {
+              resolveRetry = resolve;
+            }),
+        ),
+      audit: vi.fn(async () => []),
+    };
+    render(<CoopWorkspace repository={retryRepository} initialCoops={coops} />);
+    await user.click(
+      within(
+        screen.getByRole("table", { name: "Offene Kooperationen" }),
+      ).getByRole("button", { name: "Launch Reel" }),
+    );
+    expect(
+      await screen.findByText("Details konnten nicht geladen werden."),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Erneut versuchen" }));
+
+    expect(
+      screen.queryByText("Details konnten nicht geladen werden."),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Details werden geladen …")).toBeInTheDocument();
+    resolveRetry?.(coops[0]);
+    expect(
+      await screen.findByRole("dialog", { name: "Launch Reel" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Details konnten nicht geladen werden."),
+    ).not.toBeInTheDocument();
+  });
+
   it("hält den Tastaturfokus im Detaildialog", async () => {
     const user = userEvent.setup();
     render(<CoopWorkspace repository={repository} initialCoops={coops} />);
