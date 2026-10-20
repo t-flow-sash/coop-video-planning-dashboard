@@ -41,9 +41,38 @@ def basic_settings(*, enable_docs: bool | None = None) -> Settings:
     )
 
 
-def test_disabled_auth_is_development_only() -> None:
-    with pytest.raises(ValidationError, match="allowed only in development"):
+def test_disabled_auth_outside_development_requires_explicit_opt_in() -> None:
+    with pytest.raises(ValidationError, match="ALLOW_UNAUTHENTICATED"):
         Settings(_env_file=None, app_env="production", auth_mode="disabled")
+
+
+def test_disabled_auth_with_opt_in_serves_business_routes_without_credentials() -> None:
+    open_settings = Settings(
+        _env_file=None,
+        app_env="production",
+        auth_mode="disabled",
+        allow_unauthenticated=True,
+        cors_origin="https://dashboard.example.com",
+        enable_docs=False,
+    )
+    open_app = create_app(open_settings)
+    with TestClient(open_app) as client:
+        assert client.get("/api/v1/coops").status_code == 200
+        assert client.get("/api/v1/health/live").status_code == 200
+        assert client.get("/api/v1/health/ready").status_code == 200
+        assert "www-authenticate" not in client.get("/api/v1/coops").headers
+
+
+def test_disabled_auth_opt_in_does_not_require_auth_secrets() -> None:
+    open_settings = Settings(
+        _env_file=None,
+        app_env="production",
+        auth_mode="disabled",
+        allow_unauthenticated=True,
+        cors_origin="https://dashboard.example.com",
+    )
+    assert open_settings.auth_username is None
+    assert open_settings.auth_password is None
 
 
 def test_basic_auth_requires_both_secret_environment_values() -> None:

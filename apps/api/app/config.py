@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     auth_mode: Literal["disabled", "basic"] = "disabled"
     auth_username: SecretStr | None = None
     auth_password: SecretStr | None = None
+    # Explicit opt-in required before the API may run without authentication
+    # outside development/test. Keeps the fail-closed default for production.
+    allow_unauthenticated: bool = False
     cors_origin: str = "http://localhost:3000"
     enable_docs: bool | None = None
     dev_actor_id: str = "local-developer"
@@ -38,8 +41,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_auth_configuration(self) -> "Settings":
-        if self.auth_mode == "disabled" and self.app_env not in {"development", "test"}:
-            raise ValueError("AUTH_MODE=disabled is allowed only in development or test")
+        if (
+            self.auth_mode == "disabled"
+            and self.app_env not in {"development", "test"}
+            and not self.allow_unauthenticated
+        ):
+            raise ValueError(
+                "AUTH_MODE=disabled outside development/test requires ALLOW_UNAUTHENTICATED=true"
+            )
         if self.auth_mode == "basic":
             username = self.auth_username.get_secret_value() if self.auth_username else ""
             password = self.auth_password.get_secret_value() if self.auth_password else ""

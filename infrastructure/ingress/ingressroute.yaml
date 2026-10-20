@@ -18,15 +18,11 @@ spec:
     - match: PathPrefix(`/api/v1`)
       kind: Rule
       priority: 200
-      middlewares:
-        - name: coop-api-auth
       services:
         - {name: coop-api, port: 8000}
     - match: PathPrefix(`/`)
       kind: Rule
       priority: 100
-      middlewares:
-        - name: coop-web-auth
       services:
         - {name: coop-web, port: 3000}
   tls:
