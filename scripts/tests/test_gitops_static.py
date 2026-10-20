@@ -304,35 +304,42 @@ class RenderedSecurityContractTests(unittest.TestCase):
         self.assertIn('if [ "$attempts" -ge 30 ]', command)
         self.assertIn("sleep 2", command)
 
-    def test_ingress_has_only_exact_public_health_and_expected_auth_contracts(
-        self,
-    ) -> None:
+    def test_ingress_is_lan_only_and_has_no_auth_middleware(self) -> None:
         objects = self.by_kind_name("infrastructure/ingress")
         ingress = objects[("IngressRoute", "coop-https")]
         routes = {route["match"]: route for route in ingress["spec"]["routes"]}
-        public = {
-            match for match, route in routes.items() if not route.get("middlewares")
-        }
+        # Authentication was removed deliberately: no route carries a middleware.
         self.assertEqual(
-            public,
-            {"Path(`/api/v1/health/live`)", "Path(`/api/v1/health/ready`)"},
+            sorted(routes),
+            sorted(
+                [
+                    "Path(`/api/v1/health/live`)",
+                    "Path(`/api/v1/health/ready`)",
+                    "PathPrefix(`/api/v1`)",
+                    "PathPrefix(`/`)",
+                ]
+            ),
         )
-        self.assertEqual(
-            routes["PathPrefix(`/api/v1`)"]["middlewares"],
-            [{"name": "coop-api-auth"}],
-        )
-        self.assertEqual(
-            routes["PathPrefix(`/`)"]["middlewares"],
-            [{"name": "coop-web-auth"}],
-        )
-        self.assertEqual(ingress["spec"]["tls"], {"secretName": "coop-tls"})
+        for match, route in routes.items():
+            self.assertFalse(route.get("middlewares"), match)
 
-        api_auth = objects[("Middleware", "coop-api-auth")]["spec"]["basicAuth"]
-        web_auth = objects[("Middleware", "coop-web-auth")]["spec"]["basicAuth"]
-        self.assertEqual(api_auth, {"secret": "coop-basic-auth", "removeHeader": False})
-        self.assertEqual(web_auth, {"secret": "coop-basic-auth", "removeHeader": True})
+        middleware_names = {
+            item["metadata"]["name"]
+            for (kind, _name), item in objects.items()
+            if kind == "Middleware"
+        }
+        self.assertEqual(middleware_names, {"redirect-https"})
+        basic_auth_middlewares = [
+            item
+            for (kind, _name), item in objects.items()
+            if kind == "Middleware" and "basicAuth" in item.get("spec", {})
+        ]
+        self.assertEqual(basic_auth_middlewares, [])
+
+        # The secret is retained intentionally so the change stays revertible in one commit.
         self.assertEqual(objects[("Secret", "coop-basic-auth")]["type"], "Opaque")
         self.assertEqual(objects[("Secret", "coop-tls")]["type"], "kubernetes.io/tls")
+        self.assertEqual(ingress["spec"]["tls"], {"secretName": "coop-tls"})
 
     def test_ingress_configures_coop_tls_as_the_single_default_certificate(
         self,

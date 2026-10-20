@@ -33,13 +33,11 @@ spec:
             - {name: http, containerPort: 8000}
           env:
             - {name: APP_ENV, value: production}
-            - {name: AUTH_MODE, value: basic}
-            - name: AUTH_USERNAME
-              valueFrom:
-                secretKeyRef: {name: coop-runtime, key: AUTH_USERNAME}
-            - name: AUTH_PASSWORD
-              valueFrom:
-                secretKeyRef: {name: coop-runtime, key: AUTH_PASSWORD}
+            # LAN-only deployment: authentication is intentionally disabled.
+            # ALLOW_UNAUTHENTICATED is the explicit fail-closed opt-in; without it
+            # the API refuses to start in production with authentication disabled.
+            - {name: AUTH_MODE, value: disabled}
+            - {name: ALLOW_UNAUTHENTICATED, value: "true"}
             - {name: CORS_ORIGIN, value: "https://192.168.2.94"}
             - name: DATABASE_URL
               valueFrom:
