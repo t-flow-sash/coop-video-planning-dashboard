@@ -1,6 +1,6 @@
 # Manueller Koop-Import (Stand 19.10.2026)
 
-Der fachlich geprüfte Datenstand ist auf den **19.10.2026** festgelegt. Dieses manuelle Verfahren aktiviert weder Gmail/OAuth noch einen Scheduler und stellt keinen Import-API-Endpunkt bereit. Der separate Gmail-Delta-Source-Kandidat bleibt im GitOps-Soll suspendiert und unbewaffnet; erst ein geprüfter Promotion-/Aktivierungs-PR darf den produktiven Scheduler einschalten.
+Der fachlich geprüfte Datenstand ist auf den **19.10.2026** festgelegt. Dieses manuelle Verfahren aktiviert weder Gmail/OAuth noch einen Scheduler und stellt keinen Import-API-Endpunkt bereit. Der Gmail-Delta-Source-Kandidat ist im GitOps-Soll stündlich entsuspendiert und armed; erst Merge, Flux-Abgleich und ein controller-created erfolgreicher Delta-Run belegen die Live-Aktivierung.
 
 ## Freigegebener CLI-Pfad
 
@@ -25,4 +25,4 @@ Die Übernahme läuft unter PostgreSQL-Advisory-Lock in **einer Transaktion**. F
 
 ## Abgrenzung zum separaten Delta-Scheduler
 
-Der CLI-Pfad ist ein kontrollierter manueller Snapshot-Import und schaltet den Gmail-Delta-Lauf selbst nicht frei. Im Source-Kandidaten bleiben FULL, Bootstrap und Delta suspendiert/unarmed. Aktivierung erfordert einen gesondert reviewten Image-Promotion-/Aktivierungs-PR, grünes CI, Merge, Flux-Abgleich und einen verifizierten controller-created Delta-Run. Siehe `docs/gmail-import-operations.md`.
+Der CLI-Pfad ist ein kontrollierter manueller Snapshot-Import und schaltet den Gmail-Delta-Lauf selbst nicht frei. Im GitOps-Soll bleiben FULL und Bootstrap suspendiert/unarmed; ausschließlich Delta ist entsuspendiert/armed. Merge, grünes CI, Flux-Abgleich und ein verifizierter controller-created Delta-Run stehen als separate Live-Gates aus. Siehe `docs/gmail-import-operations.md`.

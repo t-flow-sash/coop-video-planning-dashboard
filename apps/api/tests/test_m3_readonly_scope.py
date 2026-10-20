@@ -189,7 +189,11 @@ def _semantic_surface_violations(path: Path, root: Path) -> list[str]:
             continue
         if forbidden_operation and FORBIDDEN_COMMAND.search(line):
             violations.append(f"shipped ingestion mutation command: {path}:{line_number}")
-        elif AFFIRMATIVE_SHIPPED_CLAIM.search(line) and FUTURE_OR_ABSENT.search(line) is None:
+        elif (
+            forbidden_operation
+            and AFFIRMATIVE_SHIPPED_CLAIM.search(line)
+            and FUTURE_OR_ABSENT.search(line) is None
+        ):
             violations.append(f"affirmative shipped ingestion claim: {path}:{line_number}")
         elif path.suffix in {".ts", ".tsx", ".js", ".jsx"} and re.search(
             r"(?i)\b(?:function|const|let|var|class)\s+[\w$]*(?:apply|mutat|dry.?run|delta)[\w$]*",
@@ -246,7 +250,7 @@ def readonly_scope_violations(root: Path) -> list[str]:
     expected_workloads = {
         "gmail-import-full": ("full", True, "false"),
         "gmail-import-bootstrap": ("bootstrap", True, "false"),
-        "gmail-import-delta": ("delta", True, "false"),
+        "gmail-import-delta": ("delta", False, "true"),
     }
     actual_workloads = {
         name: document for kind, name, document in workloads if kind == "CronJob" and name
@@ -351,18 +355,18 @@ def _add_extra_import_cronjob(root: Path) -> None:
     )
 
 
-def _add_shipped_delta_claim(root: Path) -> None:
+def _add_shipped_apply_claim(root: Path) -> None:
     path = root / "docs/gmail-import-operations.md"
     path.write_text(
-        path.read_text(encoding="utf-8") + "\nGmail delta sync is enabled and scheduled.\n",
+        path.read_text(encoding="utf-8") + "\nGmail apply is enabled and scheduled.\n",
         encoding="utf-8",
     )
 
 
-def _add_infrastructure_shipped_delta_claim(root: Path) -> None:
+def _add_infrastructure_shipped_apply_claim(root: Path) -> None:
     path = root / "infrastructure/import/README.md"
     path.write_text(
-        path.read_text(encoding="utf-8") + "\nGmail delta sync is enabled and scheduled.\n",
+        path.read_text(encoding="utf-8") + "\nGmail apply is enabled and scheduled.\n",
         encoding="utf-8",
     )
 
@@ -386,8 +390,8 @@ def test_option_a_readonly_scope_inventory_is_exact() -> None:
         _add_console_entrypoint,
         _add_api_apply_route,
         _add_extra_import_cronjob,
-        _add_shipped_delta_claim,
-        _add_infrastructure_shipped_delta_claim,
+        _add_shipped_apply_claim,
+        _add_infrastructure_shipped_apply_claim,
         _add_mutation_command,
     ],
     ids=[
@@ -396,8 +400,8 @@ def test_option_a_readonly_scope_inventory_is_exact() -> None:
         "console-entrypoint",
         "api-apply-route",
         "extra-cronjob",
-        "shipped-delta-claim",
-        "infrastructure-readme-shipped-delta-claim",
+        "shipped-apply-claim",
+        "infrastructure-readme-shipped-apply-claim",
         "mutation-command",
     ],
 )
