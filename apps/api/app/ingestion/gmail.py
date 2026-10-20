@@ -387,6 +387,8 @@ class GmailClient:
         status, payload = self._get(
             f"messages/{safe_id}", {"format": "metadata", "fields": MESSAGE_FIELDS}, token
         )
+        if status == 429 or status >= 500:
+            raise GmailHttpError("messages_unavailable")
         if status != 200:
             raise GmailHttpError("message_fetch_failed")
         labels = payload.get("labelIds", [])
@@ -796,6 +798,7 @@ def persist_delta_snapshot(
     *,
     query: str,
     source: IngestionSource | None = None,
+    run: IngestionRun | None = None,
 ) -> GmailRunReport:
     if (
         not isinstance(query, str)
@@ -836,9 +839,18 @@ def persist_delta_snapshot(
         raise GmailConfigError("query_contract_invalid")
     if checkpoint.checkpoint_value != snapshot.start_history_id:
         raise GmailHttpError("checkpoint_mismatch")
-    run = IngestionRun(source_id=source.id, mode="DELTA", status="SUCCEEDED", summary={})
-    session.add(run)
-    session.flush()
+    if run is None:
+        run = IngestionRun(source_id=source.id, mode="DELTA", status="SUCCEEDED", summary={})
+        session.add(run)
+        session.flush()
+    elif (
+        run.source_id != source.id
+        or run.mode != "DELTA"
+        or run.status != "FAILED"
+        or run.error_code != "unexpected_error"
+        or run.summary != {"operation": "delta", "fence": "in_flight"}
+    ):
+        raise GmailHttpError("checkpoint_mismatch")
     by_thread: dict[str, list[MessageEvidence]] = defaultdict(list)
     for message in snapshot.messages:
         by_thread[message.thread_id].append(message)
@@ -867,6 +879,7 @@ def persist_delta_snapshot(
         )
         pending += _pending_item(session, source, run, thread_id, metadata)
     run.status = "SUCCEEDED"
+    run.error_code = None
     run.finished_at = datetime.now(UTC)
     run.summary = {
         "end_history_id": snapshot.end_history_id,
@@ -898,46 +911,98 @@ def sanitized_error_code(error: Exception) -> str:
     return "unexpected_error"
 
 
-def _operational_report(command: str, client: GmailClient, query: str) -> GmailRunReport:
+# Retry only errors explicitly classified as transient. Unknown/auth/parse failures
+# require operator review; a new CronJob must not silently hit the provider again.
+RETRYABLE_DELTA_ERRORS = frozenset(
+    {"history_unavailable", "messages_unavailable", "transport_unavailable", "import_busy"}
+)
+
+
+def _claim_delta(query: str) -> uuid.UUID | GmailRunReport:
+    """Commit a durable in-flight fence before the first provider request."""
     with SessionLocal.begin() as session:
         attest_collector_database(session)
         acquire_import_lock(session)
         source = _source(session)
-        if (
-            command == "delta"
-            and session.scalar(
-                select(IngestionRun.id)
-                .where(
-                    IngestionRun.source_id == source.id,
-                    IngestionRun.mode == "DELTA",
-                    IngestionRun.status == "FAILED",
-                    IngestionRun.error_code == "full_required",
-                )
-                .limit(1)
+        blocked = session.scalar(
+            select(IngestionRun)
+            .where(
+                IngestionRun.source_id == source.id,
+                IngestionRun.mode == "DELTA",
+                (IngestionRun.status == "RUNNING")
+                | (
+                    (IngestionRun.status == "FAILED")
+                    & IngestionRun.error_code.not_in(RETRYABLE_DELTA_ERRORS)
+                ),
             )
-            is not None
-        ):
-            return GmailRunReport("FULL_REQUIRED", 0)
+            .order_by(IngestionRun.started_at)
+            .limit(1)
+        )
+        if blocked is not None:
+            return GmailRunReport(blocked.error_code or "unexpected_error", 0)
+        pending = session.scalar(
+            select(IngestionRun.id)
+            .where(
+                IngestionRun.source_id == source.id,
+                IngestionRun.mode == "DELTA",
+                IngestionRun.status == "FAILED",
+                IngestionRun.summary["fence"].as_string() == "in_flight",
+            )
+            .limit(1)
+        )
+        if pending is not None:
+            return GmailRunReport("unexpected_error", 0)
+        checkpoint = session.get(IngestionCheckpoint, (source.id, "gmail_history_id"))
+        if checkpoint is None:
+            _record_full_required(session, source)
+            return GmailRunReport("full_required", 0)
+        if checkpoint.query_hash != canonical_hash(query.strip()):
+            raise GmailConfigError("query_contract_invalid")
+        run = IngestionRun(
+            source_id=source.id,
+            mode="DELTA",
+            status="FAILED",
+            error_code="unexpected_error",
+            summary={"operation": "delta", "fence": "in_flight"},
+            finished_at=datetime.now(UTC),
+        )
+        session.add(run)
+        session.flush()
+        return run.id
+
+
+def _operational_report(
+    command: str, query: str, run_id: uuid.UUID | None = None
+) -> GmailRunReport:
+    with SessionLocal.begin() as session:
+        attest_collector_database(session)
+        acquire_import_lock(session)
+        source = _source(session)
         checkpoint = session.get(IngestionCheckpoint, (source.id, "gmail_history_id"))
         query_hash = canonical_hash(query.strip())
         if command == "bootstrap":
             if checkpoint is not None:
                 raise GmailConfigError("bootstrap_consumed")
+            client = GmailClient(GmailConfig.from_env())
             full_snapshot = client.full_snapshot(query)
             return persist_full_snapshot(session, full_snapshot, query=query, source=source)
+        run = session.get(IngestionRun, run_id) if run_id is not None else None
+        if (
+            run is None
+            or run.source_id != source.id
+            or run.mode != "DELTA"
+            or run.status != "FAILED"
+            or run.error_code != "unexpected_error"
+            or run.summary != {"operation": "delta", "fence": "in_flight"}
+        ):
+            raise GmailHttpError("checkpoint_mismatch")
         if checkpoint is None:
-            _record_full_required(session, source)
-            return GmailRunReport("FULL_REQUIRED", 0)
+            raise GmailHttpError("full_required")
         if checkpoint.query_hash != query_hash:
             raise GmailConfigError("query_contract_invalid")
-        try:
-            delta_snapshot = client.delta_snapshot(checkpoint.checkpoint_value, query)
-        except GmailHttpError as error:
-            if str(error) != "full_required":
-                raise
-            _record_full_required(session, source)
-            return GmailRunReport("FULL_REQUIRED", 0)
-        return persist_delta_snapshot(session, delta_snapshot, query=query, source=source)
+        client = GmailClient(GmailConfig.from_env())
+        delta_snapshot = client.delta_snapshot(checkpoint.checkpoint_value, query)
+        return persist_delta_snapshot(session, delta_snapshot, query=query, source=source, run=run)
 
 
 def _record_full_required(session: Session, source: IngestionSource) -> None:
@@ -954,16 +1019,72 @@ def _record_full_required(session: Session, source: IngestionSource) -> None:
     )
 
 
+def _terminalize_delta(run_id: uuid.UUID, error_code: str) -> bool:
+    """Preserve RUNNING on any failed/ambiguous commit, blocking all future schedules."""
+    for _ in range(3):
+        try:
+            with SessionLocal.begin() as session:
+                attest_collector_database(session)
+                acquire_import_lock(session)
+                run = session.get(IngestionRun, run_id)
+                if (
+                    run is None
+                    or run.mode != "DELTA"
+                    or run.status != "FAILED"
+                    or run.summary != {"operation": "delta", "fence": "in_flight"}
+                ):
+                    return False
+                run.error_code = error_code
+                run.finished_at = datetime.now(UTC)
+            break
+        except Exception:
+            continue
+    else:
+        return False
+    # Only release a transient fence after the failure write has positively
+    # committed. An ambiguous commit must never turn into an automatic replay.
+    if error_code in RETRYABLE_DELTA_ERRORS:
+        try:
+            with SessionLocal.begin() as session:
+                attest_collector_database(session)
+                acquire_import_lock(session)
+                run = session.get(IngestionRun, run_id)
+                if (
+                    run is None
+                    or run.error_code != error_code
+                    or run.summary != {"operation": "delta", "fence": "in_flight"}
+                ):
+                    return False
+                run.summary = {"operation": "delta"}
+        except Exception:
+            return False
+    return True
+
+
 def record_operational_failure(mode: str, error_code: str) -> bool:
     sanitized_code = error_code if error_code in SANITIZED_ERROR_CODES else "unexpected_error"
     try:
         with SessionLocal.begin() as session:
             attest_collector_database(session)
+            acquire_import_lock(session)
             source = session.scalar(
                 select(IngestionSource).where(IngestionSource.source_key == SOURCE_KEY)
             )
             if source is None:
                 return False
+            if mode == "DELTA" and sanitized_code not in RETRYABLE_DELTA_ERRORS:
+                existing = session.scalar(
+                    select(IngestionRun.id)
+                    .where(
+                        IngestionRun.source_id == source.id,
+                        IngestionRun.mode == "DELTA",
+                        IngestionRun.status == "FAILED",
+                        IngestionRun.error_code.not_in(RETRYABLE_DELTA_ERRORS),
+                    )
+                    .limit(1)
+                )
+                if existing is not None:
+                    return True
             now = datetime.now(UTC)
             session.add(
                 IngestionRun(
@@ -984,7 +1105,6 @@ def _main_operational(command: str) -> int:
     mode = "FULL" if command == "bootstrap" else "DELTA"
     try:
         query = execution_query_from_env()
-        client = GmailClient(GmailConfig.from_env())
     except Exception as error:
         _print(
             {
@@ -996,11 +1116,25 @@ def _main_operational(command: str) -> int:
             }
         )
         return 1
+    run_id: uuid.UUID | None = None
     try:
-        report = _operational_report(command, client, query)
+        if command == "delta":
+            claim = _claim_delta(query)
+            if isinstance(claim, GmailRunReport):
+                report = claim
+            else:
+                run_id = claim
+                report = _operational_report(command, query, run_id)
+        else:
+            report = _operational_report(command, query)
     except Exception as error:
         error_code = sanitized_error_code(error)
-        run_status = "FAILED" if record_operational_failure(mode, error_code) else "UNKNOWN"
+        if run_id is not None:
+            run_status = "FAILED" if _terminalize_delta(run_id, error_code) else "UNKNOWN"
+        elif command == "bootstrap":
+            run_status = "FAILED" if record_operational_failure(mode, error_code) else "UNKNOWN"
+        else:
+            run_status = "NOT_STARTED"
         _print(
             {
                 "error": "gmail_import_failed",
@@ -1011,11 +1145,11 @@ def _main_operational(command: str) -> int:
             }
         )
         return 1
-    if report.status == "FULL_REQUIRED":
+    if report.status != "SUCCEEDED":
         _print(
             {
                 "error": "gmail_import_failed",
-                "error_code": "full_required",
+                "error_code": report.status,
                 "ok": False,
                 "run_status": "FAILED",
                 "status": "FAILED",

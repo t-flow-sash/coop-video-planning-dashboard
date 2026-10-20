@@ -1,10 +1,10 @@
-# Source candidate only: both recurring collectors remain dormant until reviewed image promotion.
+# Unlike the former state where both recurring collectors remain dormant, only bootstrap stays dormant; delta is armed.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: gmail-import-bootstrap
   annotations:
-    coop.example.com/image-source-revision: "832288f1219f3fbaf3a2756bd8ee58058b9018df"
+    coop.example.com/image-source-revision: "690e3fe1c3677c940a977b4966dbe341fc483b8e"
   labels: &bootstrap-labels
     app.kubernetes.io/name: gmail-import-bootstrap
     app.kubernetes.io/part-of: coop-video-planning
@@ -85,14 +85,14 @@ kind: CronJob
 metadata:
   name: gmail-import-delta
   annotations:
-    coop.example.com/image-source-revision: "832288f1219f3fbaf3a2756bd8ee58058b9018df"
+    coop.example.com/image-source-revision: "690e3fe1c3677c940a977b4966dbe341fc483b8e"
   labels: &delta-labels
     app.kubernetes.io/name: gmail-import-delta
     app.kubernetes.io/part-of: coop-video-planning
     coop.example.com/gmail-import: "true"
     coop.example.com/postgres-client: "true"
 spec:
-  suspend: true
+  suspend: false
   schedule: "17 * * * *"
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 300
@@ -128,7 +128,7 @@ spec:
                 - {name: HTTPS_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: HTTP_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: NO_PROXY, value: "postgres,postgres.coop-prod.svc,gmail-egress-proxy,127.0.0.1,localhost"}
-                - {name: GMAIL_IMPORT_ARMED, value: "false"}
+                - {name: GMAIL_IMPORT_ARMED, value: "true"}
                 - name: GMAIL_IMPORT_QUERY
                   value: "in:anywhere -in:chats after:2026/01/01 {label:Legal to:legal@tsh-social.com from:legal@tsh-social.com}"
                 - {name: GMAIL_IMPORT_QUERY_SHA256, value: "e362825c8b3be3c500d6da685c7e0b2043641fa2136fd801acf57395154f967d"}

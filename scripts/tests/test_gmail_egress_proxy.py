@@ -103,7 +103,7 @@ class GmailEgressProxyContractTests(unittest.TestCase):
         expected = {
             "gmail-import-full": (True, "false"),
             "gmail-import-bootstrap": (True, "false"),
-            "gmail-import-delta": (True, "false"),
+            "gmail-import-delta": (False, "true"),
         }
         for cron in cronjobs:
             name = cron["metadata"]["name"]
