@@ -101,6 +101,9 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
         f"MessageID {spaced_markers[2]} ThreadID {spaced_markers[3]} "
         f"externalId {spaced_markers[4]}"
     )
+    benign_reason = (
+        "Source material approved; provider relationship confirmed; campaign status remains green."
+    )
     internal_request_id = f"manual-import-{manifest_hash[:24]}"
     with Session(test_engine) as session, session.begin():
         coop = session.scalar(select(Coop).where(Coop.record_key == "audit-redaction"))
@@ -127,7 +130,7 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
                     },
                 },
                 reason=(
-                    f"retry {manifest_hash} for {embedded_uuid} "
+                    f"{benign_reason} retry {manifest_hash} for {embedded_uuid} "
                     f"new={embedded_uuid_v7} nil={nil_uuid} reference={provider_marker} "
                     f"{spaced_references}"
                 ),
@@ -152,6 +155,7 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
     assert provider_marker not in serialized
     assert mixed_case_marker not in serialized
     assert not any(marker in serialized for marker in spaced_markers)
+    assert benign_reason in import_event["reason"]
     assert "actor_id" not in import_event
     assert "provider-19" not in serialized
     _assert_no_provider_or_import_ids(import_event)

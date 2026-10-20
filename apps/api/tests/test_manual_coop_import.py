@@ -339,6 +339,9 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
         f"MessageID {spaced_markers[2]} ThreadID {spaced_markers[3]} "
         f"externalId {spaced_markers[4]}"
     )
+    benign_reason = (
+        "Source material approved; provider relationship confirmed; campaign status remains green."
+    )
     with Session(test_engine) as session, session.begin():
         _seed(session)
         session.add(
@@ -363,7 +366,7 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
                     "free_text": spaced_references,
                 },
                 reason=(
-                    f"retry {embedded_hash} for {internal_organization_id} "
+                    f"{benign_reason} retry {embedded_hash} for {internal_organization_id} "
                     f"new={embedded_uuid_v7} nil={nil_uuid} reference={provider_marker} "
                     f"{spaced_references}"
                 ),
@@ -419,6 +422,7 @@ def test_reviewed_manifest_atomically_replaces_only_the_six_known_synthetic_seed
         assert provider_marker not in serialized_summary
         assert mixed_case_marker not in serialized_summary
         assert not any(marker in serialized_summary for marker in spaced_markers)
+        assert benign_reason in serialized_summary
         assert "internal-request-id" not in serialized_summary
         assert "seed-00000000" not in serialized_summary
 

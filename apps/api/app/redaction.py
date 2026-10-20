@@ -26,11 +26,14 @@ _UUID_PATTERN = re.compile(
 )
 _SHA256_PATTERN = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{64}(?![0-9A-Fa-f])")
 _LABELED_INTERNAL_REFERENCE_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9])"
-    r"(?:gmail[-_.:]*)?"
+    r"(?i)(?<![A-Za-z0-9_])(?:"
+    r"(?:provider|external|import|message|thread)[-_.:]*id"
+    r"\s+[A-Za-z0-9][A-Za-z0-9._:-]{7,}"
+    r"|(?:gmail[-_.:]*)?"
     r"(?:provider|external|import|message|thread|history|manifest|batch|request|source|reference|ref)"
     r"(?:[-_.:]*(?:id|ref(?:erence)?))?"
-    r"(?:[-_.:=]+[A-Za-z0-9][A-Za-z0-9._:-]*|\s+[A-Za-z0-9][A-Za-z0-9._:-]{7,})"
+    r"[-_.:=]+[A-Za-z0-9][A-Za-z0-9._:-]*"
+    r")"
 )
 
 

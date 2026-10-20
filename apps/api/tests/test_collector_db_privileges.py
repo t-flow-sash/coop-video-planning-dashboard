@@ -235,6 +235,9 @@ def test_acl_reconciler_denies_collector_execute_on_future_cross_owner_functions
         connection.exec_driver_sql(f'CREATE ROLE "{role}"')
         connection.exec_driver_sql(f'GRANT USAGE, CREATE ON SCHEMA public TO "{role}"')
     try:
+        with pytest.raises(DBAPIError), test_engine.begin() as connection:
+            connection.exec_driver_sql(f'SET ROLE "{role}"')
+            connection.exec_driver_sql("SET LOCAL session_replication_role = 'replica'")
         with test_engine.begin() as connection:
             connection.exec_driver_sql(f'SET ROLE "{role}"')
             connection.exec_driver_sql(
@@ -245,6 +248,7 @@ def test_acl_reconciler_denies_collector_execute_on_future_cross_owner_functions
                 f'CREATE PROCEDURE public."{procedure_name}"() '
                 "LANGUAGE plpgsql AS 'BEGIN NULL; END'"
             )
+            connection.exec_driver_sql("SET LOCAL coop.enforcing_routine_acl = 'on'")
             connection.exec_driver_sql(
                 f'GRANT EXECUTE ON FUNCTION public."{function_name}"() TO PUBLIC'
             )

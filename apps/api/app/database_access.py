@@ -180,10 +180,11 @@ def reconcile_collector_access(admin_url: str) -> None:
                 role_name text;
             BEGIN
                 IF TG_TAG = 'GRANT' THEN
-                    IF current_setting('coop.enforcing_routine_acl', true) = 'on' THEN
-                        RETURN;
-                    END IF;
-                    PERFORM set_config('coop.enforcing_routine_acl', 'on', true);
+                    -- Suppress only the nested GRANT events emitted by this
+                    -- SECURITY DEFINER function. Unlike a custom GUC,
+                    -- session_replication_role cannot be changed by the
+                    -- unprivileged routine owners constrained here.
+                    PERFORM set_config('session_replication_role', 'replica', true);
                     FOR command IN
                         SELECT
                             routine.oid AS routine_oid,
@@ -228,7 +229,7 @@ def reconcile_collector_access(admin_url: str) -> None:
                             'coop_evidence_collector'
                         );
                     END LOOP;
-                    PERFORM set_config('coop.enforcing_routine_acl', 'off', true);
+                    PERFORM set_config('session_replication_role', 'origin', true);
                     RETURN;
                 END IF;
                 FOR command IN SELECT * FROM pg_event_trigger_ddl_commands()
