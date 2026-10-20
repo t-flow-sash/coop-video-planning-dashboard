@@ -240,6 +240,14 @@ class AuditEventRead(BaseModel):
     def redact_changes(cls, value: dict[str, Any]) -> dict[str, Any]:
         return redact_mapping(value, drop_internal_keys=True)
 
+    @field_validator("action", mode="before")
+    @classmethod
+    def redact_action(cls, value: str) -> str:
+        redacted = redact_optional_text(value)
+        if redacted is None:  # pragma: no cover - action is non-nullable
+            raise ValueError("action must not be null")
+        return redacted
+
     @field_validator("reason", mode="before")
     @classmethod
     def redact_reason(cls, value: str | None) -> str | None:

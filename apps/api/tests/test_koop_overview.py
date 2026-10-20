@@ -138,6 +138,18 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
                 source_reference=manifest_hash,
             )
         )
+        session.add(
+            AuditEvent(
+                coop_id=coop.id,
+                action=f"PROVIDER-ID={spaced_markers[1]}",
+                actor_type="SYSTEM",
+                actor_id="internal-scalar-probe",
+                source="API",
+                changes={"probe": "public scalar carriers"},
+                reason=benign_reason,
+                request_id="scalar-probe-request",
+            )
+        )
 
     response = client.get(f"/api/v1/coops/{created['id']}/audit-events")
 
@@ -160,6 +172,15 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
     assert "provider-19" not in serialized
     _assert_no_provider_or_import_ids(import_event)
     assert internal_request_id not in serialized
+    scalar_event = next(
+        item
+        for item in response.json()["items"]
+        if item["changes"] == {"probe": "public scalar carriers"}
+    )
+    assert scalar_event["action"] == "[redacted]"
+    assert scalar_event["actor_type"] == "SYSTEM"
+    assert scalar_event["source"] == "API"
+    assert scalar_event["reason"] == benign_reason
     with Session(test_engine) as session:
         stored = session.scalar(
             select(AuditEvent).where(AuditEvent.action == "MANUAL_IMPORT_UPDATED")
@@ -168,6 +189,13 @@ def test_public_audit_omits_internal_import_references_but_database_retains_them
         assert stored.request_id == internal_request_id
         assert stored.source_reference == manifest_hash
         assert stored.actor_id == f"manual-import:{provider_marker}"
+        scalar_stored = session.scalar(
+            select(AuditEvent).where(AuditEvent.actor_id == "internal-scalar-probe")
+        )
+        assert scalar_stored is not None
+        assert scalar_stored.action == f"PROVIDER-ID={spaced_markers[1]}"
+        assert scalar_stored.actor_type == "SYSTEM"
+        assert scalar_stored.source == "API"
 
 
 def test_list_filters_priority_review_and_deadline_and_sorts_priority_first(
