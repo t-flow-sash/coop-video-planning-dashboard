@@ -594,6 +594,28 @@ def test_full_scan_rejects_repeated_page_cursor() -> None:
 
 
 @pytest.mark.no_db
+@pytest.mark.parametrize(
+    ("status", "expected_code", "retryable"),
+    [
+        (429, "messages_unavailable", True),
+        (503, "messages_unavailable", True),
+        (403, "message_fetch_failed", False),
+    ],
+)
+def test_message_detail_http_classification(
+    status: int, expected_code: str, retryable: bool
+) -> None:
+    responses = authorized_responses()
+    responses["users/me/messages?"] = [(200, {"messages": [{"id": "m1"}]})]
+    responses["users/me/messages/m1?"] = [(status, {"provider": "private"})]
+    transport = FakeTransport(responses)
+    with pytest.raises(GmailHttpError, match=rf"^{expected_code}$"):
+        GmailClient(config(), transport).full_snapshot("exact query")
+    assert (expected_code in gmail_module.RETRYABLE_DELTA_ERRORS) is retryable
+    assert len([url for _, url, _, _ in transport.calls if "/messages/m1?" in url]) == 1
+
+
+@pytest.mark.no_db
 def test_full_scan_rejects_message_response_for_a_different_id() -> None:
     responses = authorized_responses()
     responses["users/me/messages?"] = [(200, {"messages": [{"id": "expected"}]})]
@@ -1490,7 +1512,7 @@ def test_failure_record_commit_error_reports_unknown_and_does_not_claim_durable_
         calls += 1
         with original_begin() as session:
             yield session
-            if calls == 2:
+            if calls >= 3:
                 raise RuntimeError("db-secret-commit-error")
 
     arm_main(monkeypatch)
@@ -1506,11 +1528,66 @@ def test_failure_record_commit_error_reports_unknown_and_does_not_claim_durable_
         checkpoint = session.scalar(select(IngestionCheckpoint))
         assert checkpoint is not None and checkpoint.checkpoint_value == "100"
         assert (
-            session.scalar(
-                select(func.count()).select_from(IngestionRun).where(IngestionRun.mode == "DELTA")
-            )
-            == 0
+            session.scalar(select(IngestionRun.status).where(IngestionRun.mode == "DELTA"))
+            == "FAILED"
         )
+        assert session.scalar(select(IngestionRun.summary).where(IngestionRun.mode == "DELTA")) == {
+            "operation": "delta",
+            "fence": "in_flight",
+        }
+    # A second scheduled invocation must not reach the provider even if
+    # terminalization could not commit and the first process is gone.
+    assert gmail_module.main(["delta"]) == 1
+    with SessionLocal() as session:
+        assert session.scalar(select(IngestionRun.summary).where(IngestionRun.mode == "DELTA")) == {
+            "operation": "delta",
+            "fence": "in_flight",
+        }
+
+
+def test_lock_collision_after_claim_keeps_durable_fence(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with SessionLocal.begin() as session:
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        persist_full_snapshot(
+            session,
+            FullSnapshot("100", "100", ()),
+            query=gmail_module.DEFAULT_IMPORT_QUERY,
+            source=source,
+        )
+    arm_main(monkeypatch)
+    monkeypatch.setattr(gmail_module, "attest_collector_database", lambda session: None)
+    monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
+    calls = 0
+
+    class NoProvider:
+        def __init__(self, config: GmailConfig) -> None:
+            raise AssertionError("provider must not be reached")
+
+    monkeypatch.setattr(gmail_module, "GmailClient", NoProvider)
+    original_lock = gmail_module.acquire_import_lock
+
+    def collision(session: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise ImportBusyError("collision")
+        original_lock(session)
+
+    monkeypatch.setattr(gmail_module, "acquire_import_lock", collision)
+    assert gmail_module.main(["delta"]) == 1
+    assert json.loads(capsys.readouterr().out)["run_status"] == "UNKNOWN"
+    monkeypatch.setattr(gmail_module, "acquire_import_lock", original_lock)
+    assert gmail_module.main(["delta"]) == 1
+    assert json.loads(capsys.readouterr().out)["error_code"] == "unexpected_error"
+    with SessionLocal() as session:
+        assert session.scalar(select(IngestionRun.summary).where(IngestionRun.mode == "DELTA")) == {
+            "operation": "delta",
+            "fence": "in_flight",
+        }
 
 
 def test_full_required_quarantines_future_delta_until_reviewed_bootstrap(
