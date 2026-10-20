@@ -612,7 +612,7 @@ class RenderedSecurityContractTests(unittest.TestCase):
         expected_activation = {
             "gmail-import-full": (True, "false"),
             "gmail-import-bootstrap": (True, "false"),
-            "gmail-import-delta": (False, "true"),
+            "gmail-import-delta": (True, "false"),
         }
         images = set()
         for name, cronjob in cronjobs.items():

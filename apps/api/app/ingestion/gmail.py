@@ -903,6 +903,21 @@ def _operational_report(command: str, client: GmailClient, query: str) -> GmailR
         attest_collector_database(session)
         acquire_import_lock(session)
         source = _source(session)
+        if (
+            command == "delta"
+            and session.scalar(
+                select(IngestionRun.id)
+                .where(
+                    IngestionRun.source_id == source.id,
+                    IngestionRun.mode == "DELTA",
+                    IngestionRun.status == "FAILED",
+                    IngestionRun.error_code == "full_required",
+                )
+                .limit(1)
+            )
+            is not None
+        ):
+            return GmailRunReport("FULL_REQUIRED", 0)
         checkpoint = session.get(IngestionCheckpoint, (source.id, "gmail_history_id"))
         query_hash = canonical_hash(query.strip())
         if command == "bootstrap":
@@ -911,11 +926,32 @@ def _operational_report(command: str, client: GmailClient, query: str) -> GmailR
             full_snapshot = client.full_snapshot(query)
             return persist_full_snapshot(session, full_snapshot, query=query, source=source)
         if checkpoint is None:
-            raise GmailHttpError("full_required")
+            _record_full_required(session, source)
+            return GmailRunReport("FULL_REQUIRED", 0)
         if checkpoint.query_hash != query_hash:
             raise GmailConfigError("query_contract_invalid")
-        delta_snapshot = client.delta_snapshot(checkpoint.checkpoint_value, query)
+        try:
+            delta_snapshot = client.delta_snapshot(checkpoint.checkpoint_value, query)
+        except GmailHttpError as error:
+            if str(error) != "full_required":
+                raise
+            _record_full_required(session, source)
+            return GmailRunReport("FULL_REQUIRED", 0)
         return persist_delta_snapshot(session, delta_snapshot, query=query, source=source)
+
+
+def _record_full_required(session: Session, source: IngestionSource) -> None:
+    """Commit the terminal fence under the same lock as the provider read."""
+    session.add(
+        IngestionRun(
+            source_id=source.id,
+            mode="DELTA",
+            status="FAILED",
+            summary={"operation": "delta"},
+            error_code="full_required",
+            finished_at=datetime.now(UTC),
+        )
+    )
 
 
 def record_operational_failure(mode: str, error_code: str) -> bool:
@@ -975,14 +1011,49 @@ def _main_operational(command: str) -> int:
             }
         )
         return 1
+    if report.status == "FULL_REQUIRED":
+        _print(
+            {
+                "error": "gmail_import_failed",
+                "error_code": "full_required",
+                "ok": False,
+                "run_status": "FAILED",
+                "status": "FAILED",
+            }
+        )
+        return 1
     _print({"ok": True, "pending_review": report.pending_review, "status": report.status})
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m app.ingestion.gmail")
-    parser.add_argument("command", choices=("full", "bootstrap", "delta"))
+    parser.add_argument("command", choices=("full", "bootstrap", "delta", "preflight"))
     arguments = parser.parse_args(argv)
+    if arguments.command == "preflight":
+        try:
+            # No arm signal, persistence, mailbox listing, or checkpoint access.
+            # The same pinned query/account and live OAuth/profile checks as a run.
+            query = os.environ.get("GMAIL_IMPORT_QUERY", DEFAULT_IMPORT_QUERY).strip()
+            if (
+                not query
+                or os.environ.get("GMAIL_IMPORT_QUERY_SHA256") != EXPECTED_QUERY_SHA256
+                or not hmac.compare_digest(canonical_hash(query), EXPECTED_QUERY_SHA256)
+            ):
+                raise GmailConfigError("query_contract_invalid")
+            GmailClient(GmailConfig.from_env()).authorize()
+        except Exception as error:
+            _print(
+                {
+                    "error": "gmail_preflight_failed",
+                    "error_code": sanitized_error_code(error),
+                    "ok": False,
+                    "status": "FAILED",
+                }
+            )
+            return 1
+        _print({"ok": True, "status": "READY"})
+        return 0
     if arguments.command != "full":
         return _main_operational(arguments.command)
     run_id: uuid.UUID | None = None

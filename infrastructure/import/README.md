@@ -1,7 +1,7 @@
 # Gmail evidence manifests
 
 - `gmail-import-cronjobs.yaml`: permanently suspended read-only FULL pilot template.
-- `gmail-recurring-cronjobs.yaml`: Bootstrap bleibt suspendiert/unarmed; nur der stündliche Delta-Scheduler ist aktiviert und bewaffnet.
+- `gmail-recurring-cronjobs.yaml`: Bootstrap und Delta bleiben im Source-Kandidaten suspendiert/unarmed; Aktivierung erfordert einen gesondert reviewten Image-Promotion- und Aktivierungs-PR.
 - `gmail-egress-proxy.yaml`: rootless digest-pinned Envoy CONNECT proxy with exact Google OAuth/Gmail authorities.
 - `network-policy.yaml`: importer may reach only DNS, PostgreSQL and the proxy; only the proxy has public TCP/443 egress.
 - `gmail-oauth.secret.example.yaml`: value-free secret shape only; never add plaintext values.

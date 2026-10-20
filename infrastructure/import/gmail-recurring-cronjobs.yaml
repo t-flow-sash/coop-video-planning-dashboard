@@ -1,4 +1,4 @@
-# Reviewed Gmail collectors: bootstrap remains dormant; delta is active.
+# Source candidate only: both recurring collectors remain dormant until reviewed image promotion.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -92,7 +92,7 @@ metadata:
     coop.example.com/gmail-import: "true"
     coop.example.com/postgres-client: "true"
 spec:
-  suspend: false
+  suspend: true
   schedule: "17 * * * *"
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 300
@@ -128,7 +128,7 @@ spec:
                 - {name: HTTPS_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: HTTP_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: NO_PROXY, value: "postgres,postgres.coop-prod.svc,gmail-egress-proxy,127.0.0.1,localhost"}
-                - {name: GMAIL_IMPORT_ARMED, value: "true"}
+                - {name: GMAIL_IMPORT_ARMED, value: "false"}
                 - name: GMAIL_IMPORT_QUERY
                   value: "in:anywhere -in:chats after:2026/01/01 {label:Legal to:legal@tsh-social.com from:legal@tsh-social.com}"
                 - {name: GMAIL_IMPORT_QUERY_SHA256, value: "e362825c8b3be3c500d6da685c7e0b2043641fa2136fd801acf57395154f967d"}

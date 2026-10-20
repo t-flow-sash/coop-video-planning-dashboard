@@ -1368,6 +1368,105 @@ def test_operational_delta_failure_is_terminal_sanitized_and_preserves_checkpoin
         assert "provider-secret-body" not in json.dumps(failed.summary)
 
 
+def test_full_required_quarantines_future_delta_until_reviewed_bootstrap(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    calls = 0
+
+    class ExpiredClient:
+        def __init__(self, config: GmailConfig) -> None:
+            pass
+
+        def delta_snapshot(self, start_history_id: str, query: str) -> DeltaSnapshot:
+            nonlocal calls
+            calls += 1
+            raise GmailHttpError("full_required")
+
+    with SessionLocal.begin() as session:
+        source = IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        persist_full_snapshot(
+            session,
+            FullSnapshot("100", "100", ()),
+            query=gmail_module.DEFAULT_IMPORT_QUERY,
+            source=source,
+        )
+
+    arm_main(monkeypatch)
+    monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
+    monkeypatch.setattr(gmail_module, "GmailClient", ExpiredClient)
+    monkeypatch.setattr(gmail_module, "attest_collector_database", lambda session: None)
+
+    assert gmail_module.main(["delta"]) == 1
+    assert json.loads(capsys.readouterr().out)["error_code"] == "full_required"
+    assert gmail_module.main(["delta"]) == 1
+    assert json.loads(capsys.readouterr().out)["error_code"] == "full_required"
+    assert calls == 1
+    with SessionLocal() as session:
+        checkpoint = session.scalar(select(IngestionCheckpoint))
+        assert checkpoint is not None and checkpoint.checkpoint_value == "100"
+        failed = session.scalars(select(IngestionRun).where(IngestionRun.mode == "DELTA")).all()
+        assert len(failed) == 1
+        assert failed[0].error_code == "full_required"
+
+
+def test_missing_checkpoint_quarantines_without_provider_access(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with SessionLocal.begin() as session:
+        session.add(IngestionSource(source_key=gmail_module.SOURCE_KEY, kind="GMAIL", enabled=True))
+    arm_main(monkeypatch)
+    monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
+    monkeypatch.setattr(gmail_module, "attest_collector_database", lambda session: None)
+
+    class NoProvider:
+        def __init__(self, config: GmailConfig) -> None:
+            pass
+
+        def delta_snapshot(self, start_history_id: str, query: str) -> DeltaSnapshot:
+            raise AssertionError("provider must not be reached")
+
+    monkeypatch.setattr(gmail_module, "GmailClient", NoProvider)
+    assert gmail_module.main(["delta"]) == 1
+    capsys.readouterr()
+    assert gmail_module.main(["delta"]) == 1
+    assert json.loads(capsys.readouterr().out)["error_code"] == "full_required"
+    with SessionLocal() as session:
+        assert len(session.scalars(select(IngestionRun)).all()) == 1
+
+
+@pytest.mark.no_db
+def test_credential_preflight_checks_provider_without_database_or_ingestion(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class ForbiddenSession:
+        @staticmethod
+        def begin() -> None:
+            raise AssertionError("preflight must not persist")
+
+    class PreflightClient:
+        def __init__(self, credentials: GmailConfig) -> None:
+            assert credentials.account == config().account
+
+        def authorize(self) -> object:
+            return object()
+
+        def full_snapshot(self, query: str) -> None:
+            raise AssertionError("preflight must not scan")
+
+        def delta_snapshot(self, start_history_id: str, query: str) -> None:
+            raise AssertionError("preflight must not scan")
+
+    monkeypatch.setattr(gmail_module, "SessionLocal", ForbiddenSession)
+    monkeypatch.setattr(gmail_module.GmailConfig, "from_env", lambda: config())
+    monkeypatch.setattr(gmail_module, "GmailClient", PreflightClient)
+    monkeypatch.setenv("GMAIL_IMPORT_ARMED", "false")
+    monkeypatch.setenv("GMAIL_IMPORT_QUERY_SHA256", gmail_module.EXPECTED_QUERY_SHA256)
+    assert gmail_module.main(["preflight"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"ok": True, "status": "READY"}
+
+
 @pytest.mark.no_db
 @pytest.mark.parametrize("command", ["bootstrap", "delta"])
 def test_operational_commands_stop_before_database_when_unarmed(
