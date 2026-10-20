@@ -36,9 +36,9 @@ Sie liegt nicht im Secret, sondern als `GMAIL_IMPORT_QUERY` in der CronJob-Konfi
 
 `delta` verlangt einen vorhandenen Checkpoint, exakt passenden Query-Hash und `snapshot.start_history_id == checkpoint_value`. Gmail `history.list` wird ab diesem Cursor vollständig paginiert; `messages`, `messagesAdded`, `messagesDeleted`, `labelsAdded` und `labelsRemoved` werden dedupliziert. Anschließend wird die unveränderte fachliche Query erneut über `messages.list(q=...)` ausgewertet. Nur die Schnittmenge aus History-Änderungen und aktuell query-passenden IDs wird mit `messages.get(format=metadata)` geladen. Abwesenheit oder Label-Entfernung erzeugt keine Löschung und keine fachliche Mutation.
 
-Erst Evidence, Observations, Review-Kandidaten, erfolgreicher Run und der terminale Gmail-`historyId` werden atomar committet. Provider-, Parse-, Query- oder DB-Fehler lassen den Checkpoint unverändert und erzeugen höchstens einen separaten terminalen `FAILED`-Run mit allowlist-basiertem Fehlercode. Ein von Gmail verworfener Cursor (`404`) wird ausschließlich als `full_required` behandelt. Der Scheduler bleibt in diesem Release suspendiert; ein neuer Baseline-Plan und jede spätere Aktivierung benötigen eine eigene Review- und Freigabestrecke.
+Erst Evidence, Observations, Review-Kandidaten, erfolgreicher Run und der terminale Gmail-`historyId` werden atomar committet. Provider-, Parse-, Query- oder DB-Fehler lassen den Checkpoint unverändert und erzeugen höchstens einen separaten terminalen `FAILED`-Run mit allowlist-basiertem Fehlercode. Ein von Gmail verworfener Cursor (`404`) wird ausschließlich als `full_required` behandelt. Der stündliche Scheduler ist im GitOps-Aktivierungskandidaten aktiviert; erst nach Review, PR/CI, Merge und Live-Abgleich wird er produktiv. Bei einem Fehler ist der Run gescheitert und der Checkpoint bleibt unverändert. Ein neuer Baseline-Plan erfordert eine eigene Review- und Freigabestrecke.
 
-Nach erfolgreich attestiertem operativem Bootstrap ist dessen commit-gebundener One-shot-Job aus dem GitOps Desired State entfernt. `gmail-import-full`, `gmail-import-bootstrap` und `gmail-import-delta` bleiben suspendiert und unarmed. Die Delta-Definition behält ihren Stundenplan, startet aber ohne separat reviewte least-privilege Credentials und Aktivierungsfreigabe keinen Job.
+Nach erfolgreich attestiertem operativem Bootstrap ist dessen commit-gebundener One-shot-Job aus dem GitOps Desired State entfernt. `gmail-import-full` und `gmail-import-bootstrap` bleiben suspendiert und unarmed. Nur `gmail-import-delta` ist auf `suspend=false` und `GMAIL_IMPORT_ARMED=true` gesetzt; das produktive breite OAuth-Credential ist nach ausdrücklicher Entscheidung des Product Owners zulässig. Das ist **keine** Berechtigung zum Senden, Ändern oder Löschen von E-Mails: Der Collector ruft Gmail ausschließlich per GET auf (einziger POST ist der OAuth-Refresh), ohne die Scopes zu erweitern oder Domain-Daten automatisch anzuwenden.
 
 Operative Runs sind wiederholbare GET-only Läufe. Sie halten den Advisory Lock während Providerzugriff und Commit und werden erst atomar als `SUCCEEDED` sichtbar; dadurch koexistieren sie mit dem unveränderten historischen `RUNNING`-Pilotclaim, ohne dessen Exactly-once-Vertrag oder den Unique-Index aufzuweichen.
 
@@ -77,12 +77,15 @@ unbewaffnet und scheitert fail-closed.
 
 ### Gate A – Secret und Image vorbereiten
 
-Vor einem dormant Deployment sind zwingend:
+Vor der produktiven Delta-Aktivierung sind zwingend:
 
-1. ein dediziertes produktives Read-only-OAuth-Secret als SOPS-Ressource mit
+1. ein dediziertes produktives OAuth-Secret als SOPS-Ressource mit
    exakt `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN` und
-   `GMAIL_ACCOUNT`; Secretwerte werden weder in Befehlsausgaben noch in
-   Evidenzdateien übernommen,
+   `GMAIL_ACCOUNT`; der Product Owner hat das breite bestehende Credential ausdrücklich
+   akzeptiert (kein Least-Privilege-Token-Gate). Vor Aktivierung werden `gmail.readonly`,
+   Provider-Identität und die tatsächlich gewährten Scopes per Refresh/Tokeninfo und
+   Gmail-Profil read-only attestiert, ohne Token, Scope-Liste oder Maildaten auszugeben;
+   Secretwerte werden weder in Befehlsausgaben noch in Evidenzdateien übernommen,
 2. ein nichtleerer `COLLECTOR_DATABASE_URL`-Wert für
    `coop_evidence_collector` mit eigenem Passwort im verschlüsselten
    dedizierten, immutable `gmail-collector-db`-Secret,
@@ -276,17 +279,17 @@ Recovery-Pfad. Ein Alembic-Downgrade des Markers ist nur als separat
 freigegebener, getesteter Datenbankeingriff erlaubt.
 
 Der Restore-Ablauf suspendiert und read-back-verifiziert alle drei
-Gmail-CronJobs unabhängig von deklarativem Soll oder Live-Drift. Für den
-deklarativ dormanten Delta-CronJob setzt er zusätzlich
+Gmail-CronJobs unabhängig vom nun aktiven Delta-Soll oder Live-Drift. Für den
+deklarativ aktiven Delta-CronJob setzt er zusätzlich
 `kustomize.toolkit.fluxcd.io/reconcile=disabled` und verifiziert die Flux-Quarantäne
 vor dem ersten Writer-Check sowie unmittelbar nach dem `coop-import`-Reconcile und
 nach allen Reconciles. Zuvor wartet das Skript nach Suspension aller Flux-Grenzen
 auf `Reconciling!=True` und verifiziert sämtliche Suspensionen erneut. Delta bleibt
-dadurch suspendiert; die Quarantäne darf erst in einem separat reviewten
-Post-Restore-Schritt nach DB-, Checkpoint- und Evidence-Attestation entfernt werden.
-Das Entfernen der Restore-Quarantäne aktiviert Delta ausdrücklich nicht: Danach müssen
-weiterhin `suspend=true` und `GMAIL_IMPORT_ARMED=false` read-back-verifiziert werden.
-Eine spätere Aktivierung darf das ausdrücklich freigegebene vorhandene Credential verwenden,
-setzt aber einen separaten Review-PR samt statischer und dynamischer GET-only-Live-Attestation
-voraus. Jede Abweichung vom mutationsfreien Collectorpfad suspendiert `coop-import` und Delta
-erneut. Full und Bootstrap bleiben suspendiert und unbewaffnet.
+nach Restore absichtlich suspendiert; die Quarantäne darf erst in einem separat
+reviewten Post-Restore-Schritt nach DB-, Checkpoint- und Evidence-Attestation entfernt
+werden. Das Entfernen der Restore-Quarantäne erlaubt Flux, das aktiv deklarierte Delta
+erneut zu starten und erfordert daher **zuerst** eine explizit reviewte Entscheidung
+und einen read-back-verifizierten Neustartplan. Niemals bloß die Annotation entfernen
+und annehmen, `suspend=true` halte dauerhaft. Jede Abweichung vom GET-only-Collectorpfad
+suspendiert `coop-import` und Delta erneut. Full und Bootstrap bleiben suspendiert
+und unbewaffnet.

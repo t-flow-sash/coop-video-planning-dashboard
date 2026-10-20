@@ -355,11 +355,10 @@ for cronjob in postgres-backup coop-seed gmail-import-full gmail-import-bootstra
   }
 done
 
-# The reviewed desired state keeps Delta dormant until a separate least-privilege
-# activation release. During restore the live CronJob must remain suspended while
-# coop-import is reconciled. Flux's
-# resource-level quarantine prevents both apply and prune until a separately
-# reviewed post-restore recovery removes this annotation.
+# The reviewed desired state now activates Delta. During restore the live CronJob
+# must remain suspended while coop-import is reconciled. Flux's resource-level
+# quarantine prevents both apply and prune until separately reviewed post-restore
+# DB/checkpoint/evidence attestation explicitly authorizes removal and restart.
 kubectl -n "$NAMESPACE" patch cronjob gmail-import-delta --type=merge \
   -p '{"metadata":{"annotations":{"kustomize.toolkit.fluxcd.io/reconcile":"disabled"}},"spec":{"suspend":true}}' >/dev/null
 verify_delta_quarantine || {
