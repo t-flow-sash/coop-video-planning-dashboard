@@ -14,6 +14,7 @@ ALLOWED_INGESTION_MODULES = {
     "__init__.py",
     "gmail.py",
     "gmail_semantic.py",
+    "gmail_route_provision.py",
     "gmail_semantic_delta.py",
     "gmail_semantic_queue.py",
 }
@@ -113,6 +114,8 @@ def _python_route_inventory(path: Path) -> tuple[set[tuple[str, str]], list[str]
                 "gmail_semantic.py",
                 "gmail_semantic_delta.py",
                 "gmail_semantic_queue.py",
+                # Operator-only route provisioning; no CLI, scheduler or API import.
+                "gmail_route_provision.py",
             }:
                 violations.append(f"API/service imports ingestion runtime: {path}")
         if (
@@ -147,6 +150,8 @@ def _python_ingestion_mutation_surfaces(path: Path, root: Path) -> list[str]:
         # Separate CLI-only reviewed business path; never an ingestion runtime entry point.
         "apps/api/app/reviewed_domain_import.py",
         # Explicit semantic worker is separate from the metadata collector.
+        # Provisioning is separately authorized, not imported by the collector or API.
+        "apps/api/app/ingestion/gmail_route_provision.py",
         "apps/api/app/ingestion/gmail_semantic_delta.py",
         # Manual, bounded semantic catch-up uses the separately authorized worker.
         "apps/api/app/ingestion/gmail_semantic_queue.py",
