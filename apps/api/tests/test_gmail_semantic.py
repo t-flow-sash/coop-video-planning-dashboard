@@ -136,6 +136,7 @@ def test_matching_opposite_party_offer_acceptance_with_evidence():
 @pytest.mark.parametrize(
     "withdrawal",
     [
+        "We will not go ahead with this project.",
         "The deal is off.",
         "We cancel the collaboration.",
         "We withdraw our agreement.",

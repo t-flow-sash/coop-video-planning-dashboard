@@ -359,6 +359,7 @@ DECLINE = re.compile(
 # A later retraction is not proof of a new terminal state, but invalidates the
 # earlier agreement as a current auto-import candidate. Keep this grammar narrow.
 RETRACTION = re.compile(
+    r"\b(?:we|they)\s+(?:will|are\s+going\s+to)\s+not\s+go\s+ahead\s+with\s+(?:this|the)\s+project\b|"
     r"\b(?:the|this)\s+deal\s+is\s+off\b|"
     r"\b(?:this|the)\s+(?:project|collaboration|cooperation|deal)\s+is\s+no\s+longer\s+going\s+ahead\b|"
     r"\b(?:we cannot|we can't|we can not)\s+proceed\s+with\s+(?:this|the)\s+project\b|"

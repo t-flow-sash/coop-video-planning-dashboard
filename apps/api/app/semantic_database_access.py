@@ -25,6 +25,7 @@ READ_TABLES = (
     "source_record_revision",
     "semantic_track_route",
     "semantic_message_state",
+    "semantic_queue_cursor",
     "reviewed_domain_track",
     "reviewed_domain_batch",
     "reviewed_domain_item",
@@ -34,6 +35,7 @@ READ_TABLES = (
 )
 INSERT_TABLES = (
     "semantic_message_state",
+    "semantic_queue_cursor",
     "reviewed_domain_batch",
     "reviewed_domain_track",
     "reviewed_domain_item",
@@ -41,7 +43,7 @@ INSERT_TABLES = (
     "coop",
     "audit_event",
 )
-UPDATE_TABLES = ("semantic_message_state", "reviewed_domain_track", "coop")
+UPDATE_TABLES = ("semantic_message_state", "semantic_queue_cursor", "reviewed_domain_track", "coop")
 ALLOWED = set(READ_TABLES) | set(INSERT_TABLES) | set(UPDATE_TABLES)
 PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 

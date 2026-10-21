@@ -39,6 +39,24 @@ def test_semantic_role_login_effective_acl_and_collector_isolation(test_engine: 
             text("SELECT has_table_privilege(:r,'coop','INSERT')"),
             {"r": writer.ROLE},
         )
+        assert connection.scalar(
+            text("SELECT has_table_privilege(:r,'semantic_queue_cursor','SELECT')"),
+            {"r": writer.ROLE},
+        )
+        assert connection.scalar(
+            text("SELECT has_table_privilege(:r,'semantic_queue_cursor','INSERT')"),
+            {"r": writer.ROLE},
+        )
+        assert connection.scalar(
+            text("SELECT has_table_privilege(:r,'semantic_queue_cursor','UPDATE')"),
+            {"r": writer.ROLE},
+        )
+        assert not connection.scalar(
+            text(
+                "SELECT has_table_privilege("
+                "'coop_evidence_collector','semantic_queue_cursor','SELECT')"
+            )
+        )
         assert not connection.scalar(
             text("SELECT has_table_privilege(:r,'ingestion_checkpoint','UPDATE')"),
             {"r": writer.ROLE},
