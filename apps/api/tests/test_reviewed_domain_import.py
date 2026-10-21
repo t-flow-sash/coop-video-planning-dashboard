@@ -308,6 +308,117 @@ def test_conflict_rebase_requires_exact_version_and_snapshot(test_engine: Engine
         assert item is not None and item.conflict_fields == []
 
 
+def test_conflict_survives_priority_only_revision_until_exact_rebase(test_engine: Engine) -> None:
+    ref = evidence(test_engine)
+    with Session(test_engine) as session, session.begin():
+        session.add(
+            Coop(
+                record_key="exact-coop",
+                title="Before",
+                priority="P2",
+                status="NEW",
+                needs_review=False,
+            )
+        )
+    first = payload(
+        ref,
+        action="UPDATE",
+        fields={"title": "Reviewed", "priority": "P2"},
+        expected_version=1,
+        expected_fields={"title": "Before", "priority": "P2"},
+    )
+    with Session(test_engine) as session, session.begin():
+        assert apply_manifest(session, first)["updated"] == 1
+    with Session(test_engine) as session, session.begin():
+        coop = session.scalar(select(Coop))
+        assert coop is not None
+        coop.title = "Local"
+        coop.version += 1
+    conflict = payload(ref, revision=2, action="UPDATE", fields={"title": "Proposal"})
+    with Session(test_engine) as session, session.begin():
+        assert apply_manifest(session, conflict)["conflicted"] == 1
+    priority_only = payload(ref, revision=3, action="UPDATE", fields={"priority": "P0"})
+    with Session(test_engine) as session, session.begin():
+        result = apply_manifest(session, priority_only)
+        assert result["updated"] == 1 and result["conflicted"] == 1
+    with Session(test_engine) as session:
+        coop = session.scalar(select(Coop))
+        track = session.scalar(select(ReviewedDomainTrack))
+        item = session.get(ReviewedDomainItem, (track.batch_id, track.track_key)) if track else None
+        assert coop is not None and (coop.title, coop.priority, coop.version) == ("Local", "P0", 4)
+        assert track is not None and track.field_baselines == {
+            "title": "Reviewed",
+            "priority": "P0",
+        }
+        assert item is not None and item.outcome == "CONFLICT" and item.conflict_fields == ["title"]
+        events = list(
+            session.scalars(select(AuditEvent).order_by(AuditEvent.created_at, AuditEvent.id))
+        )
+        assert len(events) == 3
+        assert events[-1].action == "REVIEWED_DOMAIN_CONFLICT"
+        assert events[-1].changes == {"priority": {"old": "P2", "new": "P0"}}
+        assert events[-1].reason == "Conflict fields: title"
+    with Session(test_engine) as session, session.begin():
+        assert apply_manifest(session, priority_only)["unchanged"] == 1
+    with Session(test_engine) as session:
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 3
+        assert session.scalar(select(func.count()).select_from(ReviewedDomainItem)) == 3
+    stale_rebase = payload(
+        ref,
+        revision=4,
+        action="UPDATE",
+        fields={"title": "Accepted"},
+        expected_version=3,
+        expected_fields={"title": "Local"},
+    )
+    with (
+        pytest.raises(ReviewError, match="version"),
+        Session(test_engine) as session,
+        session.begin(),
+    ):
+        apply_manifest(session, stale_rebase)
+    wrong_snapshot = payload(
+        ref,
+        revision=4,
+        action="UPDATE",
+        fields={"title": "Accepted"},
+        expected_version=4,
+        expected_fields={"title": "Wrong"},
+    )
+    with (
+        pytest.raises(ReviewError, match="snapshot"),
+        Session(test_engine) as session,
+        session.begin(),
+    ):
+        apply_manifest(session, wrong_snapshot)
+    with Session(test_engine) as session:
+        assert session.scalar(select(func.count()).select_from(ReviewedDomainBatch)) == 3
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 3
+    resolved = payload(
+        ref,
+        revision=4,
+        action="UPDATE",
+        fields={"title": "Accepted"},
+        expected_version=4,
+        expected_fields={"title": "Local"},
+    )
+    with Session(test_engine) as session, session.begin():
+        result = apply_manifest(session, resolved)
+        assert result["updated"] == 1 and result["conflicted"] == 0
+    with Session(test_engine) as session:
+        coop = session.scalar(select(Coop))
+        track = session.scalar(select(ReviewedDomainTrack))
+        item = session.get(ReviewedDomainItem, (track.batch_id, track.track_key)) if track else None
+        assert coop is not None and coop.title == "Accepted"
+        assert track is not None and track.field_baselines["title"] == "Accepted"
+        assert item is not None and item.outcome == "UPDATED" and item.conflict_fields == []
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 4
+    with Session(test_engine) as session, session.begin():
+        assert apply_manifest(session, resolved)["unchanged"] == 1
+    with Session(test_engine) as session:
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 4
+
+
 def test_conflict_only_has_explicit_audit_and_no_false_update(test_engine: Engine) -> None:
     ref = evidence(test_engine)
     with Session(test_engine) as session, session.begin():

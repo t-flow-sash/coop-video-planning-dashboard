@@ -416,9 +416,13 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
                         raise ReviewError("rebase requires exact field snapshot")
                     baselines = dict(link.field_baselines)
                 changes = {}
-                conflicts = []
+                # A later revision does not dismiss conflicts simply by omitting
+                # their fields (or by coincidentally matching a stale baseline).
+                conflicts = sorted(rebase_fields if decision.expected_fields is None else ())
                 for key, value in values.items():
                     current = _encoded(getattr(coop, key))
+                    if key in conflicts:
+                        continue
                     if (
                         key not in baselines
                         and (
