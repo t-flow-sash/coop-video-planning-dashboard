@@ -360,6 +360,7 @@ DECLINE = re.compile(
 # earlier agreement as a current auto-import candidate. Keep this grammar narrow.
 RETRACTION = re.compile(
     r"\b(?:the|this)\s+deal\s+is\s+off\b|"
+    r"\b(?:this|the)\s+(?:project|collaboration|cooperation|deal)\s+is\s+no\s+longer\s+going\s+ahead\b|"
     r"\b(?:we cannot|we can't|we can not)\s+proceed\s+with\s+(?:this|the)\s+project\b|"
     r"\b(?:cancel|withdraw|decline|reject|refuse|terminate)\w*\b[^.!?\n]*"
     r"\b(?:collaboration|cooperation|sponsorship|agreement)\b|"
@@ -552,6 +553,7 @@ def decide(
             m
             for m in retractions
             if (m.internal_date, m.message_id) > (acceptance.internal_date, acceptance.message_id)
+            or m.message_id == acceptance.message_id
         ]
         if later:
             refs = field.evidence + tuple(_evidence(m, "retraction:" + m.message_id) for m in later)

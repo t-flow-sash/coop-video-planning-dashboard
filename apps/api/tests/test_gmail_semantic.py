@@ -94,6 +94,25 @@ def test_proposal_not_agreement_and_invoice_not_payment():
     assert result.status.verdict == Verdict.NO_CHANGE
 
 
+@pytest.mark.parametrize("withdrawal", ["The deal is off.", "This is no longer going ahead."])
+def test_same_message_withdrawal_never_confirms_terms(withdrawal):
+    messages = [
+        parse_message(
+            msg(
+                "offer", "Collaboration offer: fee 500 EUR", sender="partner@example.net", when=1000
+            )
+        ),
+        parse_message(
+            msg(
+                "accept", "We accept fee 500 EUR. " + withdrawal, sender="me@example.net", when=2000
+            )
+        ),
+    ]
+    result = decide(messages, own_address="me@example.net", existing_track=False)
+    assert result.fee.verdict == Verdict.REVIEW
+    assert result.status.verdict == Verdict.REVIEW
+
+
 def test_matching_opposite_party_offer_acceptance_with_evidence():
     offer = parse_message(
         msg("m1", "Collaboration offer: fee 500 EUR; deadline 2026-11-30", when=1000)
