@@ -32,6 +32,27 @@ def document(relative_path: str) -> dict[str, Any]:
     return parsed[0]
 
 
+ALEMBIC_VERSIONS = ROOT / "apps/api/alembic/versions"
+
+
+def alembic_heads() -> list[str]:
+    """Resolve the migration graph head(s) without importing Alembic."""
+    revisions: set[str] = set()
+    parents: set[str] = set()
+    for path in sorted(ALEMBIC_VERSIONS.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        revision = re.search(r'^revision: str = "(\w+)"$', source, re.MULTILINE)
+        if revision is None:
+            raise AssertionError(f"missing revision in {path.name}")
+        revisions.add(revision.group(1))
+        parent = re.search(
+            r'^down_revision: str \| None = "(\w+)"$', source, re.MULTILINE
+        )
+        if parent is not None:
+            parents.add(parent.group(1))
+    return sorted(revisions - parents)
+
+
 def rendered_documents(relative_path: str) -> list[dict[str, Any]]:
     rendered = subprocess.run(
         ["kubectl", "kustomize", str(ROOT / relative_path)],
@@ -1208,7 +1229,12 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         self.assertIn("import app.database_access", workflow)
         self.assertIn("SELECT version_num FROM alembic_version", workflow)
         self.assertIn('source == ("gmail-open-coops-v1", "GMAIL", True)', workflow)
-        self.assertIn("f9b2d4e6a801", workflow)
+        heads = alembic_heads()
+        # A single linear head keeps the production-image proof unambiguous.
+        self.assertEqual(len(heads), 1, heads)
+        # The image must ship the reviewed head; a stale literal here silently
+        # proves the wrong revision, so it is derived from the migration graph.
+        self.assertIn(f'assert version == ("{heads[0]}",)', workflow)
         self.assertIn("assert len(jobs) == 3", workflow)
 
     def test_global_render_image_gate_rejects_any_unpinned_image(self) -> None:

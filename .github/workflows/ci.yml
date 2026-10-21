@@ -135,7 +135,7 @@ jobs:
           "${image_run[@]}" alembic upgrade head
           "${image_run[@]}" python -m app.database_access reconcile
           "${image_run[@]}" python -c \
-            'import app.database_access; import os; import psycopg; from sqlalchemy.engine import make_url; url=make_url(os.environ["DATABASE_URL"]).set(drivername="postgresql").render_as_string(hide_password=False); connection=psycopg.connect(url); version=connection.execute("SELECT version_num FROM alembic_version").fetchone(); source=connection.execute("SELECT source_key, kind, enabled FROM ingestion_source WHERE source_key = %s", ("gmail-open-coops-v1",)).fetchone(); connection.close(); assert version == ("f9b2d4e6a801",), version; assert source == ("gmail-open-coops-v1", "GMAIL", True), source'
+            'import app.database_access; import os; import psycopg; from sqlalchemy.engine import make_url; url=make_url(os.environ["DATABASE_URL"]).set(drivername="postgresql").render_as_string(hide_password=False); connection=psycopg.connect(url); version=connection.execute("SELECT version_num FROM alembic_version").fetchone(); source=connection.execute("SELECT source_key, kind, enabled FROM ingestion_source WHERE source_key = %s", ("gmail-open-coops-v1",)).fetchone(); connection.close(); assert version == ("6a8d1e42c907",), version; assert source == ("gmail-open-coops-v1", "GMAIL", True), source'
       - name: Validate API Dockerfile
         uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with: { dockerfile: apps/api/Dockerfile }
