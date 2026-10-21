@@ -291,6 +291,7 @@ def readonly_scope_violations(root: Path) -> list[str]:
             "gmail-import-bootstrap",
         ),
         ("infrastructure/import/gmail-recurring-cronjobs.yaml", "CronJob", "gmail-import-delta"),
+        ("infrastructure/semantic/semantic-cronjob.yaml", "CronJob", "gmail-semantic-worker"),
     }
     for path in _operational_files(root):
         violations.extend(_semantic_surface_violations(path, root))

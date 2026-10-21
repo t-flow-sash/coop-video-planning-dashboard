@@ -1,0 +1,76 @@
+# Deliberately non-runnable until the queue runner is merged, image promoted,
+# dedicated encrypted Secret installed, ACLs/live probes attested, and a separate
+# activation change is reviewed. NEVER reuse gmail-collector-db or coop-runtime.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gmail-semantic-worker
+  labels: &labels
+    app.kubernetes.io/name: gmail-semantic-worker
+    app.kubernetes.io/part-of: coop-video-planning
+    coop.example.com/semantic-worker: "true"
+    coop.example.com/postgres-client: "true"
+spec:
+  suspend: true
+  schedule: "29 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels: *labels
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels: *labels
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: semantic-worker
+              image: 127.0.0.1:5000/coop-api:git-000000000000@sha256:0000000000000000000000000000000000000000000000000000000000000000
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "app.ingestion.gmail_semantic_queue"]
+              args: ["--bounded"]
+              env:
+                - {name: SEMANTIC_WORKER_ARMED, value: "false"}
+                - {name: HTTPS_PROXY, value: "http://gmail-egress-proxy:10000"}
+                - {name: HTTP_PROXY, value: "http://gmail-egress-proxy:10000"}
+                - {name: NO_PROXY, value: "postgres,postgres.coop-prod.svc,gmail-egress-proxy,127.0.0.1,localhost"}
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef: {name: gmail-semantic-db, key: SEMANTIC_DATABASE_URL}
+                - name: GMAIL_CLIENT_ID
+                  valueFrom:
+                    secretKeyRef: {name: gmail-oauth, key: GMAIL_CLIENT_ID}
+                - name: GMAIL_CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef: {name: gmail-oauth, key: GMAIL_CLIENT_SECRET}
+                - name: GMAIL_REFRESH_TOKEN
+                  valueFrom:
+                    secretKeyRef: {name: gmail-oauth, key: GMAIL_REFRESH_TOKEN}
+                - name: GMAIL_ACCOUNT
+                  valueFrom:
+                    secretKeyRef: {name: gmail-oauth, key: GMAIL_ACCOUNT}
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits: {cpu: 500m, memory: 512Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: ["ALL"]}
+              volumeMounts:
+                - {name: tmp, mountPath: /tmp}
+          volumes:
+            - name: tmp
+              emptyDir: {sizeLimit: 64Mi}

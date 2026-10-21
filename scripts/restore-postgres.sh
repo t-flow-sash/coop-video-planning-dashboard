@@ -24,6 +24,7 @@ readonly suspend_order=(
   kustomization/coop-apps
   kustomization/coop-migration
   kustomization/coop-import
+  kustomization/coop-semantic
   kustomization/coop-database
 )
 readonly resume_order=(
@@ -31,6 +32,7 @@ readonly resume_order=(
   kustomization/coop-database
   kustomization/coop-migration
   kustomization/coop-import
+  kustomization/coop-semantic
   kustomization/coop-apps
   kustomization/coop-ingress
   kustomization/coop-backup
@@ -95,6 +97,18 @@ valid = (
 )
 raise SystemExit(0 if valid else 1)
 ' <<<"$delta_json"
+}
+
+verify_semantic_quarantine() {
+  local worker_json
+  worker_json="$(kubectl -n "$NAMESPACE" get cronjob gmail-semantic-worker -o json)"
+  python3 -c '
+import json, sys
+obj = json.load(sys.stdin)
+raise SystemExit(0 if obj.get("spec", {}).get("suspend") is True
+    and (obj.get("metadata", {}).get("annotations") or {}).get(
+        "kustomize.toolkit.fluxcd.io/reconcile") == "disabled" else 1)
+' <<<"$worker_json"
 }
 
 lock_identity_matches() {
@@ -208,7 +222,7 @@ fail_closed() {
       quarantine_proven=false
     fi
   done
-  for cronjob in postgres-backup coop-seed gmail-import-full gmail-import-bootstrap gmail-import-delta; do
+  for cronjob in postgres-backup coop-seed gmail-import-full gmail-import-bootstrap gmail-import-delta gmail-semantic-worker; do
     if ! kubectl -n "$NAMESPACE" patch cronjob "$cronjob" --type=merge \
       -p '{"spec":{"suspend":true}}' >/dev/null 2>&1; then
       quarantine_proven=false
@@ -222,6 +236,13 @@ fail_closed() {
     quarantine_proven=false
   fi
   if ! verify_delta_quarantine >/dev/null 2>&1; then
+    quarantine_proven=false
+  fi
+  if ! kubectl -n "$NAMESPACE" patch cronjob gmail-semantic-worker --type=merge \
+    -p '{"metadata":{"annotations":{"kustomize.toolkit.fluxcd.io/reconcile":"disabled"}},"spec":{"suspend":true}}' >/dev/null 2>&1; then
+    quarantine_proven=false
+  fi
+  if ! verify_semantic_quarantine >/dev/null 2>&1; then
     quarantine_proven=false
   fi
   if ! kubectl -n "$NAMESPACE" scale deployment/coop-api --replicas=0 >/dev/null 2>&1; then
@@ -346,7 +367,7 @@ done
 # CronJobs remain live objects after their owning Flux Kustomization is
 # suspended. Close every schedule race explicitly before the first writer
 # query; seed and every Gmail collector are never resumed here.
-for cronjob in postgres-backup coop-seed gmail-import-full gmail-import-bootstrap gmail-import-delta; do
+for cronjob in postgres-backup coop-seed gmail-import-full gmail-import-bootstrap gmail-import-delta gmail-semantic-worker; do
   kubectl -n "$NAMESPACE" patch cronjob "$cronjob" --type=merge \
     -p '{"spec":{"suspend":true}}' >/dev/null
   [[ "$(kubectl -n "$NAMESPACE" get cronjob "$cronjob" -o jsonpath='{.spec.suspend}')" == true ]] || {
@@ -363,6 +384,12 @@ kubectl -n "$NAMESPACE" patch cronjob gmail-import-delta --type=merge \
   -p '{"metadata":{"annotations":{"kustomize.toolkit.fluxcd.io/reconcile":"disabled"}},"spec":{"suspend":true}}' >/dev/null
 verify_delta_quarantine || {
   echo "Failed to establish Flux quarantine for cronjob/gmail-import-delta." >&2
+  exit 5
+}
+kubectl -n "$NAMESPACE" patch cronjob gmail-semantic-worker --type=merge \
+  -p '{"metadata":{"annotations":{"kustomize.toolkit.fluxcd.io/reconcile":"disabled"}},"spec":{"suspend":true}}' >/dev/null
+verify_semantic_quarantine || {
+  echo "Failed to establish Flux quarantine for cronjob/gmail-semantic-worker." >&2
   exit 5
 }
 
@@ -525,6 +552,14 @@ resume_and_reconcile() {
 }
 
 for resource in "${resume_order[@]}"; do
+  if [[ "$resource" == kustomization/coop-semantic ]]; then
+    # Its Git desired state is suspended; do not resume this new writer owner.
+    verify_semantic_quarantine || {
+      echo "Flux quarantine for cronjob/gmail-semantic-worker was lost." >&2
+      exit 5
+    }
+    continue
+  fi
   resume_and_reconcile "$resource"
   if [[ "$resource" == kustomization/coop-import ]]; then
     verify_delta_quarantine || {
@@ -546,6 +581,10 @@ kubectl -n "$NAMESPACE" patch cronjob postgres-backup --type=merge \
   -p "{\"spec\":{\"suspend\":${cron_suspend}}}" >/dev/null
 verify_delta_quarantine || {
   echo "Flux quarantine for cronjob/gmail-import-delta did not survive reconciliation." >&2
+  exit 5
+}
+verify_semantic_quarantine || {
+  echo "Flux quarantine for cronjob/gmail-semantic-worker did not survive reconciliation." >&2
   exit 5
 }
 restore_succeeded=true

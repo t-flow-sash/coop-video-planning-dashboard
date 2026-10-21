@@ -204,7 +204,9 @@ def reconcile_collector_access(admin_url: str) -> None:
                         FOR role_name IN
                             SELECT role.rolname
                             FROM pg_roles role
-                            WHERE role.rolname <> 'coop_evidence_collector'
+                            WHERE role.rolname NOT IN (
+                                'coop_evidence_collector', 'coop_semantic_writer'
+                            )
                               AND has_function_privilege(
                                   role.rolname,
                                   command.routine_oid,
@@ -221,12 +223,13 @@ def reconcile_collector_access(admin_url: str) -> None:
                             );
                         END LOOP;
                         EXECUTE format(
-                            'REVOKE EXECUTE ON %s %I.%I(%s) FROM PUBLIC, %I',
+                            'REVOKE EXECUTE ON %s %I.%I(%s) FROM PUBLIC, %I, %I',
                             object_kind,
                             command.schema_name,
                             command.object_name,
                             command.identity_arguments,
-                            'coop_evidence_collector'
+                            'coop_evidence_collector',
+                            'coop_semantic_writer'
                         );
                     END LOOP;
                     PERFORM set_config('session_replication_role', 'origin', true);
@@ -244,10 +247,11 @@ def reconcile_collector_access(admin_url: str) -> None:
                             ELSE 'FUNCTION'
                         END;
                         EXECUTE format(
-                            'REVOKE EXECUTE ON %s %s FROM PUBLIC, %I',
+                            'REVOKE EXECUTE ON %s %s FROM PUBLIC, %I, %I',
                             object_kind,
                             command.object_identity,
-                            'coop_evidence_collector'
+                            'coop_evidence_collector',
+                            'coop_semantic_writer'
                         );
                     END IF;
                 END LOOP;
@@ -294,10 +298,10 @@ def reconcile_collector_access(admin_url: str) -> None:
                 "pg_get_function_identity_arguments(function.oid), function.prokind "
                 "FROM pg_roles role CROSS JOIN pg_proc function "
                 "JOIN pg_namespace namespace ON namespace.oid = function.pronamespace "
-                "WHERE namespace.nspname = %s AND role.rolname <> %s "
+                "WHERE namespace.nspname = %s AND role.rolname NOT IN (%s, %s) "
                 "AND has_function_privilege(role.oid, function.oid, 'EXECUTE') "
                 "ORDER BY role.rolname, function.oid",
-                (schema, COLLECTOR_ROLE),
+                (schema, COLLECTOR_ROLE, "coop_semantic_writer"),
             )
             preserved_function_grants = cursor.fetchall()
             cursor.execute(
