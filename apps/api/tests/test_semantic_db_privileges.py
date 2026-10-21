@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 
 from app import database_access
@@ -154,12 +155,19 @@ def test_semantic_reconcile_fails_closed_on_owned_object(test_engine: Engine) ->
 
 def test_semantic_url_validation_is_fail_closed(test_engine: Engine) -> None:
     admin, restricted, collector = _urls(test_engine)
+    assert (
+        writer.writer_password_from_urls(admin, restricted, collector)
+        == make_url(restricted).password
+    )
+    restricted_url = make_url(restricted)
     for bad in (
         admin,
         collector,
-        restricted.replace("coop_test", "coop"),
-        restricted.replace("127.0.0.1", "localhost"),
-        restricted.replace("semantic-test-only", "collector-test-only"),
+        restricted_url.set(database="coop").render_as_string(hide_password=False),
+        restricted_url.set(host="localhost").render_as_string(hide_password=False),
+        restricted_url.set(password=make_url(collector).password).render_as_string(
+            hide_password=False
+        ),
     ):
         with pytest.raises(RuntimeError, match="invalid semantic writer database URL"):
             writer.writer_password_from_urls(admin, bad, collector)

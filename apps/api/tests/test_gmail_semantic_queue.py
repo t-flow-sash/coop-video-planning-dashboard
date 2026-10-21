@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 from test_gmail_semantic_delta import OWN, Client, sample, setup
 
@@ -19,30 +19,14 @@ from app.models import (
     SemanticQueueCursor,
     SourceRecordRevision,
 )
-from app.test_safety import assert_safe_test_connection, assert_safe_test_engine
-
-pytestmark = pytest.mark.isolated_db
-URL = "postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_semqueue_test"
 
 
 @pytest.fixture
-def queue_engine():
-    engine = create_engine(URL)
-    assert_safe_test_engine(engine, URL, "test")
-    with engine.begin() as conn:
-        assert_safe_test_connection(conn, URL, "test")
-        conn.execute(
-            text(
-                "TRUNCATE semantic_queue_cursor, semantic_message_state, semantic_track_route, "
-                "source_record_observation, ingestion_item, source_record_revision, source_record, "
-                "ingestion_checkpoint, reviewed_domain_item, reviewed_domain_evidence, "
-                "reviewed_domain_track, reviewed_domain_batch, coop_import_state, "
-                "manual_import_batch, audit_event, ingestion_run, ingestion_source, "
-                "coop_contact, coop, contact, organization RESTART IDENTITY CASCADE"
-            )
-        )
-    yield engine
-    engine.dispose()
+def queue_engine(test_engine: Engine):
+    # The common fixture checks the disposable database identity and truncates
+    # the complete schema. A second hard-coded localhost database is unnecessary
+    # and does not exist on the CI PostgreSQL service.
+    yield test_engine
 
 
 def test_checkpoint_independent_bounded_and_replay(queue_engine):
