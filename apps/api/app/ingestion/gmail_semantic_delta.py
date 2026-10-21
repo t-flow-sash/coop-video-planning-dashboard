@@ -32,6 +32,8 @@ from app.ingestion.gmail_semantic import (
 from app.models import (
     Coop,
     IngestionSource,
+    ReviewedDomainBatch,
+    ReviewedDomainItem,
     ReviewedDomainTrack,
     SemanticMessageState,
     SemanticTrackRoute,
@@ -382,16 +384,7 @@ def process_revision(
             select(Coop).where(Coop.record_key == route.record_key).with_for_update()
         )
         if link:
-            if (
-                target is None
-                or link.coop_id != target.id
-                or target.is_synthetic_seed
-                or any(
-                    getattr(target, key, None) != value
-                    for key, value in link.field_baselines.items()
-                    if key in fields
-                )
-            ):
+            if target is None or link.coop_id != target.id or target.is_synthetic_seed:
                 _save(session, revision, "REVIEW", "linked_target_changed", citations)
                 return "REVIEW"
             action, track_revision = "UPDATE", link.track_revision + 1
@@ -434,13 +427,14 @@ def process_revision(
             "evidence": evidence,
             "fields": fields,
         }
-        if action == "UPDATE" and link is None and target is not None:
+        if (
+            action == "UPDATE"
+            and target is not None
+            and (link is None or any(key not in link.field_baselines for key in fields))
+        ):
             manifest_item["expected_version"] = target.version
             manifest_item["expected_fields"] = {
-                k: getattr(target, k)
-                if k != "deadline" or getattr(target, k) is None
-                else getattr(target, k).isoformat()
-                for k in fields
+                key: _encoded_value(getattr(target, key)) for key in fields
             }
         manifest_item["decision_hash"] = canonical_hash(manifest_item)
         manifest: dict[str, object] = {
@@ -455,6 +449,22 @@ def process_revision(
         except ReviewError:
             _save(session, revision, "REVIEW", "domain_conflict", citations)
             return "REVIEW"
+        reviewed_batch = session.scalar(
+            select(ReviewedDomainBatch).where(
+                ReviewedDomainBatch.manifest_hash == result["manifest_hash"]
+            )
+        )
+        if reviewed_batch is None:
+            raise RuntimeError("reviewed batch missing after materialization")
+        reviewed_item = session.get(ReviewedDomainItem, (reviewed_batch.id, route.track_key))
+        if reviewed_item is None:
+            raise RuntimeError("reviewed item missing after materialization")
+        conflicts = reviewed_item.conflict_fields
+        applied_fields = {
+            key: _encoded_value(value) for key, value in fields.items() if key not in conflicts
+        }
+        # The writer records conflict-only outcomes without mutating business fields.
+        # Expose that disposition to the queue; do not mark a failed field applied.
         outcome = (
             "CREATED" if result["created"] else "UPDATED" if result["updated"] else "UNCHANGED"
         )
@@ -477,9 +487,8 @@ def process_revision(
                         str(route.expected_coop_id) if route.expected_coop_id else None
                     ),
                 },
-                "applied_fields": {
-                    k: v.isoformat() if isinstance(v, date) else v for k, v in fields.items()
-                },
+                "conflict_fields": conflicts,
+                "applied_fields": applied_fields,
             },
         )
         return outcome

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -17,6 +17,7 @@ from app.models import (
     Coop,
     IngestionCheckpoint,
     IngestionSource,
+    ReviewedDomainItem,
     ReviewedDomainTrack,
     SemanticMessageState,
     SemanticTrackRoute,
@@ -315,6 +316,93 @@ def test_existing_exact_link_update_and_replay(test_engine: Engine) -> None:
         linked = session.scalar(select(ReviewedDomainTrack))
         assert linked is not None and linked.coop_id == coop.id
         assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+
+
+def test_local_fee_conflict_does_not_block_new_deadline(test_engine: Engine) -> None:
+    source, first_revision = setup(test_engine, existing=True)
+    first = Client(sample())
+    assert process_revision(test_engine, source, first_revision, first, OWN) == "UPDATED"
+    with Session(test_engine) as session, session.begin():
+        coop = session.scalar(select(Coop))
+        assert coop is not None
+        coop.fee_amount_minor = 62000  # independent local negotiation
+        session.flush()
+        old_audit_count = session.scalar(select(func.count()).select_from(AuditEvent))
+        assert old_audit_count == 1
+        observed = session.get(SourceRecordRevision, first_revision)
+        assert observed is not None
+        # Both modified full messages must have matching collected metadata revisions.
+        original_offer = session.scalar(
+            select(SourceRecordRevision).where(
+                SourceRecordRevision.source_id == source,
+                SourceRecordRevision.source_record_id != observed.source_record_id,
+            )
+        )
+        assert original_offer is not None
+        session.add(
+            SourceRecordRevision(
+                source_id=source,
+                source_record_id=original_offer.source_record_id,
+                content_hash="e" * 64,
+                metadata_json=dict(original_offer.metadata_json),
+                observed_at=observed.observed_at + timedelta(seconds=1),
+            )
+        )
+        new_revision = SourceRecordRevision(
+            source_id=source,
+            source_record_id=observed.source_record_id,
+            content_hash="d" * 64,
+            metadata_json=dict(observed.metadata_json),
+            observed_at=observed.observed_at + timedelta(seconds=1),
+        )
+        session.add(new_revision)
+        session.flush()
+        new_revision_id = new_revision.id
+    second = Client(
+        [
+            message("offer-1", "Collaboration offer: fee 500 EUR, deadline 2026-12-01", 100, OTHER),
+            message("accept-1", "We accept fee 500 EUR and deadline 2026-12-01", 200, OWN),
+        ]
+    )
+    assert process_revision(test_engine, source, new_revision_id, second, OWN) == "UPDATED"
+    with Session(test_engine) as session:
+        coop = session.scalar(select(Coop))
+        link = session.get(ReviewedDomainTrack, "exact-track")
+        state = session.get(SemanticMessageState, new_revision_id)
+        assert coop is not None and link is not None and state is not None
+        assert coop.fee_amount_minor == 62000
+        assert coop.deadline == date(2026, 12, 1)
+        assert link.field_baselines["fee_amount_minor"] == 50000
+        assert link.field_baselines["deadline"] == "2026-12-01"
+        item = session.get(ReviewedDomainItem, (link.batch_id, link.track_key))
+        assert item is not None and item.outcome == "CONFLICT"
+        assert "fee_amount_minor" in item.conflict_fields
+        assert state.outcome == "UPDATED"
+        assert state.provenance["conflict_fields"] == ["fee_amount_minor"]
+        assert state.provenance["applied_fields"]["deadline"] == "2026-12-01"
+        assert "fee_amount_minor" not in state.provenance["applied_fields"]
+        assert state.provenance["deadline"][0]["revision_id"] in {
+            str(new_revision_id),
+            str(
+                session.scalar(
+                    select(SourceRecordRevision.id).where(
+                        SourceRecordRevision.source_id == source,
+                        SourceRecordRevision.source_record_id
+                        != session.get(SourceRecordRevision, new_revision_id).source_record_id,
+                        SourceRecordRevision.content_hash == "e" * 64,
+                    )
+                )
+            ),
+        }
+        audit = session.scalars(select(AuditEvent).order_by(AuditEvent.created_at)).all()
+        assert len(audit) == 2
+        assert audit[-1].changes["deadline"]["new"] == "2026-12-01"
+        assert "fee_amount_minor" not in audit[-1].changes
+        assert "fee_amount_minor" in audit[-1].reason
+    assert process_revision(test_engine, source, new_revision_id, second, OWN) == "UNCHANGED"
+    with Session(test_engine) as session:
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 2
+        assert session.scalar(select(Coop)).fee_amount_minor == 62000
 
 
 def test_retry_after_fetch_failure_and_review_ambiguous(test_engine: Engine) -> None:

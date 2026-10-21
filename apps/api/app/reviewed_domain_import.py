@@ -103,7 +103,11 @@ class Decision(BaseModel):
         else:
             raise ValueError("UUID-shaped record_key is reserved")
         if set(self.fields) - FIELDS or (
-            self.expected_fields is not None and set(self.expected_fields) != set(self.fields)
+            self.expected_fields is not None
+            and (
+                set(self.expected_fields) - set(self.fields)
+                or (self.track_revision == 1 and set(self.expected_fields) != set(self.fields))
+            )
         ):
             raise ValueError("unknown fields or incomplete expected_fields")
         if self.action == "CREATE" and (
@@ -399,11 +403,13 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
                     if previous_item is None:
                         raise ReviewError("stored review item missing")
                     rebase_fields = set(previous_item.conflict_fields)
+                    baselines = dict(link.field_baselines)
                     if decision.expected_fields is not None:
+                        new_fields = set(values) - set(baselines)
                         if (
-                            not rebase_fields
+                            not (rebase_fields or new_fields)
                             or decision.expected_version != coop.version
-                            or not rebase_fields <= decision.expected_fields.keys()
+                            or not new_fields <= decision.expected_fields.keys()
                         ):
                             raise ReviewError("conflict rebase version or fields mismatch")
                         expected = _validated_fields(decision.expected_fields)
@@ -414,7 +420,6 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
                             raise ReviewError("conflict rebase snapshot mismatch")
                     elif decision.expected_version is not None:
                         raise ReviewError("rebase requires exact field snapshot")
-                    baselines = dict(link.field_baselines)
                 changes = {}
                 # A later revision does not dismiss conflicts simply by omitting
                 # their fields (or by coincidentally matching a stale baseline).
@@ -428,7 +433,7 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
                         and (
                             link is None
                             or decision.expected_fields is None
-                            or key not in rebase_fields
+                            or key not in decision.expected_fields
                         )
                     ) or (
                         current != baselines.get(key)
