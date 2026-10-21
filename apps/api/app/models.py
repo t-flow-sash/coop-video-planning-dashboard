@@ -390,6 +390,71 @@ class SourceRecordObservation(Base):
     )
 
 
+class ReviewedDomainBatch(Base):
+    __tablename__ = "reviewed_domain_batch"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    manifest_id: Mapped[str] = mapped_column(String(160))
+    manifest_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    summary: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReviewedDomainTrack(Base):
+    __tablename__ = "reviewed_domain_track"
+    __table_args__ = (CheckConstraint("track_revision >= 1", name="ck_reviewed_track_revision"),)
+
+    track_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    coop_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("coop.id", ondelete="RESTRICT"), unique=True
+    )
+    track_revision: Mapped[int] = mapped_column(Integer)
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    field_baselines: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reviewed_domain_batch.id"))
+
+
+class ReviewedDomainEvidence(Base):
+    __tablename__ = "reviewed_domain_evidence"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_id", "source_record_id"], ["source_record.source_id", "source_record.id"]
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "revision_id"],
+            ["source_record_revision.source_id", "source_record_revision.id"],
+        ),
+        ForeignKeyConstraint(
+            ["source_record_id", "revision_id"],
+            ["source_record_revision.source_record_id", "source_record_revision.id"],
+            name="fk_reviewed_evidence_exact_revision",
+        ),
+    )
+
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reviewed_domain_batch.id"), primary_key=True
+    )
+    track_key: Mapped[str] = mapped_column(
+        ForeignKey("reviewed_domain_track.track_key"), primary_key=True
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    source_record_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    revision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+
+
+class ReviewedDomainItem(Base):
+    __tablename__ = "reviewed_domain_item"
+
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reviewed_domain_batch.id"), primary_key=True
+    )
+    track_key: Mapped[str] = mapped_column(
+        ForeignKey("reviewed_domain_track.track_key"), primary_key=True
+    )
+    outcome: Mapped[str] = mapped_column(String(20))
+    conflict_fields: Mapped[list[str]] = mapped_column(JSONB)
+
+
 class ManualImportBatch(Base):
     __tablename__ = "manual_import_batch"
     __table_args__ = (

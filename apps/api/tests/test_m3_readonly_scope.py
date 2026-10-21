@@ -134,6 +134,8 @@ def _python_ingestion_mutation_surfaces(path: Path, root: Path) -> list[str]:
     if relative in {
         "apps/api/app/ingestion/gmail.py",
         "apps/api/app/manual_coop_import.py",
+        # Separate CLI-only reviewed business path; never an ingestion runtime entry point.
+        "apps/api/app/reviewed_domain_import.py",
     }:
         return []
     source = path.read_text(encoding="utf-8")
