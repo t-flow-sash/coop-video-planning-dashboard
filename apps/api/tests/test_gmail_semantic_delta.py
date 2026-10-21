@@ -6,9 +6,10 @@ from datetime import date
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, create_engine, func, select
 from sqlalchemy.orm import Session
 
+from app import database_access, semantic_database_access
 from app.ingestion.gmail_semantic import ParsedMessage
 from app.ingestion.gmail_semantic_delta import process_revision
 from app.models import (
@@ -124,6 +125,58 @@ def sample() -> list[ParsedMessage]:
         message("offer-1", "Collaboration offer: fee 500 EUR", 100, OTHER),
         message("accept-1", "We accept fee 500 EUR", 200, OWN),
     ]
+
+
+def test_constrained_writer_create_update_and_replay(test_engine: Engine) -> None:
+    """Exercise the actual least-privilege login, not the fixture's admin role."""
+    admin = test_engine.url.render_as_string(hide_password=False)
+    restricted = (
+        "postgresql+psycopg://coop_semantic_writer:semantic-test-only@127.0.0.1:5432/coop_test"
+    )
+    collector = (
+        "postgresql+psycopg://coop_evidence_collector:collector-test-only@127.0.0.1:5432/coop_test"
+    )
+    semantic_database_access.provision(admin, restricted, collector)
+    database_access.reconcile_collector_access(admin)
+    semantic_database_access.reconcile(admin)
+    writer = create_engine(restricted)
+    try:
+        source, revision = setup(test_engine)
+        client = Client(sample())
+        assert process_revision(writer, source, revision, client, OWN) == "CREATED"
+        assert process_revision(writer, source, revision, client, OWN) == "UNCHANGED"
+        with Session(test_engine) as session:
+            assert session.scalar(select(func.count()).select_from(Coop)) == 1
+            assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+        # The DB fixture resets the case; the second test invocation below covers
+        # adoption/update under the same restricted login in a fresh transaction.
+    finally:
+        writer.dispose()
+
+
+def test_constrained_writer_existing_update_and_replay(test_engine: Engine) -> None:
+    admin = test_engine.url.render_as_string(hide_password=False)
+    restricted = (
+        "postgresql+psycopg://coop_semantic_writer:semantic-test-only@127.0.0.1:5432/coop_test"
+    )
+    collector = (
+        "postgresql+psycopg://coop_evidence_collector:collector-test-only@127.0.0.1:5432/coop_test"
+    )
+    semantic_database_access.provision(admin, restricted, collector)
+    database_access.reconcile_collector_access(admin)
+    semantic_database_access.reconcile(admin)
+    writer = create_engine(restricted)
+    try:
+        source, revision = setup(test_engine, existing=True)
+        client = Client(sample())
+        assert process_revision(writer, source, revision, client, OWN) == "UPDATED"
+        assert process_revision(writer, source, revision, client, OWN) == "UNCHANGED"
+        with Session(test_engine) as session:
+            coop = session.scalar(select(Coop))
+            assert coop is not None and coop.fee_amount_minor == 50000
+            assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+    finally:
+        writer.dispose()
 
 
 def test_create_after_collector_cursor_and_replay(test_engine: Engine) -> None:
