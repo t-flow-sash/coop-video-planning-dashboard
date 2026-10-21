@@ -149,6 +149,81 @@ def test_conditional_or_negated_terms_never_auto_accept():
         assert result.status.verdict == Verdict.REVIEW
 
 
+@pytest.mark.parametrize(
+    "reply_text",
+    [
+        "We agree to meet. We propose fee 500 EUR",
+        "We agree to meet; we propose fee 500 EUR",
+        "We agree to meet, but propose fee 500 EUR",
+        "We agree to a meeting. Fee 500 EUR",
+        "We accept the collaboration. Fee 500 EUR",
+        "We accept fee 500 EUR if the project goes ahead",
+        "We accept fee 500 EUR subject to approval",
+    ],
+)
+def test_unrelated_conditional_or_counteroffer_fee_never_confirms(reply_text):
+    offer = parse_message(msg("m1", "Offer fee 500 EUR"))
+    reply = parse_message(msg("m2", reply_text, sender="me@example.net", when=2000))
+    result = decide([offer, reply], own_address="me@example.net", existing_track=True)
+    assert result.fee.verdict == Verdict.REVIEW
+    assert result.status.verdict == Verdict.REVIEW
+
+
+@pytest.mark.parametrize(
+    "reply_text",
+    [
+        "We agree to meet. We propose deadline 2026-11-30",
+        "We agree to a meeting; deadline 2026-11-30",
+        "We accept deadline 2026-11-30 if approved",
+    ],
+)
+def test_unrelated_or_conditional_deadline_never_confirms(reply_text):
+    offer = parse_message(msg("m1", "Offer deadline 2026-11-30"))
+    reply = parse_message(msg("m2", reply_text, sender="me@example.net", when=2000))
+    result = decide([offer, reply], own_address="me@example.net", existing_track=True)
+    assert result.deadline.verdict == Verdict.REVIEW
+    assert result.status.verdict == Verdict.REVIEW
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "No collaboration possible",
+        "We decline the collaboration",
+        "We cannot do a collaboration",
+        "Keine Zusammenarbeit möglich",
+        "Wir lehnen die Zusammenarbeit ab",
+    ],
+)
+def test_declined_or_negated_inbound_lead_requires_review(text):
+    result = decide(
+        [parse_message(msg("m1", text))], own_address="me@example.net", existing_track=False
+    )
+    assert result.lead.verdict == Verdict.REVIEW
+
+
+def test_explicit_term_acceptance_after_unrelated_sentence_retains_evidence():
+    offer = parse_message(msg("m1", "Offer fee 500 EUR"))
+    reply = parse_message(
+        msg("m2", "We agree to meet. We accept fee 500 EUR.", sender="me@example.net", when=2000)
+    )
+    result = decide([offer, reply], own_address="me@example.net", existing_track=True)
+    assert result.fee.verdict == Verdict.ACCEPT
+    assert result.fee.value["fee_amount_minor"] == 50000
+    assert len(result.fee.evidence) == 2
+    assert result.status.verdict == Verdict.ACCEPT
+
+
+def test_dotted_german_deadline_preserves_explicit_acceptance():
+    offer = parse_message(msg("m1", "Angebot frist 30.11.2026"))
+    reply = parse_message(
+        msg("m2", "Einverstanden frist 30.11.2026", sender="me@example.net", when=2000)
+    )
+    result = decide([offer, reply], own_address="me@example.net", existing_track=True)
+    assert result.deadline.verdict == Verdict.ACCEPT
+    assert result.deadline.value == "2026-11-30"
+
+
 def test_attachment_and_sender_spoofing_do_not_auto_accept():
     offer = parse_message(msg("m1", "Offer fee 500 EUR"))
     reply_raw = msg("m2", "We accept fee 500 EUR", sender="me@example.net", when=2000)

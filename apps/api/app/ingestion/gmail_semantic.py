@@ -291,9 +291,25 @@ PROPOSAL = re.compile(
 )
 INVOICE = re.compile(r"\b(?:invoice|rechnung|paid|bezahlt|überwiesen)\b", re.I)
 QUALIFIER = re.compile(
-    r"\b(?:not|never|if|unless|pending|subject to|nicht|kein|unter vorbehalt|falls)\b|\?",
+    r"\b(?:no|not|never|cannot|can't|if|unless|pending|subject to|"
+    r"nicht|kein\w*|unter vorbehalt|falls|wenn|sofern)\b|\?",
     re.I,
 )
+DECLINE = re.compile(
+    r"\b(?:declin\w*|reject\w*|refus\w*|lehnen\b|abgelehnt|absagen|"
+    r"ablehnen|nicht möglich|unmöglich)\b",
+    re.I,
+)
+# An acceptance only licenses the assertion it governs, not an unrelated sentence
+# or a new proposal. Multiple explicit terms may follow the same acceptance.
+ACCEPTED_TERMS = re.compile(
+    r"^\s*(?:we accept|we agree(?: to)?|confirmed|agreed|einverstanden|bestätigen wir)"
+    r"\s*[:;,]?\s*(?:(?:fee|budget|honorar|vergütung|deadline|due by|until|frist|"
+    r"spätestens bis)\s*[:=]?\s*(?:EUR\s*)?(?:\d[\d.,-]*)(?:\s*(?:EUR|€))?"
+    r"\s*(?:[,;]|\band\b|\bund\b)?\s*)*$",
+    re.I,
+)
+SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\n+")
 DATE = re.compile(
     r"\b(?:deadline|due by|until|frist|spätestens bis)\s*[:=]?\s*"
     r"(\d{4}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}\.\d{4})\b",
@@ -318,27 +334,28 @@ def _evidence(message: ParsedMessage, assertion: str) -> EvidenceRef:
 
 def _terms(
     message: ParsedMessage, pattern: re.Pattern[str], kind: str
-) -> list[tuple[Any, EvidenceRef]]:
+) -> list[tuple[Any, EvidenceRef, str]]:
     result = []
-    for match in pattern.finditer(message.text):
-        raw = match.group(1)
-        try:
-            value: str | int
-            if kind == "date":
-                parsed_date = (
-                    date.fromisoformat(raw)
-                    if "-" in raw
-                    else date(*reversed([int(x) for x in raw.split(".")]))
-                )
-                value = parsed_date.isoformat()
-            else:
-                if "," in raw and "." in raw:
-                    raise ValueError("ambiguous currency")
-                whole, _, cents = raw.replace(",", ".").partition(".")
-                value = int(whole) * 100 + int(cents or "00")
-            result.append((value, _evidence(message, match.group(0))))
-        except ValueError:
-            raise SemanticInputError("term_invalid") from None
+    for sentence in SENTENCE_BREAK.split(message.text):
+        for match in pattern.finditer(sentence):
+            raw = match.group(1)
+            try:
+                value: str | int
+                if kind == "date":
+                    parsed_date = (
+                        date.fromisoformat(raw)
+                        if "-" in raw
+                        else date(*reversed([int(x) for x in raw.split(".")]))
+                    )
+                    value = parsed_date.isoformat()
+                else:
+                    if "," in raw and "." in raw:
+                        raise ValueError("ambiguous currency")
+                    whole, _, cents = raw.replace(",", ".").partition(".")
+                    value = int(whole) * 100 + int(cents or "00")
+                result.append((value, _evidence(message, match.group(0)), sentence))
+            except ValueError:
+                raise SemanticInputError("term_invalid") from None
     return result
 
 
@@ -352,17 +369,20 @@ def _decide_term(
         terms = _terms(msg, pattern, kind)
         sender = parseaddr(msg.sender)[1].casefold()
         role = "own" if sender == own_address.casefold() else "other"
-        for value, ev in terms:
+        for value, ev, sentence in terms:
             if (
                 INVOICE.search(msg.text)
                 or QUALIFIER.search(msg.text)
+                or DECLINE.search(msg.text)
                 or "DRAFT" in msg.labels
                 or msg.has_attachments
             ):
                 uncertain.append(ev)
-            elif ACCEPT.search(msg.text):
+            elif ACCEPTED_TERMS.fullmatch(sentence.strip().rstrip(".!?")) and not PROPOSAL.search(
+                sentence
+            ):
                 accepts.append((value, ev, role, msg.internal_date, msg.thread_id))
-            elif PROPOSAL.search(msg.text) or terms:
+            else:
                 offers.append((value, ev, role, msg.internal_date, msg.thread_id))
     if not offers and not accepts and not uncertain:
         return FieldDecision(Verdict.NO_CHANGE)
@@ -412,7 +432,11 @@ def decide(
     if existing_track:
         lead = FieldDecision(Verdict.NO_CHANGE)
     elif len(lead_refs) == 1 and not any(
-        "DRAFT" in m.labels or m.has_attachments or QUALIFIER.search(m.text) for m in inbound
+        "DRAFT" in m.labels
+        or m.has_attachments
+        or QUALIFIER.search(m.text)
+        or DECLINE.search(m.text)
+        for m in inbound
     ):
         lead = FieldDecision(Verdict.ACCEPT, {"status": "NEW"}, lead_refs)
     elif lead_refs or inbound:
