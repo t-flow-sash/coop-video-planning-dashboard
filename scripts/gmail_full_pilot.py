@@ -1535,7 +1535,7 @@ def _validate_network_policies(resource: dict[str, object]) -> None:
         "allow-postgres-clients": "da383ce29049fe380c6c239e6f6b4eb0e0bc0d4cb8f72cae69d57bbe14f80537",
         "allow-postgres-egress": "7329f813cc9b6102c8b486e92fdf374b6d2ae5484b2e10688891229ffa6d055e",
         "gmail-import-egress": "558cb9e82cff8c7e8a074f5dcf091d5063a5730625abb11d3eef86fcb0b3a209",
-        "gmail-egress-proxy": "c546626be66b018461f8761c159f4ac0b1a1cd4fc5556adc0458d50ce4f64b26",
+        "gmail-egress-proxy": "5bdaf21ae15db65f6cd44b624f54e372b7c5dcf3aabe4cf07e703e8cc1a433fc",
     }
     actual: dict[str, str] = {}
     for raw in _list(resource.get("items"), "network_policy_contract_invalid"):

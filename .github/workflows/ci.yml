@@ -151,7 +151,7 @@ jobs:
             | sha256sum --check --strict
           tar -xzf /tmp/kubeconform.tar.gz kubeconform
           schema_catalog='https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
-          for dir in infrastructure/storage infrastructure/database infrastructure/migration infrastructure/import infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
+          for dir in infrastructure/storage infrastructure/database infrastructure/migration infrastructure/import infrastructure/semantic infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
             output="/tmp/$(echo "$dir" | tr / -).yaml"
             # Flux removes top-level SOPS metadata before apply. Strip only that
             # metadata block here; encrypted Secret values remain schema-checked.
@@ -161,7 +161,7 @@ jobs:
               !skip { print }
             ' > "$output"
             uv run --with pyyaml==6.0.3 -- python3 scripts/validate-rendered-images.py < "$output"
-            if [[ "$dir" != infrastructure/import ]] && grep -Eq 'git-0{12}|sha256:0{64}' "$output"; then
+            if [[ "$dir" != infrastructure/import && "$dir" != infrastructure/semantic ]] && grep -Eq 'git-0{12}|sha256:0{64}' "$output"; then
               echo "Unpromoted image sentinel remains in deployable render: $dir" >&2
               exit 1
             fi
@@ -173,6 +173,21 @@ jobs:
           docs = [doc for doc in yaml.safe_load_all(open(sys.argv[1])) if doc]
           jobs = [doc for doc in docs if doc.get("kind") == "CronJob"]
           assert len(jobs) == 3 and all(job["spec"].get("suspend") is True for job in jobs)
+          ' "$output"
+            fi
+            if [[ "$dir" == infrastructure/semantic ]] && grep -Eq 'git-0{12}|sha256:0{64}' "$output"; then
+              # The semantic worker slice may retain its fail-closed sentinel only
+              # while its single scheduler is suspended and unarmed. A promoted
+              # image must never share the render with a sentinel-pinned sibling.
+              uv run --with pyyaml==6.0.3 -- python3 -c '
+          import sys, yaml
+          docs = [doc for doc in yaml.safe_load_all(open(sys.argv[1])) if doc]
+          jobs = [doc for doc in docs if doc.get("kind") == "CronJob"]
+          assert len(jobs) == 1 and all(job["spec"].get("suspend") is True for job in jobs)
+          containers = jobs[0]["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"]
+          assert len(containers) == 1
+          env = {item["name"]: item.get("value") for item in containers[0]["env"]}
+          assert env.get("SEMANTIC_WORKER_ARMED") == "false", env.get("SEMANTIC_WORKER_ARMED")
           ' "$output"
             fi
             ./kubeconform -strict -summary -skip CustomResourceDefinition \

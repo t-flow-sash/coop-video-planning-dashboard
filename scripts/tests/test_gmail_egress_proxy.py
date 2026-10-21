@@ -83,10 +83,25 @@ class GmailEgressProxyContractTests(unittest.TestCase):
         self.assertIn("Ingress", proxy["spec"]["policyTypes"])
         self.assertIn("Egress", proxy["spec"]["policyTypes"])
         ingress = proxy["spec"]["ingress"][0]
+        # The proxy admits exactly two dedicated workloads: the metadata/delta
+        # importer and the dormant semantic worker. Any additional peer is a
+        # widening of the controlled egress boundary and must fail here.
         self.assertEqual(
             ingress["from"],
-            [{"podSelector": {"matchLabels": {"coop.example.com/gmail-import": "true"}}}],
+            [
+                {
+                    "podSelector": {
+                        "matchLabels": {"coop.example.com/gmail-import": "true"}
+                    }
+                },
+                {
+                    "podSelector": {
+                        "matchLabels": {"coop.example.com/semantic-worker": "true"}
+                    }
+                },
+            ],
         )
+        self.assertEqual(ingress["ports"], [{"protocol": "TCP", "port": 10000}])
         public_443 = next(
             rule
             for rule in proxy["spec"]["egress"]
