@@ -8,9 +8,11 @@ exact metadata revision citations and sanitized decision outcomes.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
+from datetime import date
 from typing import Protocol
 from uuid import UUID
 
@@ -42,6 +44,102 @@ class FullFetcher(Protocol):
     def thread_inventory(self, thread_id: str) -> dict[str, tuple[int, tuple[str, ...]]]: ...
 
     def fetch(self, message_id: str) -> ParsedMessage: ...
+
+
+def _message_fingerprint(message: ParsedMessage) -> str:
+    """Transient full-text attestation, never persist MIME or plaintext."""
+    payload = [
+        message.message_id,
+        message.thread_id,
+        message.internal_date,
+        message.sender,
+        message.recipient,
+        message.subject,
+        message.text,
+        message.labels,
+        message.has_attachments,
+    ]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _current_pairs(
+    session: Session, source_id: UUID, thread_id: str
+) -> list[tuple[SourceRecord, SourceRecordRevision]]:
+    records = session.scalars(
+        select(SourceRecord).where(
+            SourceRecord.source_id == source_id, SourceRecord.record_type == "GMAIL_MESSAGE"
+        )
+    ).all()
+    pairs: list[tuple[SourceRecord, SourceRecordRevision]] = []
+    for candidate in records:
+        observed = session.scalar(
+            select(SourceRecordRevision)
+            .where(
+                SourceRecordRevision.source_record_id == candidate.id,
+                SourceRecordRevision.source_id == source_id,
+            )
+            .order_by(SourceRecordRevision.observed_at.desc(), SourceRecordRevision.id.desc())
+            .limit(1)
+        )
+        if observed and observed.metadata_json.get("thread_id") == thread_id:
+            pairs.append((candidate, observed))
+    return pairs
+
+
+def _attest_thread(
+    client: FullFetcher,
+    thread_id: str,
+    pairs: list[tuple[SourceRecord, SourceRecordRevision]],
+) -> tuple[str | None, dict[str, str]]:
+    if not pairs or len(pairs) > 100:
+        return "thread_incomplete_or_changed", {}
+    inventory: dict[str, tuple[int, tuple[str, ...]]] = {}
+    try:
+        inventory = client.thread_inventory(thread_id)
+        complete = set(inventory) == {record.external_id for record, _ in pairs} and all(
+            inventory[record.external_id]
+            == (
+                int(observed.metadata_json["internal_date"]),
+                tuple(sorted(observed.metadata_json["label_ids"])),
+            )
+            for record, observed in pairs
+        )
+    except (KeyError, TypeError, ValueError):
+        complete = False
+    except Exception:
+        return "thread_inventory_unavailable", {}
+    if not complete:
+        return "thread_incomplete_or_changed", {}
+    fingerprints: dict[str, str] = {}
+    try:
+        for record, observed in pairs:
+            msg = client.fetch(record.external_id)
+            meta = observed.metadata_json
+            if (
+                msg.message_id != record.external_id
+                or msg.thread_id != thread_id
+                or str(msg.internal_date) != str(meta.get("internal_date"))
+                or sorted(msg.labels) != sorted(meta.get("label_ids", []))
+            ):
+                return "full_message_mismatch", {}
+            fingerprints[record.external_id] = _message_fingerprint(msg)
+    except Exception:
+        return "full_message_unavailable", {}
+    try:
+        if client.thread_inventory(thread_id) != inventory:
+            return "thread_incomplete_or_changed", {}
+    except Exception:
+        return "thread_inventory_unavailable", {}
+    return None, fingerprints
+
+
+def _encoded_value(value: object) -> object:
+    return value.isoformat() if isinstance(value, date) else value
+
+
+def _followup(state: SemanticMessageState, reason: str) -> str:
+    state.provenance = {**state.provenance, "followup": {"reason_code": reason}}
+    return "REVIEW"
 
 
 def _save(
@@ -86,30 +184,55 @@ def process_revision(
             return "REVIEW"
         state = session.get(SemanticMessageState, revision_id)
         if state is not None and state.outcome in {"CREATED", "UPDATED", "UNCHANGED"}:
-            # Replay must not hide a locally changed target.
-            route_record = session.get(SourceRecord, revision.source_record_id)
-            if route_record is not None:
-                thread = revision.metadata_json.get("thread_id")
-                route = session.scalar(
-                    select(SemanticTrackRoute)
-                    .join(SourceRecord, SemanticTrackRoute.thread_record_id == SourceRecord.id)
-                    .where(
-                        SemanticTrackRoute.source_id == source_id,
-                        SourceRecord.external_id == thread,
+            # A successful decision is historical; replay concerns go in followup.
+            thread_id = revision.metadata_json.get("thread_id")
+            thread = (
+                session.scalar(
+                    select(SourceRecord).where(
+                        SourceRecord.source_id == source_id,
+                        SourceRecord.record_type == "GMAIL_THREAD",
+                        SourceRecord.external_id == thread_id,
                     )
                 )
-                if route:
-                    linked = session.get(ReviewedDomainTrack, route.track_key)
-                    coop = session.get(Coop, linked.coop_id) if linked and linked.coop_id else None
-                    if (
-                        coop is None
-                        or coop.record_key != route.record_key
-                        or any(
-                            getattr(coop, key, None) != value
-                            for key, value in state.provenance.get("applied_fields", {}).items()
-                        )
-                    ):
-                        return "REVIEW"
+                if isinstance(thread_id, str)
+                else None
+            )
+            route = session.get(SemanticTrackRoute, thread.id) if thread else None
+            if route is None or route.source_id != source_id:
+                return _followup(state, "exact_route_missing")
+            expected_route = state.provenance.get("route")
+            actual_route = {
+                "thread_record_id": str(route.thread_record_id),
+                "track_key": route.track_key,
+                "record_key": route.record_key,
+                "expected_coop_id": str(route.expected_coop_id) if route.expected_coop_id else None,
+            }
+            if expected_route != actual_route:
+                return _followup(state, "route_or_target_changed")
+            link = session.get(ReviewedDomainTrack, route.track_key)
+            coop = session.get(Coop, link.coop_id) if link and link.coop_id else None
+            if (
+                coop is None
+                or coop.record_key != route.record_key
+                or (route.expected_coop_id is not None and route.expected_coop_id != coop.id)
+                or any(
+                    _encoded_value(getattr(coop, key, None)) != value
+                    for key, value in state.provenance.get("applied_fields", {}).items()
+                )
+            ):
+                return _followup(state, "linked_target_changed")
+            if not isinstance(thread_id, str):
+                return _followup(state, "revision_identity_invalid")
+            replay_pairs = _current_pairs(session, source_id, thread_id)
+            if revision not in [observed for _, observed in replay_pairs]:
+                return _followup(state, "thread_incomplete_or_changed")
+            reason, fingerprints = _attest_thread(client, thread_id, replay_pairs)
+            if reason is None and fingerprints != state.provenance.get("message_fingerprints"):
+                reason = "full_message_changed"
+            if reason:
+                return _followup(state, reason)
+            if "followup" in state.provenance:
+                state.provenance = {k: v for k, v in state.provenance.items() if k != "followup"}
             return "UNCHANGED"
         record = session.get(SourceRecord, revision.source_record_id)
         metadata = revision.metadata_json
@@ -339,18 +462,19 @@ def process_revision(
             {
                 **citations,
                 "manifest_hash": result["manifest_hash"],
+                "message_fingerprints": {
+                    msg.message_id: _message_fingerprint(msg) for msg in messages
+                },
+                "route": {
+                    "thread_record_id": str(route.thread_record_id),
+                    "track_key": route.track_key,
+                    "record_key": route.record_key,
+                    "expected_coop_id": (
+                        str(route.expected_coop_id) if route.expected_coop_id else None
+                    ),
+                },
                 "applied_fields": {
-                    k: v
-                    for k, v in fields.items()
-                    if k
-                    in {
-                        "status",
-                        "fee_amount_minor",
-                        "fee_currency",
-                        "fee_status",
-                        "priority",
-                        "title",
-                    }
+                    k: v.isoformat() if isinstance(v, date) else v for k, v in fields.items()
                 },
             },
         )

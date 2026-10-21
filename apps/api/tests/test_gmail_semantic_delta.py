@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from uuid import UUID, uuid4
 
 from sqlalchemy import Engine, func, select
@@ -125,7 +126,8 @@ def test_create_after_collector_cursor_and_replay(test_engine: Engine) -> None:
     client = Client(sample())
     assert process_revision(test_engine, source, revision, client, OWN) == "CREATED"
     assert process_revision(test_engine, source, revision, client, OWN) == "UNCHANGED"
-    assert client.calls == 2
+    assert client.calls == 4
+    assert client.inventory_calls == 4
     with Session(test_engine) as session:
         coop = session.scalar(select(Coop))
         assert coop is not None and coop.fee_amount_minor == 50000 and coop.status == "CONFIRMED"
@@ -136,6 +138,78 @@ def test_create_after_collector_cursor_and_replay(test_engine: Engine) -> None:
         assert state is not None and state.outcome == "CREATED"
         assert state.provenance["fee"][0]["assertion_sha256"]
         assert "Offer fee" not in str(state.provenance)
+
+
+def test_success_replay_missing_route_requires_review_without_erasing_success(
+    test_engine: Engine,
+) -> None:
+    source, revision = setup(test_engine)
+    client = Client(sample())
+    assert process_revision(test_engine, source, revision, client, OWN) == "CREATED"
+    with Session(test_engine) as session, session.begin():
+        session.delete(session.scalar(select(SemanticTrackRoute)))
+    assert process_revision(test_engine, source, revision, client, OWN) == "REVIEW"
+    with Session(test_engine) as session:
+        state = session.get(SemanticMessageState, revision)
+        assert state is not None and state.outcome == "CREATED"
+        assert state.provenance["followup"]["reason_code"] == "exact_route_missing"
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+
+
+def test_success_replay_retargeted_route_requires_review(test_engine: Engine) -> None:
+    source, revision = setup(test_engine, existing=True)
+    client = Client(sample())
+    assert process_revision(test_engine, source, revision, client, OWN) == "UPDATED"
+    with Session(test_engine) as session, session.begin():
+        other = Coop(
+            record_key="other", title="Other", priority="P1", status="NEW", needs_review=False
+        )
+        session.add(other)
+        session.flush()
+        route = session.scalar(select(SemanticTrackRoute))
+        assert route is not None
+        route.expected_coop_id = other.id
+    assert process_revision(test_engine, source, revision, client, OWN) == "REVIEW"
+    with Session(test_engine) as session:
+        state = session.get(SemanticMessageState, revision)
+        assert state is not None and state.outcome == "UPDATED"
+        assert state.provenance["followup"]["reason_code"] == "route_or_target_changed"
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+
+
+def test_success_replay_local_deadline_edit_requires_review(test_engine: Engine) -> None:
+    source, revision = setup(test_engine)
+    messages = [
+        message("offer-1", "Collaboration. Offer fee 500 EUR, deadline 2026-12-01", 100, OTHER),
+        message("accept-1", "We accept fee 500 EUR and deadline 2026-12-01", 200, OWN),
+    ]
+    client = Client(messages)
+    assert process_revision(test_engine, source, revision, client, OWN) == "CREATED"
+    with Session(test_engine) as session, session.begin():
+        coop = session.scalar(select(Coop))
+        assert coop is not None and coop.deadline == date(2026, 12, 1)
+        coop.deadline = date(2026, 12, 2)
+    assert process_revision(test_engine, source, revision, client, OWN) == "REVIEW"
+    with Session(test_engine) as session:
+        state = session.get(SemanticMessageState, revision)
+        assert state is not None and state.outcome == "CREATED"
+        assert state.provenance["followup"]["reason_code"] == "linked_target_changed"
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+
+
+def test_success_replay_later_cancellation_requires_review(test_engine: Engine) -> None:
+    source, revision = setup(test_engine)
+    client = Client(sample())
+    assert process_revision(test_engine, source, revision, client, OWN) == "CREATED"
+    client.messages.append(message("cancel-1", "We cancel the collaboration.", 300, OTHER))
+    assert process_revision(test_engine, source, revision, client, OWN) == "REVIEW"
+    assert client.inventory_calls == 3
+    assert client.calls == 2
+    with Session(test_engine) as session:
+        state = session.get(SemanticMessageState, revision)
+        assert state is not None and state.outcome == "CREATED"
+        assert state.provenance["followup"]["reason_code"] == "thread_incomplete_or_changed"
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
 
 
 def test_existing_exact_link_update_and_replay(test_engine: Engine) -> None:
