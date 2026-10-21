@@ -1,7 +1,8 @@
 """Bounded, explicitly invoked semantic catch-up; never run by the collector.
 
-Missing/RETRY/REVIEW states take precedence. Completed states are replayed
-round-robin to detect followups without resetting historical decisions. Only
+New pending revisions take precedence. Retry, review, follow-up and completed
+replay classes rotate fairly; completed states replay round-robin without
+resetting historical decisions. Only
 latest collected message revisions are candidates. No message content is logged.
 """
 
@@ -30,6 +31,7 @@ from app.models import (
 )
 
 MAX_BATCH = 100
+FAIR_CLASSES = ("retry", "review", "followup", "replay")
 OUTCOMES = ("CREATED", "UPDATED", "UNCHANGED", "RETRY", "REVIEW")
 
 
@@ -65,24 +67,38 @@ def _candidates(session: Session, source_id: UUID, limit: int) -> list[tuple[UUI
             latest,
         )
     )
-    # Pending/retry/review always take precedence over success replays.
-    # Rotate each class independently, so a persistent review cannot starve
-    # later review rows or newly collected revisions indefinitely.
-    priorities = (
-        ("pending", state.revision_id.is_(None)),
-        ("retry", state.outcome == "RETRY"),
-        ("review", state.outcome == "REVIEW"),
-        ("followup", state.provenance.has_key("followup")),
-    )
+    # Pending stays first. Rotate the remaining classes across invocations;
+    # independent intra-class positions alone cannot prevent REVIEW starving replay.
     chosen: list[tuple[UUID, bool, str]] = []
     cursor = session.get(SemanticQueueCursor, source_id)
     positions = cursor.positions if cursor is not None else {}
+    next_class = positions.get("_next_class")
+    start = FAIR_CLASSES.index(next_class) if next_class in FAIR_CLASSES else 0
+    priorities = (
+        ("pending", state.revision_id.is_(None)),
+        *(
+            (
+                group,
+                {
+                    "retry": state.outcome == "RETRY",
+                    "review": state.outcome == "REVIEW",
+                    "followup": state.provenance.has_key("followup"),
+                    "replay": state.outcome.in_(("CREATED", "UPDATED", "UNCHANGED")),
+                }[group],
+            )
+            for group in (*FAIR_CLASSES[start:], *FAIR_CLASSES[:start])
+        ),
+    )
     ordering = (rev.observed_at, rev.id)
     for group, predicate in priorities:
         if len(chosen) == limit:
             break
+        if group == "replay":
+            predicate = and_(predicate, ~state.provenance.has_key("followup"))
         group_base = base.where(predicate, rev.id.not_in([id for id, _, _ in chosen]))
         raw = positions.get(group)
+        if group == "replay" and raw is None and cursor is not None and cursor.revision_id:
+            raw = str(cursor.revision_id)
         anchor = None
         if isinstance(raw, str):
             with contextlib.suppress(ValueError):
@@ -103,7 +119,7 @@ def _candidates(session: Session, source_id: UUID, limit: int) -> list[tuple[UUI
                 rows = []
         else:
             rows = []
-        chosen.extend((id, False, group) for id in rows)
+        chosen.extend((id, group == "replay", group) for id in rows)
         if len(chosen) < limit:
             remaining = group_base.where(rev.id.not_in([id for id, _, _ in chosen]))
             if anchor is not None and position is not None and position.source_id == source_id:
@@ -116,38 +132,7 @@ def _candidates(session: Session, source_id: UUID, limit: int) -> list[tuple[UUI
             wrapped = session.scalars(
                 remaining.order_by(*ordering).limit(limit - len(chosen))
             ).all()
-            chosen.extend((id, False, group) for id in wrapped)
-
-    if len(chosen) == limit:
-        return chosen
-    completed = base.where(
-        state.outcome.in_(("CREATED", "UPDATED", "UNCHANGED")),
-        ~state.provenance.has_key("followup"),
-        rev.id.not_in([id for id, _, _ in chosen]),
-    )
-    if cursor is not None and cursor.revision_id is not None:
-        after = or_(
-            rev.observed_at > cursor.observed_at,
-            and_(rev.observed_at == cursor.observed_at, rev.id > cursor.revision_id),
-        )
-        first = session.scalars(
-            completed.where(after).order_by(*ordering).limit(limit - len(chosen))
-        ).all()
-    else:
-        first = session.scalars(completed.order_by(*ordering).limit(limit - len(chosen))).all()
-    chosen.extend((id, True, "replay") for id in first)
-    if cursor is not None and cursor.revision_id is not None and len(chosen) < limit:
-        wrapped = session.scalars(
-            completed.where(
-                or_(
-                    rev.observed_at < cursor.observed_at,
-                    and_(rev.observed_at == cursor.observed_at, rev.id <= cursor.revision_id),
-                )
-            )
-            .order_by(*ordering)
-            .limit(limit - len(chosen))
-        ).all()
-        chosen.extend((id, True, "replay") for id in wrapped)
+            chosen.extend((id, group == "replay", group) for id in wrapped)
     return chosen
 
 
@@ -184,8 +169,10 @@ def run_queue(
             if replay:
                 cursor.observed_at = position.observed_at
                 cursor.revision_id = revision_id
-            else:
-                cursor.positions = {**cursor.positions, group: str(revision_id)}
+            cursor.positions = {**cursor.positions, group: str(revision_id)}
+            if group in FAIR_CLASSES:
+                next_index = (FAIR_CLASSES.index(group) + 1) % len(FAIR_CLASSES)
+                cursor.positions = {**cursor.positions, "_next_class": FAIR_CLASSES[next_index]}
         # No revision IDs, provider text, routes, or failure details escape.
     return {"processed": processed, "counts": counts, "limit_reached": processed == max_batch}
 

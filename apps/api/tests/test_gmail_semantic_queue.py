@@ -17,6 +17,7 @@ from app.models import (
     IngestionRun,
     SemanticMessageState,
     SemanticQueueCursor,
+    SourceRecordRevision,
 )
 from app.test_safety import assert_safe_test_connection, assert_safe_test_engine
 
@@ -101,6 +102,90 @@ def test_review_retry_and_followup_priority(queue_engine):
         state.outcome = "RETRY"
     result = queue.run_queue(queue_engine, source, client, OWN, max_batch=1)
     assert result["processed"] == 1
+
+
+def test_persistent_review_cannot_starve_completed_replay_at_batch_one(queue_engine, monkeypatch):
+    source, created_revision = setup(queue_engine)
+    client = Client(sample())
+    assert queue.process_revision(queue_engine, source, created_revision, client, OWN) == "CREATED"
+    with Session(queue_engine) as session:
+        review_revision = session.scalar(
+            select(SourceRecordRevision.id).where(SourceRecordRevision.id != created_revision)
+        )
+    assert review_revision is not None
+    with Session(queue_engine) as session, session.begin():
+        review_record = session.get(SourceRecordRevision, review_revision)
+        assert review_record is not None
+        session.add(
+            SemanticMessageState(
+                revision_id=review_revision,
+                source_id=source,
+                source_record_id=review_record.source_record_id,
+                outcome="REVIEW",
+                reason_code="needs_review",
+                provenance={},
+            )
+        )
+    real_processor = queue.process_revision
+    processed_ids = []
+
+    def persistent_review(engine, source_id, revision_id, fetcher, own_address):
+        processed_ids.append(revision_id)
+        if revision_id == review_revision:
+            return "REVIEW"
+        return real_processor(engine, source_id, revision_id, fetcher, own_address)
+
+    monkeypatch.setattr(queue, "process_revision", persistent_review)
+    assert queue.run_queue(queue_engine, source, client, OWN, max_batch=1)["counts"]["REVIEW"] == 1
+    # A repeated review must not permanently monopolize the one available slot.
+    second = queue.run_queue(queue_engine, source, client, OWN, max_batch=1)
+    assert second["counts"]["UNCHANGED"] == 1, (second, processed_ids)
+    assert queue.run_queue(queue_engine, source, client, OWN, max_batch=1)["counts"]["REVIEW"] == 1
+    assert processed_ids == [review_revision, created_revision, review_revision]
+    with Session(queue_engine) as session:
+        cursor = session.get(SemanticQueueCursor, source)
+        assert cursor is not None and cursor.revision_id == created_revision
+        assert session.get(SemanticMessageState, created_revision).outcome == "CREATED"
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+        assert session.scalar(select(func.count()).select_from(Coop)) == 1
+
+
+def test_replay_resumes_from_persisted_cursor_without_class_position(queue_engine, monkeypatch):
+    source, first_revision = setup(queue_engine)
+    client = Client(sample())
+    assert queue.process_revision(queue_engine, source, first_revision, client, OWN) == "CREATED"
+    with Session(queue_engine) as session:
+        second_revision = session.scalar(
+            select(SourceRecordRevision.id).where(SourceRecordRevision.id != first_revision)
+        )
+    assert second_revision is not None
+    assert queue.process_revision(queue_engine, source, second_revision, client, OWN) == "UNCHANGED"
+    with Session(queue_engine) as session, session.begin():
+        first = session.get(SourceRecordRevision, first_revision)
+        second = session.get(SourceRecordRevision, second_revision)
+        assert first is not None and second is not None
+        anchor = min((first, second), key=lambda row: (row.observed_at, row.id))
+        expected = second_revision if anchor.id == first_revision else first_revision
+        session.add(
+            SemanticQueueCursor(
+                source_id=source,
+                revision_id=anchor.id,
+                observed_at=anchor.observed_at,
+                positions={},
+            )
+        )
+    visited = []
+    real_processor = queue.process_revision
+
+    def record_replay(engine, source_id, revision_id, fetcher, own_address):
+        visited.append(revision_id)
+        return real_processor(engine, source_id, revision_id, fetcher, own_address)
+
+    monkeypatch.setattr(queue, "process_revision", record_replay)
+    assert (
+        queue.run_queue(queue_engine, source, client, OWN, max_batch=1)["counts"]["UNCHANGED"] == 1
+    )
+    assert visited == [expected]
 
 
 def test_fail_closed_sanitized_and_bounds(queue_engine, monkeypatch, capsys):
