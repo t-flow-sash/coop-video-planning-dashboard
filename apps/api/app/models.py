@@ -330,6 +330,9 @@ class SourceRecordRevision(Base):
     __table_args__ = (
         UniqueConstraint("source_record_id", "content_hash", name="uq_source_record_revision_hash"),
         UniqueConstraint("source_id", "id", name="uq_source_record_revision_source_id"),
+        # Required by the reviewed-domain composite FK; declared here so the
+        # schema-drift gate (`alembic check`) is clean.
+        UniqueConstraint("source_record_id", "id", name="uq_source_revision_record_pair"),
         ForeignKeyConstraint(
             ["source_id", "source_record_id"],
             ["source_record.source_id", "source_record.id"],
