@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
@@ -36,6 +36,12 @@ class Client:
         self.messages = messages
         self.fail = fail
         self.calls = 0
+        self.inventory_calls = 0
+
+    def thread_inventory(self, thread_id: str) -> dict[str, tuple[int, tuple[str, ...]]]:
+        assert thread_id == "thread-1"
+        self.inventory_calls += 1
+        return {m.message_id: (m.internal_date, m.labels) for m in self.messages}
 
     def fetch(self, message_id: str) -> ParsedMessage:
         self.calls += 1
@@ -44,7 +50,7 @@ class Client:
         return next(m for m in self.messages if m.message_id == message_id)
 
 
-def setup(engine: Engine, *, existing: bool = False) -> tuple[object, object]:
+def setup(engine: Engine, *, existing: bool = False) -> tuple[UUID, UUID]:
     with Session(engine) as session, session.begin():
         source = IngestionSource(source_key="synthetic-semantic", kind="GMAIL", enabled=True)
         session.add(source)
@@ -140,7 +146,8 @@ def test_existing_exact_link_update_and_replay(test_engine: Engine) -> None:
     with Session(test_engine) as session:
         coop = session.scalar(select(Coop))
         assert coop is not None and coop.title == "Existing" and coop.fee_amount_minor == 50000
-        assert session.scalar(select(ReviewedDomainTrack)).coop_id == coop.id
+        linked = session.scalar(select(ReviewedDomainTrack))
+        assert linked is not None and linked.coop_id == coop.id
         assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
 
 
@@ -161,7 +168,8 @@ def test_retry_after_fetch_failure_and_review_ambiguous(test_engine: Engine) -> 
     assert process_revision(test_engine, source, revision, ambiguous, OWN) == "REVIEW"
     with Session(test_engine) as session:
         assert session.scalar(select(Coop)) is None
-        assert session.scalar(select(SemanticMessageState)).outcome == "REVIEW"
+        state = session.scalar(select(SemanticMessageState))
+        assert state is not None and state.outcome == "REVIEW"
 
 
 def test_mismatch_and_unlinked_target_cannot_auto_write(test_engine: Engine) -> None:
@@ -180,8 +188,63 @@ def test_mismatch_and_unlinked_target_cannot_auto_write(test_engine: Engine) -> 
         )
     assert process_revision(test_engine, source, revision, Client(sample()), OWN) == "REVIEW"
     with Session(test_engine) as session:
-        assert session.scalar(select(Coop)).fee_amount_minor is None
+        coop = session.scalar(select(Coop))
+        assert coop is not None and coop.fee_amount_minor is None
         assert session.scalar(select(func.count()).select_from(AuditEvent)) == 0
+
+
+def test_uncollected_later_cancellation_blocks_auto_write(test_engine: Engine) -> None:
+    source, revision = setup(test_engine)
+    client = Client([*sample(), message("cancel-1", "We cancel the collaboration.", 300, OTHER)])
+    assert process_revision(test_engine, source, revision, client, OWN) == "REVIEW"
+    assert client.inventory_calls == 1
+    assert client.calls == 0
+    with Session(test_engine) as session:
+        assert session.scalar(select(Coop)) is None
+        state = session.scalar(select(SemanticMessageState))
+        assert state is not None and state.reason_code == "thread_incomplete_or_changed"
+
+
+def test_stale_collected_metadata_blocks_auto_write(test_engine: Engine) -> None:
+    source, revision = setup(test_engine)
+    current = sample()
+    current[1] = message("accept-1", "We accept fee 500 EUR", 201, OWN)
+    client = Client(current)
+    assert process_revision(test_engine, source, revision, client, OWN) == "REVIEW"
+    assert client.calls == 0
+    with Session(test_engine) as session:
+        assert session.scalar(select(Coop)) is None
+
+
+def test_missing_full_message_requires_review(test_engine: Engine) -> None:
+    source, revision = setup(test_engine)
+
+    class MissingClient(Client):
+        def fetch(self, message_id: str) -> ParsedMessage:
+            raise LookupError("message not available")
+
+    client = MissingClient(sample())
+    assert process_revision(test_engine, source, revision, client, OWN) == "REVIEW"
+    with Session(test_engine) as session:
+        assert session.scalar(select(Coop)) is None
+
+
+def test_new_message_arriving_during_full_fetch_blocks_auto_write(test_engine: Engine) -> None:
+    source, revision = setup(test_engine)
+    client = Client(sample())
+    original_inventory = client.thread_inventory
+
+    def changing_inventory(thread_id: str) -> dict[str, tuple[int, tuple[str, ...]]]:
+        current = original_inventory(thread_id)
+        if client.calls:
+            current["cancel-1"] = (300, ())
+        return current
+
+    client.thread_inventory = changing_inventory  # type: ignore[method-assign]
+    assert process_revision(test_engine, source, revision, client, OWN) == "REVIEW"
+    assert client.inventory_calls == 2
+    with Session(test_engine) as session:
+        assert session.scalar(select(Coop)) is None
 
 
 def test_revision_identity_cannot_cross_source(test_engine: Engine) -> None:

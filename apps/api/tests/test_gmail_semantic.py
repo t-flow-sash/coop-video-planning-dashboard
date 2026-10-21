@@ -121,6 +121,7 @@ def test_matching_opposite_party_offer_acceptance_with_evidence():
         "Wir sagen die Kooperation ab.",
         "The collaboration is canceled.",
         "We terminate our agreement.",
+        "We cannot proceed with this project.",
         "Wir ziehen unsere Zusage zurück.",
     ],
 )
@@ -329,6 +330,70 @@ class Transport:
         if url.endswith("/profile"):
             return 200, {"emailAddress": "me@example.net", "historyId": "1"}
         return 200, self.response
+
+
+def test_current_thread_inventory_is_bounded_and_validated():
+    class ThreadTransport(Transport):
+        def request(self, method, url, *, headers=None, body=None):
+            if "/threads/" in url:
+                self.calls.append((method, url))
+                return 200, {
+                    "id": "thread1",
+                    "messages": [
+                        {"id": "m1", "threadId": "thread1", "internalDate": "100", "labelIds": []},
+                        {
+                            "id": "m2",
+                            "threadId": "thread1",
+                            "internalDate": "200",
+                            "labelIds": ["INBOX"],
+                        },
+                    ],
+                }
+            return super().request(method, url, headers=headers, body=body)
+
+    transport = ThreadTransport({})
+    client = FullMessageClient(GmailConfig("id", "secret", "refresh", "me@example.net"), transport)
+    assert client.thread_inventory("thread1") == {"m1": (100, ()), "m2": (200, ("INBOX",))}
+    assert transport.calls[-1] == (
+        "GET",
+        "https://gmail.googleapis.com/gmail/v1/users/me/threads/thread1?format=metadata",
+    )
+    with pytest.raises(SemanticInputError, match="invalid_thread_id"):
+        client.thread_inventory("../thread1")
+
+
+def test_current_thread_inventory_rejects_partial_or_duplicate_responses():
+    class ThreadTransport(Transport):
+        def request(self, method, url, *, headers=None, body=None):
+            if "/threads/" in url:
+                return 200, self.response
+            return super().request(method, url, headers=headers, body=body)
+
+    for response in (
+        {"id": "thread1", "messages": []},
+        {"id": "thread1", "messages": [{"id": "m1"}]},
+        {
+            "id": "thread1",
+            "messages": [{"id": "m1", "threadId": "thread1", "internalDate": "1", "labelIds": []}]
+            * 2,
+        },
+        {
+            "id": "thread1",
+            "messages": [{"id": "m1", "threadId": "other", "internalDate": "1", "labelIds": []}],
+        },
+        {
+            "id": "thread1",
+            "messages": [
+                {"id": str(i), "threadId": "thread1", "internalDate": "1", "labelIds": []}
+                for i in range(101)
+            ],
+        },
+    ):
+        client = FullMessageClient(
+            GmailConfig("id", "secret", "refresh", "me@example.net"), ThreadTransport(response)
+        )
+        with pytest.raises(SemanticInputError):
+            client.thread_inventory("thread1")
 
 
 def test_full_get_and_identity_validation():

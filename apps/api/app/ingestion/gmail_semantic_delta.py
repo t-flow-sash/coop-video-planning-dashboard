@@ -19,7 +19,13 @@ from sqlalchemy.orm import Session
 
 from app.db import engine as default_engine
 from app.ingestion.gmail import SOURCE_KEY, GmailConfig
-from app.ingestion.gmail_semantic import FullMessageClient, ParsedMessage, Verdict, decide
+from app.ingestion.gmail_semantic import (
+    FullMessageClient,
+    ParsedMessage,
+    SemanticInputError,
+    Verdict,
+    decide,
+)
 from app.models import (
     Coop,
     IngestionSource,
@@ -33,6 +39,8 @@ from app.reviewed_domain_import import ReviewError, apply_manifest, canonical_ha
 
 
 class FullFetcher(Protocol):
+    def thread_inventory(self, thread_id: str) -> dict[str, tuple[int, tuple[str, ...]]]: ...
+
     def fetch(self, message_id: str) -> ParsedMessage: ...
 
 
@@ -151,6 +159,25 @@ def process_revision(
         if not pairs or len(pairs) > 100 or revision not in [r for _, r in pairs]:
             _save(session, revision, "REVIEW", "thread_incomplete_or_changed", {})
             return "REVIEW"
+        inventory: dict[str, tuple[int, tuple[str, ...]]] = {}
+        try:
+            inventory = client.thread_inventory(metadata["thread_id"])
+            complete = set(inventory) == {candidate.external_id for candidate, _ in pairs} and all(
+                inventory[candidate.external_id]
+                == (
+                    int(observed.metadata_json["internal_date"]),
+                    tuple(sorted(observed.metadata_json["label_ids"])),
+                )
+                for candidate, observed in pairs
+            )
+        except (KeyError, TypeError, ValueError):
+            complete = False
+        except Exception:
+            _save(session, revision, "REVIEW", "thread_inventory_unavailable", {})
+            return "REVIEW"
+        if not complete:
+            _save(session, revision, "REVIEW", "thread_incomplete_or_changed", {})
+            return "REVIEW"
         messages = []
         try:
             for candidate, observed in pairs:
@@ -165,9 +192,23 @@ def process_revision(
                     _save(session, revision, "REVIEW", "full_message_mismatch", {})
                     return "REVIEW"
                 messages.append(msg)
+        except SemanticInputError:
+            _save(session, revision, "REVIEW", "full_message_unavailable", {})
+            return "REVIEW"
+        except LookupError:
+            _save(session, revision, "REVIEW", "full_message_unavailable", {})
+            return "REVIEW"
         except Exception:
             _save(session, revision, "RETRY", "full_message_unavailable", {})
             return "RETRY"
+        try:
+            still_current = client.thread_inventory(metadata["thread_id"])
+        except Exception:
+            _save(session, revision, "REVIEW", "thread_inventory_unavailable", {})
+            return "REVIEW"
+        if still_current != inventory:
+            _save(session, revision, "REVIEW", "thread_incomplete_or_changed", {})
+            return "REVIEW"
         try:
             decision = decide(messages, own_address=own_address, existing_track=True)
         except Exception:

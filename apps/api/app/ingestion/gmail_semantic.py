@@ -91,6 +91,48 @@ class FullMessageClient:
             raise SemanticInputError("message_id_mismatch")
         return parse_message(raw)
 
+    def thread_inventory(self, thread_id: str) -> dict[str, tuple[int, tuple[str, ...]]]:
+        """Current complete Gmail thread IDs plus metadata, without retaining message bodies."""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", thread_id):
+            raise SemanticInputError("invalid_thread_id")
+        authorized = self._client.authorize()
+        url = f"{GMAIL_API}/threads/{urllib.parse.quote(thread_id, safe='')}?format=metadata"
+        status, raw = self._client._json("GET", url, token=authorized.access_token)
+        if status != 200:
+            raise SemanticInputError("thread_fetch_failed")
+        try:
+            if len(json.dumps(raw, ensure_ascii=False).encode()) > MAX_RESPONSE:
+                raise SemanticInputError("response_too_large")
+        except (TypeError, ValueError, RecursionError) as error:
+            raise SemanticInputError("thread_inventory_invalid") from error
+        entries = raw.get("messages")
+        if (
+            raw.get("id") != thread_id
+            or not isinstance(entries, list)
+            or not 1 <= len(entries) <= 100
+        ):
+            raise SemanticInputError("thread_inventory_invalid")
+        inventory: dict[str, tuple[int, tuple[str, ...]]] = {}
+        for item in entries:
+            if not isinstance(item, dict):
+                raise SemanticInputError("thread_inventory_invalid")
+            mid, timestamp, labels = item.get("id"), item.get("internalDate"), item.get("labelIds")
+            if (
+                not isinstance(mid, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", mid)
+                or mid in inventory
+                or item.get("threadId") != thread_id
+                or not isinstance(timestamp, str)
+                or not timestamp.isascii()
+                or not timestamp.isdigit()
+                or not isinstance(labels, list)
+                or not all(isinstance(label, str) for label in labels)
+                or len(set(labels)) != len(labels)
+            ):
+                raise SemanticInputError("thread_inventory_invalid")
+            inventory[mid] = (int(timestamp), tuple(sorted(labels)))
+        return inventory
+
 
 class _HTMLText(HTMLParser):
     def __init__(self) -> None:
@@ -303,6 +345,7 @@ DECLINE = re.compile(
 # A later retraction is not proof of a new terminal state, but invalidates the
 # earlier agreement as a current auto-import candidate. Keep this grammar narrow.
 RETRACTION = re.compile(
+    r"\b(?:we cannot|we can't|we can not)\s+proceed\s+with\s+(?:this|the)\s+project\b|"
     r"\b(?:cancel|withdraw|decline|reject|refuse|terminate)\w*\b[^.!?\n]*"
     r"\b(?:collaboration|cooperation|sponsorship|agreement)\b|"
     r"\b(?:collaboration|cooperation|sponsorship|agreement)\b[^.!?\n]*"
