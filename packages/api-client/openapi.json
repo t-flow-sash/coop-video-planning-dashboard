@@ -670,6 +670,26 @@
           }
         }
       }
+    },
+    "/api/v1/semantic/status": {
+      "get": {
+        "operationId": "get_semantic_status_api_v1_semantic_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Semantic Status Api V1 Semantic Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Semantic Status"
+      }
     }
   },
   "components": {

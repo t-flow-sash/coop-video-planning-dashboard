@@ -83,7 +83,38 @@ function normalize(raw: ApiCoop): Coop {
   };
 }
 
+export interface SemanticSourceStatus {
+  enabled: boolean;
+  discovered: number;
+  processed: number;
+  created: number;
+  updated: number;
+  unchanged: number;
+  review: number;
+  retry: number;
+  backlog: number;
+  oldest_backlog_at: string | null;
+  latest_evidence_at: string | null;
+  last_semantic_activity: string | null;
+  collector_age_seconds: number | null;
+  last_collector_run: {
+    mode: string;
+    status: string;
+    started_at: string;
+    finished_at: string | null;
+  } | null;
+}
+
+export interface SemanticStatus {
+  as_of: string;
+  coverage_verified: boolean;
+  coverage_note: string;
+  domain_records: number;
+  sources: SemanticSourceStatus[];
+}
+
 export interface CoopRepository {
+  semanticStatus?(): Promise<SemanticStatus>;
   list(): Promise<Coop[]>;
   detail(id: string): Promise<Coop>;
   audit(id: string): Promise<AuditEvent[]>;
@@ -96,6 +127,9 @@ export interface CoopRepository {
 }
 
 export const apiRepository: CoopRepository = {
+  semanticStatus() {
+    return request<SemanticStatus>("/semantic/status");
+  },
   async list() {
     const coops: Coop[] = [];
     const seenCursors = new Set<string>();

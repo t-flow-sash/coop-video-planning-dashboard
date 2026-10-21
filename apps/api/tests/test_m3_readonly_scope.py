@@ -34,6 +34,7 @@ ALLOWED_API_ROUTES = {
     ("POST", "/api/v1/contacts"),
     ("POST", "/api/v1/coops"),
     ("GET", "/api/v1/coops"),
+    ("GET", "/api/v1/semantic/status"),
     ("GET", "/api/v1/coops/{coop_id}"),
     ("PATCH", "/api/v1/coops/{coop_id}"),
     ("POST", "/api/v1/coops/{coop_id}/transitions"),
