@@ -65,6 +65,10 @@ def test_semantic_role_login_effective_acl_and_collector_isolation(test_engine: 
             text("SELECT has_table_privilege(:r,'audit_event','INSERT')"),
             {"r": writer.ROLE},
         )
+        assert connection.scalar(
+            text("SELECT has_table_privilege(:r,'reviewed_domain_batch','UPDATE')"),
+            {"r": writer.ROLE},
+        )
         assert not connection.scalar(
             text("SELECT has_table_privilege(:r,'audit_event','UPDATE')"),
             {"r": writer.ROLE},

@@ -41,7 +41,7 @@ spec:
               image: 127.0.0.1:5000/coop-api:git-000000000000@sha256:0000000000000000000000000000000000000000000000000000000000000000
               imagePullPolicy: IfNotPresent
               command: ["python", "-m", "app.ingestion.gmail_semantic_queue"]
-              args: ["--bounded"]
+              args: ["--max-batch", "25"]
               env:
                 - {name: SEMANTIC_WORKER_ARMED, value: "false"}
                 - {name: HTTPS_PROXY, value: "http://gmail-egress-proxy:10000"}
