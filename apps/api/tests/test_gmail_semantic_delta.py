@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
@@ -28,7 +29,14 @@ OTHER = "other@example.invalid"
 
 def message(mid: str, text: str, when: int, sender: str) -> ParsedMessage:
     return ParsedMessage(
-        mid, "thread-1", when, sender, OWN if sender == OTHER else OTHER, "Synthetic", text, ()
+        mid,
+        "thread-1",
+        when,
+        sender,
+        OWN if sender == OTHER else OTHER,
+        "Synthetic",
+        text,
+        ("SENT",) if sender == OWN else (),
     )
 
 
@@ -70,7 +78,7 @@ def setup(engine: Engine, *, existing: bool = False) -> tuple[UUID, UUID]:
                     "message_id": mid,
                     "thread_id": "thread-1",
                     "internal_date": "100" if mid == "offer-1" else "200",
-                    "label_ids": [],
+                    "label_ids": [] if mid == "offer-1" else ["SENT"],
                 },
             )
             session.add(rev)
@@ -113,7 +121,7 @@ def setup(engine: Engine, *, existing: bool = False) -> tuple[UUID, UUID]:
 
 def sample() -> list[ParsedMessage]:
     return [
-        message("offer-1", "Collaboration. Offer fee 500 EUR", 100, OTHER),
+        message("offer-1", "Collaboration offer: fee 500 EUR", 100, OTHER),
         message("accept-1", "We accept fee 500 EUR", 200, OWN),
     ]
 
@@ -180,7 +188,7 @@ def test_success_replay_retargeted_route_requires_review(test_engine: Engine) ->
 def test_success_replay_local_deadline_edit_requires_review(test_engine: Engine) -> None:
     source, revision = setup(test_engine)
     messages = [
-        message("offer-1", "Collaboration. Offer fee 500 EUR, deadline 2026-12-01", 100, OTHER),
+        message("offer-1", "Collaboration offer: fee 500 EUR, deadline 2026-12-01", 100, OTHER),
         message("accept-1", "We accept fee 500 EUR and deadline 2026-12-01", 200, OWN),
     ]
     client = Client(messages)
@@ -209,6 +217,37 @@ def test_success_replay_later_cancellation_requires_review(test_engine: Engine) 
         state = session.get(SemanticMessageState, revision)
         assert state is not None and state.outcome == "CREATED"
         assert state.provenance["followup"]["reason_code"] == "thread_incomplete_or_changed"
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
+
+
+def test_success_replay_collected_new_deal_retraction_flags_review(test_engine: Engine) -> None:
+    source, revision = setup(test_engine)
+    client = Client(sample())
+    assert process_revision(test_engine, source, revision, client, OWN) == "CREATED"
+    with Session(test_engine) as session, session.begin():
+        record = SourceRecord(source_id=source, record_type="GMAIL_MESSAGE", external_id="cancel-1")
+        session.add(record)
+        session.flush()
+        session.add(
+            SourceRecordRevision(
+                source_id=source,
+                source_record_id=record.id,
+                content_hash="c" * 64,
+                metadata_json={
+                    "evidence_only": True,
+                    "message_id": "cancel-1",
+                    "thread_id": "thread-1",
+                    "internal_date": "300",
+                    "label_ids": [],
+                },
+            )
+        )
+    client.messages.append(message("cancel-1", "The deal is off.", 300, OTHER))
+    assert process_revision(test_engine, source, revision, client, OWN) == "REVIEW"
+    with Session(test_engine) as session:
+        state = session.get(SemanticMessageState, revision)
+        assert state is not None and state.outcome == "CREATED"
+        assert state.provenance["followup"]["reason_code"] == "full_message_changed"
         assert session.scalar(select(func.count()).select_from(AuditEvent)) == 1
 
 
@@ -324,5 +363,55 @@ def test_new_message_arriving_during_full_fetch_blocks_auto_write(test_engine: E
 def test_revision_identity_cannot_cross_source(test_engine: Engine) -> None:
     _source, revision = setup(test_engine)
     assert process_revision(test_engine, uuid4(), revision, Client(sample()), OWN) == "REVIEW"
+    with Session(test_engine) as session:
+        assert session.scalar(select(Coop)) is None
+
+
+def test_route_alone_does_not_authorize_creating_an_unknown_relationship(
+    test_engine: Engine,
+) -> None:
+    source, revision = setup(test_engine)
+    messages = [
+        message("offer-1", "Offer fee 500 EUR", 100, OTHER),
+        message("accept-1", "We accept fee 500 EUR", 200, OWN),
+    ]
+    assert process_revision(test_engine, source, revision, Client(messages), OWN) == "REVIEW"
+    with Session(test_engine) as session:
+        assert session.scalar(select(Coop)) is None
+        assert session.scalar(select(func.count()).select_from(AuditEvent)) == 0
+
+
+@pytest.mark.parametrize(
+    "offer_text",
+    [
+        "Past collaboration. Offer fee 500 EUR",
+        "Our previous collaboration offer was for fee 500 EUR",
+        "We won't offer collaboration; fee 500 EUR",
+    ],
+)
+def test_historical_collaboration_mention_is_not_a_new_offer(
+    test_engine: Engine, offer_text: str
+) -> None:
+    source, revision = setup(test_engine)
+    messages = [
+        message("offer-1", offer_text, 100, OTHER),
+        message("accept-1", "We accept fee 500 EUR", 200, OWN),
+    ]
+    assert process_revision(test_engine, source, revision, Client(messages), OWN) == "REVIEW"
+    with Session(test_engine) as session:
+        assert session.scalar(select(Coop)) is None
+
+
+def test_spoofed_own_from_incoming_mail_does_not_confirm_fee(test_engine: Engine) -> None:
+    source, revision = setup(test_engine)
+    offer = sample()[0]
+    spoof = ParsedMessage(
+        "accept-1", "thread-1", 200, OWN, OWN, "Synthetic", "We accept fee 500 EUR", ("INBOX",)
+    )
+    with Session(test_engine) as session, session.begin():
+        observed = session.get(SourceRecordRevision, revision)
+        assert observed is not None
+        observed.metadata_json = {**observed.metadata_json, "label_ids": ["INBOX"]}
+    assert process_revision(test_engine, source, revision, Client([offer, spoof]), OWN) == "REVIEW"
     with Session(test_engine) as session:
         assert session.scalar(select(Coop)) is None

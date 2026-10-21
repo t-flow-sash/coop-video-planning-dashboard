@@ -20,7 +20,9 @@ def msg(mid, text, *, sender="partner@example.net", when=1000, labels=None, html
         "id": mid,
         "threadId": "thread1",
         "internalDate": str(when),
-        "labelIds": labels or [],
+        "labelIds": labels
+        if labels is not None
+        else (["SENT"] if sender == "me@example.net" else []),
         "payload": {
             "mimeType": "multipart/alternative",
             "headers": [
@@ -115,6 +117,7 @@ def test_matching_opposite_party_offer_acceptance_with_evidence():
 @pytest.mark.parametrize(
     "withdrawal",
     [
+        "The deal is off.",
         "We cancel the collaboration.",
         "We withdraw our agreement.",
         "We decline the collaboration.",

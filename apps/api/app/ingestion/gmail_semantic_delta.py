@@ -333,7 +333,7 @@ def process_revision(
             _save(session, revision, "REVIEW", "thread_incomplete_or_changed", {})
             return "REVIEW"
         try:
-            decision = decide(messages, own_address=own_address, existing_track=True)
+            decision = decide(messages, own_address=own_address, existing_track=False)
         except Exception:
             _save(session, revision, "REVIEW", "semantic_input_invalid", {})
             return "REVIEW"
@@ -400,6 +400,9 @@ def process_revision(
                 return "REVIEW"
             action, track_revision = "UPDATE", 1
         elif target is None:
+            if decision.lead.verdict != Verdict.ACCEPT:
+                _save(session, revision, "REVIEW", "lead_identity_or_intent_unverified", citations)
+                return "REVIEW"
             action, track_revision = "CREATE", 1
             fields = {
                 "title": route.title,

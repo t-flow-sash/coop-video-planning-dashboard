@@ -322,7 +322,21 @@ class SemanticDecision:
 
 
 # Narrow grammar: explicit commercial signals only. Novel wording goes to review.
-LEAD = re.compile(r"\b(?:cooperation|collaboration|sponsorship|zusammenarbeit|kooperation)\b", re.I)
+# A bare topic mention is not an offer of a new relationship. Restrict CREATE
+# candidates to explicit inbound proposal language in the same sentence.
+LEAD_OFFER = re.compile(
+    r"\b(?:cooperation|collaboration|sponsorship|zusammenarbeit|kooperation)\b"
+    r"[^.!?\n]*\b(?:offer|propose|angebot|vorschlag)\b|"
+    r"\b(?:offer|propose|angebot|vorschlag)\b[^.!?\n]*"
+    r"\b(?:cooperation|collaboration|sponsorship|zusammenarbeit|kooperation)\b",
+    re.I,
+)
+LEAD_CONTEXT_RISK = re.compile(
+    r"\b(?:past|previous|former|formerly|earlier|historical|old|already|"
+    r"won't|wouldn't|don't|didn't|never|cancelled|canceled|void|"
+    r"früher|vorherig\w*|ehemalig\w*|bereits|damalig\w*)\b",
+    re.I,
+)
 ACCEPT = re.compile(
     r"\b(?:we accept|we agree|confirmed|agreed|einverstanden|bestätigen wir)\b",
     re.I,
@@ -345,6 +359,7 @@ DECLINE = re.compile(
 # A later retraction is not proof of a new terminal state, but invalidates the
 # earlier agreement as a current auto-import candidate. Keep this grammar narrow.
 RETRACTION = re.compile(
+    r"\b(?:the|this)\s+deal\s+is\s+off\b|"
     r"\b(?:we cannot|we can't|we can not)\s+proceed\s+with\s+(?:this|the)\s+project\b|"
     r"\b(?:cancel|withdraw|decline|reject|refuse|terminate)\w*\b[^.!?\n]*"
     r"\b(?:collaboration|cooperation|sponsorship|agreement)\b|"
@@ -478,6 +493,12 @@ def decide(
         or not parseaddr(m.recipient)[1]
         or own_address.casefold()
         not in {parseaddr(m.sender)[1].casefold(), parseaddr(m.recipient)[1].casefold()}
+        or (
+            parseaddr(m.sender)[1].casefold() == own_address.casefold()
+            and "DRAFT" not in m.labels
+            and ("SENT" not in m.labels or "INBOX" in m.labels)
+        )
+        or (parseaddr(m.sender)[1].casefold() != own_address.casefold() and "SENT" in m.labels)
         for m in messages
     ):
         raise SemanticInputError("participants_invalid")
@@ -485,7 +506,9 @@ def decide(
         raise SemanticInputError("cross_thread_review_required")
     ordered = sorted(messages, key=lambda m: (m.internal_date, m.message_id))
     inbound = [m for m in ordered if parseaddr(m.sender)[1].casefold() != own_address.casefold()]
-    lead_refs = tuple(_evidence(m, "lead:" + m.message_id) for m in inbound if LEAD.search(m.text))
+    lead_refs = tuple(
+        _evidence(m, "lead:" + m.message_id) for m in inbound if LEAD_OFFER.search(m.text)
+    )
     if existing_track:
         lead = FieldDecision(Verdict.NO_CHANGE)
     elif len(lead_refs) == 1 and not any(
@@ -493,10 +516,11 @@ def decide(
         or m.has_attachments
         or QUALIFIER.search(m.text)
         or DECLINE.search(m.text)
+        or LEAD_CONTEXT_RISK.search(m.text)
         for m in inbound
     ):
         lead = FieldDecision(Verdict.ACCEPT, {"status": "NEW"}, lead_refs)
-    elif lead_refs or inbound:
+    elif inbound:
         lead = FieldDecision(
             Verdict.REVIEW, evidence=lead_refs, reason="lead_identity_or_intent_unverified"
         )
