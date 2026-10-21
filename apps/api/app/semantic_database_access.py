@@ -32,6 +32,7 @@ READ_TABLES = (
     "reviewed_domain_evidence",
     "coop",
     "coop_import_state",
+    "audit_event",
 )
 INSERT_TABLES = (
     "semantic_message_state",
