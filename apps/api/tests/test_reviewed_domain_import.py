@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -148,6 +149,202 @@ def test_initial_exact_update_and_local_conflict_preserve_unaffected_fields(
         )
         assert item is not None and item.conflict_fields == ["title"]
         assert session.scalar(select(func.count()).select_from(AuditEvent)) == 2
+
+
+def test_exact_adoption_of_manual_managed_target_and_manual_writer_fence(
+    test_engine: Engine,
+) -> None:
+    from test_manual_coop_import import manifest, record
+
+    from app.manual_coop_import import ManualImportError
+    from app.manual_coop_import import apply_manifest as apply_manual
+
+    ref = evidence(test_engine)
+    original = manifest(record("exact-coop"))
+    with Session(test_engine) as session, session.begin():
+        apply_manual(session, original)
+    reviewed = payload(
+        ref,
+        action="UPDATE",
+        fields={"deadline": "2026-10-22", "fee_amount_minor": 55000},
+        expected_version=1,
+        expected_fields={"deadline": "2026-10-20", "fee_amount_minor": 50000},
+    )
+    with Session(test_engine) as session, session.begin():
+        assert apply_manifest(session, reviewed)["updated"] == 1
+    with Session(test_engine) as session:
+        coop = session.scalar(select(Coop))
+        assert coop is not None and coop.deadline.isoformat() == "2026-10-22"
+        assert coop.fee_amount_minor == 55000
+    with (
+        pytest.raises(ManualImportError),
+        Session(test_engine) as session,
+        session.begin(),
+    ):
+        apply_manual(session, original)
+    with (
+        pytest.raises(ManualImportError),
+        Session(test_engine) as session,
+        session.begin(),
+    ):
+        apply_manual(session, manifest(record("exact-coop", version=2)))
+
+
+def test_manual_import_cannot_reclaim_noop_adoption(test_engine: Engine) -> None:
+    from test_manual_coop_import import manifest, record
+
+    from app.manual_coop_import import ManualImportError
+    from app.manual_coop_import import apply_manifest as apply_manual
+
+    ref = evidence(test_engine)
+    original = manifest(record("exact-coop"))
+    with Session(test_engine) as session, session.begin():
+        apply_manual(session, original)
+    reviewed = payload(
+        ref,
+        action="UPDATE",
+        fields={"deadline": "2026-10-20"},
+        expected_version=1,
+        expected_fields={"deadline": "2026-10-20"},
+    )
+    with Session(test_engine) as session, session.begin():
+        assert apply_manifest(session, reviewed)["unchanged"] == 0
+    with (
+        pytest.raises(ManualImportError, match="reviewed"),
+        Session(test_engine) as session,
+        session.begin(),
+    ):
+        apply_manual(session, original)
+
+
+def test_utc_equivalent_datetime_snapshot_and_replay(test_engine: Engine) -> None:
+    ref = evidence(test_engine)
+    with Session(test_engine) as session, session.begin():
+        session.add(
+            Coop(
+                record_key="exact-coop",
+                title="Before",
+                priority="P1",
+                status="NEW",
+                needs_review=False,
+                release_at=datetime(2026, 10, 21, 10, tzinfo=UTC),
+            )
+        )
+    initial = payload(
+        ref,
+        action="UPDATE",
+        fields={"release_at": "2026-10-21T13:00:00+03:00"},
+        expected_version=1,
+        expected_fields={"release_at": "2026-10-21T12:00:00+02:00"},
+    )
+    with Session(test_engine) as session, session.begin():
+        assert apply_manifest(session, initial)["conflicted"] == 0
+    with Session(test_engine) as session, session.begin():
+        assert apply_manifest(session, initial)["unchanged"] == 1
+
+
+def test_conflict_rebase_requires_exact_version_and_snapshot(test_engine: Engine) -> None:
+    ref = evidence(test_engine)
+    with Session(test_engine) as session, session.begin():
+        session.add(
+            Coop(
+                record_key="exact-coop",
+                title="Before",
+                priority="P2",
+                status="NEW",
+                needs_review=False,
+            )
+        )
+    initial = payload(
+        ref,
+        action="UPDATE",
+        fields={"title": "Reviewed"},
+        expected_version=1,
+        expected_fields={"title": "Before"},
+    )
+    with Session(test_engine) as session, session.begin():
+        apply_manifest(session, initial)
+    with Session(test_engine) as session, session.begin():
+        coop = session.scalar(select(Coop))
+        assert coop is not None
+        coop.title = "Local"
+        coop.version += 1
+    conflict = payload(ref, revision=2, action="UPDATE", fields={"title": "Proposal"})
+    with Session(test_engine) as session, session.begin():
+        assert apply_manifest(session, conflict)["conflicted"] == 1
+    stale = payload(
+        ref,
+        revision=3,
+        action="UPDATE",
+        fields={"title": "Accepted"},
+        expected_version=2,
+        expected_fields={"title": "Local"},
+    )
+    with (
+        pytest.raises(ReviewError, match="version"),
+        Session(test_engine) as session,
+        session.begin(),
+    ):
+        apply_manifest(session, stale)
+    resolved = payload(
+        ref,
+        revision=3,
+        action="UPDATE",
+        fields={"title": "Accepted"},
+        expected_version=3,
+        expected_fields={"title": "Local"},
+    )
+    with Session(test_engine) as session, session.begin():
+        result = apply_manifest(session, resolved)
+        assert result["updated"] == 1 and result["conflicted"] == 0
+    with Session(test_engine) as session:
+        coop = session.scalar(select(Coop))
+        assert coop is not None and coop.title == "Accepted"
+        track = session.scalar(select(ReviewedDomainTrack))
+        assert track is not None and track.field_baselines["title"] == "Accepted"
+        item = session.scalar(
+            select(ReviewedDomainItem).where(ReviewedDomainItem.outcome == "UPDATED")
+        )
+        assert item is not None and item.conflict_fields == []
+
+
+def test_conflict_only_has_explicit_audit_and_no_false_update(test_engine: Engine) -> None:
+    ref = evidence(test_engine)
+    with Session(test_engine) as session, session.begin():
+        session.add(
+            Coop(
+                record_key="exact-coop",
+                title="Before",
+                status="NEW",
+                priority="P2",
+                needs_review=False,
+            )
+        )
+    initial = payload(
+        ref,
+        action="UPDATE",
+        fields={"title": "Reviewed"},
+        expected_version=1,
+        expected_fields={"title": "Before"},
+    )
+    with Session(test_engine) as session, session.begin():
+        apply_manifest(session, initial)
+    with Session(test_engine) as session, session.begin():
+        coop = session.scalar(select(Coop))
+        assert coop is not None
+        coop.title = "Local"
+    conflict = payload(ref, revision=2, action="UPDATE", fields={"title": "Proposal"})
+    with Session(test_engine) as session, session.begin():
+        result = apply_manifest(session, conflict)
+        assert result["conflicted"] == 1 and result["updated"] == 0
+    with Session(test_engine) as session:
+        events = list(
+            session.scalars(select(AuditEvent).order_by(AuditEvent.created_at, AuditEvent.id))
+        )
+        assert len(events) == 2
+        assert events[-1].action == "REVIEWED_DOMAIN_CONFLICT"
+        assert events[-1].changes == {}
+        assert events[-1].reason is not None and "title" in events[-1].reason
 
 
 def test_invalid_revision_and_no_fuzzy_adoption_rollback(test_engine: Engine) -> None:

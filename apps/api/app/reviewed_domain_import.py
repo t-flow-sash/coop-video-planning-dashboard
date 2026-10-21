@@ -10,7 +10,7 @@ import argparse
 import hashlib
 import json
 import sys
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 from uuid import UUID, uuid4
@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
 from app.domain import CoopStatus
+from app.manual_coop_import import _snapshot as manual_snapshot
 from app.models import (
     AuditEvent,
     Coop,
@@ -249,12 +250,16 @@ def _state_valid(coop: Coop, changes: dict[str, Any]) -> None:
 
 
 def _encoded(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat()
     return jsonable_encoder(value)
 
 
 def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
     """Apply one manifest inside the caller's transaction; exceptions require rollback."""
     manifest = parse_manifest(raw)
+    # Serialize with the manual writer before either path inspects ownership.
+    session.execute(text("SELECT pg_advisory_xact_lock(hashtext('manual-coop-import-v1'))"))
     session.execute(text("SELECT pg_advisory_xact_lock(hashtext('reviewed-domain-v1'))"))
     previous = session.scalar(
         select(ReviewedDomainBatch).where(
@@ -352,6 +357,7 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
             values = _validated_fields(decision.fields)
             if link is not None and decision.action != "UPDATE":
                 raise ReviewError("linked track requires UPDATE")
+            conflicts: list[str] = []
             if decision.action == "CREATE":
                 if (
                     link
@@ -369,16 +375,15 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
                 baselines = {k: _encoded(v) for k, v in values.items()}
                 changes = {k: {"old": None, "new": _encoded(v)} for k, v in values.items()}
             else:
-                if (
-                    coop is None
-                    or coop.is_synthetic_seed
-                    or session.scalar(
-                        select(CoopImportState).where(CoopImportState.coop_id == coop.id)
-                    )
-                ):
-                    raise ReviewError(
-                        "UPDATE requires an existing non-seed, non-manual-managed exact key"
-                    )
+                if coop is None or coop.is_synthetic_seed:
+                    raise ReviewError("UPDATE requires an existing non-seed exact key")
+                manual_state = session.get(CoopImportState, coop.id)
+                if manual_state is not None and link is None:
+                    if manual_state.snapshot_hash != manual_snapshot(coop):
+                        raise ReviewError("manual target diverged before adoption")
+                    if decision.expected_version != manual_state.record_version:
+                        raise ReviewError("manual target version mismatch")
+                rebase_fields: set[str] = set()
                 if link is None:
                     if (
                         decision.expected_version != coop.version
@@ -390,21 +395,45 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
                         raise ReviewError("initial target snapshot mismatch")
                     baselines = {k: _encoded(v) for k, v in expected.items()}
                 else:
-                    if (
-                        decision.expected_version is not None
-                        or decision.expected_fields is not None
-                    ):
-                        raise ReviewError("linked UPDATE must use stored field baselines")
+                    previous_item = session.get(ReviewedDomainItem, (link.batch_id, link.track_key))
+                    if previous_item is None:
+                        raise ReviewError("stored review item missing")
+                    rebase_fields = set(previous_item.conflict_fields)
+                    if decision.expected_fields is not None:
+                        if (
+                            not rebase_fields
+                            or decision.expected_version != coop.version
+                            or not rebase_fields <= decision.expected_fields.keys()
+                        ):
+                            raise ReviewError("conflict rebase version or fields mismatch")
+                        expected = _validated_fields(decision.expected_fields)
+                        if any(
+                            _encoded(getattr(coop, key)) != _encoded(value)
+                            for key, value in expected.items()
+                        ):
+                            raise ReviewError("conflict rebase snapshot mismatch")
+                    elif decision.expected_version is not None:
+                        raise ReviewError("rebase requires exact field snapshot")
                     baselines = dict(link.field_baselines)
                 changes = {}
                 conflicts = []
                 for key, value in values.items():
                     current = _encoded(getattr(coop, key))
-                    if key not in baselines:
-                        conflicts.append(
-                            key
-                        )  # no authority to overwrite a previously unmanaged field
-                    elif current != baselines[key]:
+                    if (
+                        key not in baselines
+                        and (
+                            link is None
+                            or decision.expected_fields is None
+                            or key not in rebase_fields
+                        )
+                    ) or (
+                        current != baselines.get(key)
+                        and (
+                            link is None
+                            or decision.expected_fields is None
+                            or key not in rebase_fields
+                        )
+                    ):
                         conflicts.append(key)
                     else:
                         if current != _encoded(value):
@@ -419,15 +448,16 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
                 if conflicts:
                     counts["conflicted"] += 1
                 outcome = "CONFLICT" if conflicts else ("UPDATED" if changes else "UNCHANGED")
-            if changes:
+            if changes or conflicts:
                 session.add(
                     AuditEvent(
                         coop_id=coop.id,
-                        action=f"REVIEWED_DOMAIN_{outcome if outcome != 'CONFLICT' else 'UPDATED'}",
+                        action=f"REVIEWED_DOMAIN_{outcome}",
                         actor_type="SYSTEM",
                         actor_id="reviewed-domain-v1",
                         source="MANUAL_IMPORT",
                         changes=changes,
+                        reason=(f"Conflict fields: {', '.join(conflicts)}" if conflicts else None),
                         request_id=f"reviewed-{manifest.manifest_hash[:24]}",
                         source_reference=f"{decision.track_key}:{decision.track_revision}",
                     )
