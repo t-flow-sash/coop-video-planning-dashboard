@@ -112,6 +112,44 @@ def test_matching_opposite_party_offer_acceptance_with_evidence():
     assert result.fee.evidence[0].assertion_sha256 != result.fee.evidence[1].assertion_sha256
 
 
+@pytest.mark.parametrize(
+    "withdrawal",
+    [
+        "We cancel the collaboration.",
+        "We withdraw our agreement.",
+        "We decline the collaboration.",
+        "Wir sagen die Kooperation ab.",
+        "The collaboration is canceled.",
+        "We terminate our agreement.",
+        "Wir ziehen unsere Zusage zurück.",
+    ],
+)
+def test_later_withdrawal_without_terms_blocks_prior_agreement(withdrawal):
+    offer = parse_message(msg("m1", "Collaboration offer: fee 500 EUR; deadline 2026-11-30"))
+    acceptance = parse_message(
+        msg("m2", "We accept fee 500 EUR, deadline 2026-11-30", sender="me@example.net", when=2000)
+    )
+    withdrawn = parse_message(msg("m3", withdrawal, when=3000))
+    result = decide(
+        [offer, acceptance, withdrawn], own_address="me@example.net", existing_track=True
+    )
+    assert result.fee.verdict == Verdict.REVIEW
+    assert result.deadline.verdict == Verdict.REVIEW
+    assert result.status.verdict == Verdict.REVIEW
+    assert any(ref.message_id == "m3" for ref in result.fee.evidence)
+
+
+def test_prior_decline_does_not_invalidate_later_new_offer_and_acceptance():
+    decline = parse_message(msg("m0", "We decline the collaboration.", when=500))
+    offer = parse_message(msg("m1", "Offer fee 500 EUR", when=1000))
+    acceptance = parse_message(
+        msg("m2", "We accept fee 500 EUR", sender="me@example.net", when=2000)
+    )
+    result = decide([decline, offer, acceptance], own_address="me@example.net", existing_track=True)
+    assert result.fee.verdict == Verdict.ACCEPT
+    assert result.status.verdict == Verdict.ACCEPT
+
+
 def test_changed_fee_and_draft_acceptance_review():
     offer = parse_message(msg("m1", "Offer fee 500 EUR"))
     reply = parse_message(msg("m2", "We accept fee 600 EUR", sender="me@example.net", when=2000))

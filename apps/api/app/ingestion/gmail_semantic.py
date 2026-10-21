@@ -300,6 +300,20 @@ DECLINE = re.compile(
     r"ablehnen|nicht möglich|unmöglich)\b",
     re.I,
 )
+# A later retraction is not proof of a new terminal state, but invalidates the
+# earlier agreement as a current auto-import candidate. Keep this grammar narrow.
+RETRACTION = re.compile(
+    r"\b(?:cancel|withdraw|decline|reject|refuse|terminate)\w*\b[^.!?\n]*"
+    r"\b(?:collaboration|cooperation|sponsorship|agreement)\b|"
+    r"\b(?:collaboration|cooperation|sponsorship|agreement)\b[^.!?\n]*"
+    r"\b(?:cancel|withdraw|decline|reject|refuse|terminate)\w*\b|"
+    r"\b(?:sagen|kündigen)\b[^.!?\n]*\b(?:kooperation|zusammenarbeit|vereinbarung)\b"
+    r"[^.!?\n]*\b(?:ab|auf)\b|"
+    r"\b(?:kooperation|zusammenarbeit|vereinbarung)\b[^.!?\n]*"
+    r"\b(?:absagen|kündigen|widerrufen)\b|"
+    r"\bziehen\b[^.!?\n]*\b(?:zusage|vereinbarung)\b[^.!?\n]*\bzurück\b",
+    re.I,
+)
 # An acceptance only licenses the assertion it governs, not an unrelated sentence
 # or a new proposal. Multiple explicit terms may follow the same acceptance.
 ACCEPTED_TERMS = re.compile(
@@ -457,6 +471,30 @@ def decide(
             fee = FieldDecision(
                 Verdict.REVIEW, evidence=fee.evidence, reason="attachment_requires_review"
             )
+    # A term-less later retraction must not leave an earlier agreement actionable.
+    # Refer to the acceptance message rather than the offer; an earlier refusal
+    # can precede a genuinely new offer/acceptance without invalidating it.
+    by_id = {m.message_id: m for m in ordered}
+    retractions = [m for m in ordered if "DRAFT" not in m.labels and RETRACTION.search(m.text)]
+    for field_name in ("deadline", "fee"):
+        field = deadline if field_name == "deadline" else fee
+        if field.verdict != Verdict.ACCEPT:
+            continue
+        acceptance = by_id[field.evidence[-1].message_id]
+        later = [
+            m
+            for m in retractions
+            if (m.internal_date, m.message_id) > (acceptance.internal_date, acceptance.message_id)
+        ]
+        if later:
+            refs = field.evidence + tuple(_evidence(m, "retraction:" + m.message_id) for m in later)
+            reviewed = FieldDecision(
+                Verdict.REVIEW, evidence=refs, reason="later_retraction_requires_review"
+            )
+            if field_name == "deadline":
+                deadline = reviewed
+            else:
+                fee = reviewed
     # An acceptance cannot safely advance workflow status unless an exact term is mutually accepted.
     if Verdict.REVIEW in {deadline.verdict, fee.verdict} and any(
         re.search(r"\b(?:accept|agree|confirm|einverstanden|bestätig)\w*\b", m.text, re.I)
