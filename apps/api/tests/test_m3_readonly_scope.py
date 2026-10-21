@@ -15,6 +15,7 @@ ALLOWED_INGESTION_MODULES = {
     "gmail.py",
     "gmail_semantic.py",
     "gmail_semantic_delta.py",
+    "gmail_semantic_queue.py",
 }
 ALLOWED_IMPORT_RESOURCES = {
     "gmail-collector-db.secret.sops.yaml",
@@ -111,6 +112,7 @@ def _python_route_inventory(path: Path) -> tuple[set[tuple[str, str]], list[str]
             if any(module.startswith("app.ingestion") for module in modules) and path.name not in {
                 "gmail_semantic.py",
                 "gmail_semantic_delta.py",
+                "gmail_semantic_queue.py",
             }:
                 violations.append(f"API/service imports ingestion runtime: {path}")
         if (
@@ -146,6 +148,8 @@ def _python_ingestion_mutation_surfaces(path: Path, root: Path) -> list[str]:
         "apps/api/app/reviewed_domain_import.py",
         # Explicit semantic worker is separate from the metadata collector.
         "apps/api/app/ingestion/gmail_semantic_delta.py",
+        # Manual, bounded semantic catch-up uses the separately authorized worker.
+        "apps/api/app/ingestion/gmail_semantic_queue.py",
     }:
         return []
     source = path.read_text(encoding="utf-8")

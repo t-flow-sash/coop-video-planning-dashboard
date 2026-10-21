@@ -407,6 +407,18 @@ class SemanticTrackRoute(Base):
     expected_coop_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("coop.id"))
 
 
+class SemanticQueueCursor(Base):
+    """Queue progress separate from the collector checkpoint and semantic decisions."""
+
+    __tablename__ = "semantic_queue_cursor"
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ingestion_source.id"), primary_key=True
+    )
+    revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    positions: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+
 class SemanticMessageState(Base):
     """Semantic completion independent of ingestion_checkpoint; no MIME stored."""
 

@@ -142,7 +142,7 @@ def test_m1_to_head_preserves_six_seed_coops_and_audit_history() -> None:
             ).all()
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalar_one() == ("ea4c9b71d320")
+            ).scalar_one() == ("71c8ef4a6d20")
             record_keys = connection.execute(
                 text(
                     "SELECT id, record_key, priority, fee_status, is_synthetic_seed, "
@@ -280,7 +280,7 @@ def test_operational_source_activation_downgrade_is_consumption_safe() -> None:
             _downgrade_alembic(isolated_url, "c2d7a91f4e60")
         with isolated.connect() as connection:
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
-                "ea4c9b71d320"
+                "71c8ef4a6d20"
             )
             assert (
                 connection.scalar(
