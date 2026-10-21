@@ -390,6 +390,49 @@ class SourceRecordObservation(Base):
     )
 
 
+class SemanticTrackRoute(Base):
+    """Operator-provisioned exact route; never inferred from mailbox similarity."""
+
+    __tablename__ = "semantic_track_route"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_id", "thread_record_id"], ["source_record.source_id", "source_record.id"]
+        ),
+    )
+    thread_record_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingestion_source.id"))
+    track_key: Mapped[str] = mapped_column(String(160), unique=True)
+    record_key: Mapped[str] = mapped_column(String(160), unique=True)
+    title: Mapped[str] = mapped_column(String(240))
+    expected_coop_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("coop.id"))
+
+
+class SemanticMessageState(Base):
+    """Semantic completion independent of ingestion_checkpoint; no MIME stored."""
+
+    __tablename__ = "semantic_message_state"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_id", "source_record_id"], ["source_record.source_id", "source_record.id"]
+        ),
+        ForeignKeyConstraint(
+            ["source_record_id", "revision_id"],
+            ["source_record_revision.source_record_id", "source_record_revision.id"],
+        ),
+        CheckConstraint(
+            "outcome IN ('RETRY','REVIEW','CREATED','UPDATED','UNCHANGED')",
+            name="ck_semantic_message_outcome",
+        ),
+    )
+    revision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    source_record_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingestion_source.id"))
+    outcome: Mapped[str] = mapped_column(String(20))
+    reason_code: Mapped[str] = mapped_column(String(60))
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class ReviewedDomainBatch(Base):
     __tablename__ = "reviewed_domain_batch"
 

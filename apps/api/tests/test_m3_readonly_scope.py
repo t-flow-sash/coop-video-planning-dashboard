@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-ALLOWED_INGESTION_MODULES = {"__init__.py", "gmail.py", "gmail_semantic.py"}
+ALLOWED_INGESTION_MODULES = {
+    "__init__.py",
+    "gmail.py",
+    "gmail_semantic.py",
+    "gmail_semantic_delta.py",
+}
 ALLOWED_IMPORT_RESOURCES = {
     "gmail-collector-db.secret.sops.yaml",
     "gmail-egress-proxy.yaml",
@@ -103,10 +108,10 @@ def _python_route_inventory(path: Path) -> tuple[set[tuple[str, str]], list[str]
                 if isinstance(node, ast.Import)
                 else [node.module or ""]
             )
-            if (
-                any(module.startswith("app.ingestion") for module in modules)
-                and path.name != "gmail_semantic.py"
-            ):
+            if any(module.startswith("app.ingestion") for module in modules) and path.name not in {
+                "gmail_semantic.py",
+                "gmail_semantic_delta.py",
+            }:
                 violations.append(f"API/service imports ingestion runtime: {path}")
         if (
             isinstance(node, ast.Call)
@@ -139,6 +144,8 @@ def _python_ingestion_mutation_surfaces(path: Path, root: Path) -> list[str]:
         "apps/api/app/manual_coop_import.py",
         # Separate CLI-only reviewed business path; never an ingestion runtime entry point.
         "apps/api/app/reviewed_domain_import.py",
+        # Explicit semantic worker is separate from the metadata collector.
+        "apps/api/app/ingestion/gmail_semantic_delta.py",
     }:
         return []
     source = path.read_text(encoding="utf-8")

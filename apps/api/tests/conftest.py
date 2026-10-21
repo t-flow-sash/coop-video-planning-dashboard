@@ -44,7 +44,8 @@ def clean_database(request: pytest.FixtureRequest, test_engine: Engine) -> Itera
         )
         connection.execute(
             text(
-                "TRUNCATE source_record_observation, ingestion_item, "
+                "TRUNCATE semantic_message_state, semantic_track_route, "
+                "source_record_observation, ingestion_item, "
                 "source_record_revision, source_record, ingestion_checkpoint, "
                 "reviewed_domain_item, reviewed_domain_evidence, reviewed_domain_track, "
                 "reviewed_domain_batch, coop_import_state, manual_import_batch, "
