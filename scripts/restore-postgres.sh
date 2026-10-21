@@ -329,7 +329,7 @@ for resource in "${suspend_order[@]}"; do
   kind="${resource%%/*}"
   name="${resource#*/}"
   was_suspended["$resource"]="$(kubectl -n flux-system get "$kind" "$name" -o jsonpath='{.spec.suspend}')"
-  if [[ "${was_suspended[$resource]}" == true ]]; then
+  if [[ "${was_suspended[$resource]}" == true && "$resource" != kustomization/coop-semantic ]]; then
     echo "Refusing restore because dependency ${resource} was already suspended." >&2
     exit 9
   fi

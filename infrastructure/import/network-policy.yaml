@@ -45,6 +45,9 @@ spec:
         - podSelector:
             matchLabels:
               coop.example.com/gmail-import: "true"
+        - podSelector:
+            matchLabels:
+              coop.example.com/semantic-worker: "true"
       ports:
         - {protocol: TCP, port: 10000}
   egress:
