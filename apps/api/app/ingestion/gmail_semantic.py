@@ -93,7 +93,7 @@ class FullMessageClient:
 
 
 class _HTMLText(HTMLParser):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.text: list[str] = []
         self.skip = 0
@@ -323,13 +323,14 @@ def _terms(
     for match in pattern.finditer(message.text):
         raw = match.group(1)
         try:
+            value: str | int
             if kind == "date":
-                value = (
+                parsed_date = (
                     date.fromisoformat(raw)
                     if "-" in raw
                     else date(*reversed([int(x) for x in raw.split(".")]))
                 )
-                value = value.isoformat()
+                value = parsed_date.isoformat()
             else:
                 if "," in raw and "." in raw:
                     raise ValueError("ambiguous currency")

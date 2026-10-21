@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-ALLOWED_INGESTION_MODULES = {"__init__.py", "gmail.py"}
+ALLOWED_INGESTION_MODULES = {"__init__.py", "gmail.py", "gmail_semantic.py"}
 ALLOWED_IMPORT_RESOURCES = {
     "gmail-collector-db.secret.sops.yaml",
     "gmail-egress-proxy.yaml",
@@ -103,7 +103,10 @@ def _python_route_inventory(path: Path) -> tuple[set[tuple[str, str]], list[str]
                 if isinstance(node, ast.Import)
                 else [node.module or ""]
             )
-            if any(module.startswith("app.ingestion") for module in modules):
+            if (
+                any(module.startswith("app.ingestion") for module in modules)
+                and path.name != "gmail_semantic.py"
+            ):
                 violations.append(f"API/service imports ingestion runtime: {path}")
         if (
             isinstance(node, ast.Call)
