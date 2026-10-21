@@ -207,4 +207,5 @@ def test_existing_target_requires_exact_manual_snapshot_version(test_engine: Eng
             Client(sample()),
             OWN,
         )
-    assert len(list(Session(test_engine).scalars(select(SemanticTrackRoute)))) == 0
+    with Session(test_engine) as session:
+        assert len(list(session.scalars(select(SemanticTrackRoute)))) == 0
