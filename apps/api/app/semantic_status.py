@@ -54,7 +54,8 @@ def snapshot(session: Session) -> dict[str, Any]:
             key: sum(outcome == key for outcome, _ in rows)
             for key in ("CREATED", "UPDATED", "UNCHANGED", "REVIEW", "RETRY")
         }
-        processed = sum(counts.values())
+        # RETRY is visible work, not a completed semantic decision.
+        processed = sum(counts[key] for key in ("CREATED", "UPDATED", "UNCHANGED", "REVIEW"))
         run = session.scalar(
             select(IngestionRun)
             .where(IngestionRun.source_id == source.id)
@@ -87,7 +88,7 @@ def snapshot(session: Session) -> dict[str, Any]:
                 "unchanged": counts["UNCHANGED"],
                 "review": counts["REVIEW"],
                 "retry": counts["RETRY"],
-                "backlog": len(rows) - processed + counts["RETRY"],
+                "backlog": len(rows) - processed,
                 "oldest_backlog_at": oldest,
                 "latest_evidence_at": latest_observed,
                 "last_semantic_activity": activity,
