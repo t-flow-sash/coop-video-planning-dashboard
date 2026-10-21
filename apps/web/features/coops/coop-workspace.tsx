@@ -158,16 +158,24 @@ export function CoopWorkspace({
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailRequest, setDetailRequest] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [semanticStatus, setSemanticStatus] = useState<SemanticStatus | null>(null);
+  const [semanticStatus, setSemanticStatus] = useState<SemanticStatus | null>(
+    null,
+  );
   const [semanticError, setSemanticError] = useState(false);
   useEffect(() => {
     if (!repository.semanticStatus || demoMode) return;
     let active = true;
     repository.semanticStatus().then(
-      (status) => { if (active) setSemanticStatus(status); },
-      () => { if (active) setSemanticError(true); },
+      (status) => {
+        if (active) setSemanticStatus(status);
+      },
+      () => {
+        if (active) setSemanticError(true);
+      },
     );
-    return () => { active = false; };
+    return () => {
+      active = false;
+    };
   }, [repository, demoMode]);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
@@ -457,20 +465,88 @@ export function CoopWorkspace({
         </div>
 
         {!demoMode && repository.semanticStatus && (
-          <section className="environment-note" role="region" aria-label="Import und Coverage" aria-live="polite">
+          <section
+            className="environment-note"
+            role="region"
+            aria-label="Import und Coverage"
+            aria-live="polite"
+          >
             <div>
               <h2>Import und Coverage</h2>
-              {semanticError ? <p>Status nicht verfügbar – Importfortschritt unbekannt.</p> : !semanticStatus ? <p>Status wird geladen …</p> : (
+              {semanticError ? (
+                <p>Status nicht verfügbar – Importfortschritt unbekannt.</p>
+              ) : !semanticStatus ? (
+                <p>Status wird geladen …</p>
+              ) : (
                 <>
-                  <p><strong>Coverage nicht verifiziert.</strong> Nachrichten sind keine Kooperationen; die Zähler belegen keine Vollständigkeit des Portfolios oder einen laufenden Scheduler.</p>
-                  <p>Stand der Datenbank: <time dateTime={semanticStatus.as_of}>{new Date(semanticStatus.as_of).toLocaleString("de-DE")}</time> · {semanticStatus.domain_records} Kooperationen im führenden Datenbestand.</p>
-                  {semanticStatus.sources.length === 0 && <p>Keine Quelle erfasst. Importzustand unbekannt.</p>}
+                  <p>
+                    <strong>Coverage nicht verifiziert.</strong> Nachrichten
+                    sind keine Kooperationen; die Zähler belegen keine
+                    Vollständigkeit des Portfolios oder einen laufenden
+                    Scheduler.
+                  </p>
+                  <p>
+                    Stand der Datenbank:{" "}
+                    <time dateTime={semanticStatus.as_of}>
+                      {new Date(semanticStatus.as_of).toLocaleString("de-DE")}
+                    </time>{" "}
+                    · {semanticStatus.domain_records} Kooperationen im führenden
+                    Datenbestand.
+                  </p>
+                  {semanticStatus.sources.length === 0 && (
+                    <p>Keine Quelle erfasst. Importzustand unbekannt.</p>
+                  )}
                   {semanticStatus.sources.map((source, index) => (
                     <div key={index}>
-                      <p>Quelle {index + 1}: {source.enabled ? "aktiv konfiguriert" : "deaktiviert"} · entdeckt {source.discovered} · verarbeitet {source.processed} · CREATE {source.created} · UPDATE {source.updated} · unverändert {source.unchanged} · Review {source.review} · Retry {source.retry} · Backlog {source.backlog}</p>
-                      <p>Ältester offener Beleg: {source.oldest_backlog_at ? new Date(source.oldest_backlog_at).toLocaleString("de-DE") : "keiner / unbekannt"} · letzter Beleg: {source.latest_evidence_at ? new Date(source.latest_evidence_at).toLocaleString("de-DE") : "unbekannt"} · letzte semantische Aktivität: {source.last_semantic_activity ? new Date(source.last_semantic_activity).toLocaleString("de-DE") : "keine"}</p>
-                      <p>Letzter Collector-Lauf: {source.last_collector_run ? `${source.last_collector_run.mode} ${source.last_collector_run.status}` : "keiner"} · Alter des erfolgreichen Collector-Laufs: {source.collector_age_seconds === null ? "unbekannt" : `${source.collector_age_seconds} Sekunden`}. Collector-Erfolg ist keine semantische Verarbeitung.</p>
-                      {(source.review > 0 || source.retry > 0 || source.backlog > 0) && <p>Unklare Fälle und ausstehende Belege bleiben offen; keine automatische Freigabe oder Hochrechnung auf Business-Tracks.</p>}
+                      <p>
+                        Quelle {index + 1}:{" "}
+                        {source.enabled ? "aktiv konfiguriert" : "deaktiviert"}{" "}
+                        · entdeckt {source.discovered} · verarbeitet{" "}
+                        {source.processed} · CREATE {source.created} · UPDATE{" "}
+                        {source.updated} · unverändert {source.unchanged} ·
+                        Review {source.review} · Retry {source.retry} · Backlog{" "}
+                        {source.backlog}
+                      </p>
+                      <p>
+                        Ältester offener Beleg:{" "}
+                        {source.oldest_backlog_at
+                          ? new Date(source.oldest_backlog_at).toLocaleString(
+                              "de-DE",
+                            )
+                          : "keiner / unbekannt"}{" "}
+                        · letzter Beleg:{" "}
+                        {source.latest_evidence_at
+                          ? new Date(source.latest_evidence_at).toLocaleString(
+                              "de-DE",
+                            )
+                          : "unbekannt"}{" "}
+                        · letzte semantische Aktivität:{" "}
+                        {source.last_semantic_activity
+                          ? new Date(
+                              source.last_semantic_activity,
+                            ).toLocaleString("de-DE")
+                          : "keine"}
+                      </p>
+                      <p>
+                        Letzter Collector-Lauf:{" "}
+                        {source.last_collector_run
+                          ? `${source.last_collector_run.mode} ${source.last_collector_run.status}`
+                          : "keiner"}{" "}
+                        · Alter des erfolgreichen Collector-Laufs:{" "}
+                        {source.collector_age_seconds === null
+                          ? "unbekannt"
+                          : `${source.collector_age_seconds} Sekunden`}
+                        . Collector-Erfolg ist keine semantische Verarbeitung.
+                      </p>
+                      {(source.review > 0 ||
+                        source.retry > 0 ||
+                        source.backlog > 0) && (
+                        <p>
+                          Unklare Fälle und ausstehende Belege bleiben offen;
+                          keine automatische Freigabe oder Hochrechnung auf
+                          Business-Tracks.
+                        </p>
+                      )}
                     </div>
                   ))}
                 </>
