@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 from typing import TypedDict
 from uuid import UUID
@@ -178,6 +179,9 @@ def run_queue(
 
 
 def main() -> int:
+    if os.environ.get("SEMANTIC_WORKER_ARMED") != "true":
+        print(json.dumps({"outcome": "NOT_ARMED"}), file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(
         description="Bounded semantic message catch-up (manual invocation)"
     )

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from datetime import date
@@ -485,6 +486,9 @@ def process_revision(
 
 
 def main() -> int:
+    if os.environ.get("SEMANTIC_WORKER_ARMED") != "true":
+        print(json.dumps({"outcome": "NOT_ARMED"}), file=sys.stderr)
+        return 2
     parser = argparse.ArgumentParser(
         description="Process one exact collected Gmail message revision"
     )

@@ -195,6 +195,7 @@ def test_fail_closed_sanitized_and_bounds(queue_engine, monkeypatch, capsys):
         queue.run_queue(queue_engine, source, client, OWN, max_batch=101)
     assert client.calls == 0
     monkeypatch.setattr(queue, "default_engine", queue_engine)
+    monkeypatch.setenv("SEMANTIC_WORKER_ARMED", "true")
     monkeypatch.setattr(
         queue,
         "process_revision",
