@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 from uuid import UUID
 
-from app.models import IngestionSource
-
 import pytest
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
@@ -19,14 +17,15 @@ from app.ingestion.gmail_route_provision import (
     discover,
     main,
 )
+from app.manual_coop_import import _snapshot
 from app.models import (
     Coop,
     CoopImportState,
+    IngestionSource,
     ManualImportBatch,
     SemanticTrackRoute,
     SourceRecord,
 )
-from app.manual_coop_import import _snapshot
 from tests.test_gmail_semantic_delta import OWN, Client, sample, setup
 
 
