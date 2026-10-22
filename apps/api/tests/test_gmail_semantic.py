@@ -466,9 +466,27 @@ def test_decide_matches_own_address_among_multiple_recipients():
     )
 
 
-def test_decide_still_rejects_messages_that_do_not_include_own_address():
-    raw = msg("m1", "Collaboration offer: fee 500 EUR", sender="partner@example.net")
-    raw["payload"]["headers"][1] = {"name": "To", "value": "third@example.org"}
-    messages = [parse_message(raw)]
+def test_decide_rejects_unparseable_participants_and_ambiguous_sides():
+    # Alias mailbox: an inbound message addressed only to another address of the
+    # same mailbox is legitimate; what stays invalid is an unusable sender or a
+    # message that is simultaneously sent and in the inbox.
+    inbound = msg(
+        "m1",
+        "Collaboration offer: fee 500 EUR",
+        sender="partner@example.net",
+        labels=["INBOX"],
+    )
+    inbound["payload"]["headers"][1] = {"name": "To", "value": "third@example.org"}
+    decision = decide([parse_message(inbound)], own_address="me@example.net", existing_track=False)
+    assert decision.lead.verdict.name in {"ACCEPT", "REVIEW"}
+    broken = msg("m2", "Collaboration offer: fee 500 EUR", sender="not-an-address")
     with pytest.raises(SemanticInputError, match="participants_invalid"):
-        decide(messages, own_address="me@example.net", existing_track=False)
+        decide([parse_message(broken)], own_address="me@example.net", existing_track=False)
+    ambiguous = msg(
+        "m3",
+        "Collaboration offer: fee 500 EUR",
+        sender="partner@example.net",
+        labels=["SENT", "INBOX"],
+    )
+    with pytest.raises(SemanticInputError, match="participants_invalid"):
+        decide([parse_message(ambiguous)], own_address="me@example.net", existing_track=False)

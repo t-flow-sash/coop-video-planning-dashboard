@@ -441,8 +441,7 @@ def _decide_term(
     uncertain: list[EvidenceRef] = []
     for msg in messages:
         terms = _terms(msg, pattern, kind)
-        sender = parseaddr(msg.sender)[1].casefold()
-        role = "own" if sender == own_address.casefold() else "other"
+        role = "own" if _is_outbound(msg, own_address) else "other"
         for value, ev, sentence in terms:
             if (
                 INVOICE.search(msg.text)
@@ -479,6 +478,11 @@ def _decide_term(
     return FieldDecision(Verdict.ACCEPT, value, refs)
 
 
+def _looks_like_address(value: str) -> bool:
+    """A usable addr-spec: ``local@domain.tld`` without whitespace."""
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value))
+
+
 def _address_list(value: str) -> list[str]:
     """All parseable addresses of a header value (handles comma-separated lists)."""
     return [address for _, address in getaddresses([value]) if address]
@@ -496,6 +500,17 @@ def _address_set(message: ParsedMessage) -> set[str]:
     return found
 
 
+def _is_outbound(message: ParsedMessage, own_address: str) -> bool:
+    """Authoritative side detection for a mailbox with several aliases.
+
+    Only Gmail's own ``SENT`` label decides our side. The configured address is one
+    alias of possibly many and is not trustworthy as a sole signal: a forged ``From``
+    with our address must never be promoted to our side (spoofing stays review).
+    """
+    del own_address  # kept for the documented contract; never authoritative alone
+    return "SENT" in message.labels
+
+
 def decide(
     messages: list[ParsedMessage], *, own_address: str, existing_track: bool
 ) -> SemanticDecision:
@@ -507,26 +522,19 @@ def decide(
         or len({m.message_id for m in messages}) != len(messages)
     ):
         raise SemanticInputError("scope_invalid")
-    own = own_address.casefold()
     if any(
-        not parseaddr(m.sender)[1]
-        or not _address_list(m.recipient)
-        # Real mail frequently carries several To/Cc/Bcc recipients; the own
-        # address must be matched among all of them, not only the first.
-        or own not in _address_set(m)
-        or (
-            parseaddr(m.sender)[1].casefold() == own
-            and "DRAFT" not in m.labels
-            and ("SENT" not in m.labels or "INBOX" in m.labels)
-        )
-        or (parseaddr(m.sender)[1].casefold() != own and "SENT" in m.labels)
+        not _looks_like_address(parseaddr(m.sender)[1])
+        or not any(_looks_like_address(a) for a in _address_list(m.recipient))
+        # A message that is both in the inbox and marked as sent is an anomaly
+        # that cannot be assigned to a side.
+        or ("SENT" in m.labels and "INBOX" in m.labels)
         for m in messages
     ):
         raise SemanticInputError("participants_invalid")
     if len({m.thread_id for m in messages}) != 1:
         raise SemanticInputError("cross_thread_review_required")
     ordered = sorted(messages, key=lambda m: (m.internal_date, m.message_id))
-    inbound = [m for m in ordered if parseaddr(m.sender)[1].casefold() != own_address.casefold()]
+    inbound = [m for m in ordered if not _is_outbound(m, own_address)]
     lead_refs = tuple(
         _evidence(m, "lead:" + m.message_id) for m in inbound if LEAD_OFFER.search(m.text)
     )
