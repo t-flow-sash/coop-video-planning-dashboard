@@ -4,7 +4,7 @@ kind: CronJob
 metadata:
   name: gmail-import-bootstrap
   annotations:
-    coop.example.com/image-source-revision: "0d8c963dd44427465d9f4f480863f8a1102e4269"
+    coop.example.com/image-source-revision: "4caaf021a111706861354dabd127f7039fe226b2"
   labels: &bootstrap-labels
     app.kubernetes.io/name: gmail-import-bootstrap
     app.kubernetes.io/part-of: coop-video-planning
@@ -85,7 +85,7 @@ kind: CronJob
 metadata:
   name: gmail-import-delta
   annotations:
-    coop.example.com/image-source-revision: "0d8c963dd44427465d9f4f480863f8a1102e4269"
+    coop.example.com/image-source-revision: "4caaf021a111706861354dabd127f7039fe226b2"
   labels: &delta-labels
     app.kubernetes.io/name: gmail-import-delta
     app.kubernetes.io/part-of: coop-video-planning

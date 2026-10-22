@@ -38,7 +38,7 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: semantic-worker
-              image: 127.0.0.1:5000/coop-api:git-0d8c963dd444@sha256:e13f8ea17b6eab9731ac9f833098e4c959d179df24d3ffcc7e2d05dcf1babc95
+              image: 127.0.0.1:5000/coop-api:git-4caaf021a111@sha256:52a09fe55cca453ff6a9aa0ad85100a46351512ac78ce1d7bb7b4efbf6f10cba
               imagePullPolicy: IfNotPresent
               command: ["python", "-m", "app.ingestion.gmail_semantic_queue"]
               args: ["--max-batch", "25"]
