@@ -144,6 +144,28 @@ def snapshot(session: Session) -> SemanticStatus:
                 oldest_awaiting_route_at=oldest_awaiting,
             )
         )
+    # Portfolio coverage: live business tracks versus exact operator-provisioned routes.
+    # A route links a track either by business ``record_key`` or by the explicit
+    # ``expected_coop_id`` adoption FK. Synthetic seed rows are never portfolio.
+    live_tracks = (
+        select(Coop.id, Coop.record_key).where(Coop.is_synthetic_seed.is_(False)).subquery()
+    )
+    tracks_total = session.scalar(select(func.count()).select_from(live_tracks)) or 0
+    tracks_routed = (
+        session.scalar(
+            select(func.count())
+            .select_from(live_tracks)
+            .where(
+                exists(
+                    select(SemanticTrackRoute.thread_record_id).where(
+                        (SemanticTrackRoute.record_key == live_tracks.c.record_key)
+                        | (SemanticTrackRoute.expected_coop_id == live_tracks.c.id)
+                    )
+                )
+            )
+        )
+        or 0
+    )
     return SemanticStatus(
         as_of=now,
         coverage_verified=False,
@@ -151,8 +173,13 @@ def snapshot(session: Session) -> SemanticStatus:
             "Message revisions are not business tracks; collection and processing counts "
             "cannot verify portfolio completeness or scheduler state. Routed and awaiting "
             "thread counts only compare already-collected threads with exact provisioned "
-            "routes and cannot prove the mailbox was read in full."
+            "routes and cannot prove the mailbox was read in full. Routed track counts only "
+            "compare live business tracks with exact operator-provisioned routes and cannot "
+            "prove that every real cooperation was discovered, mapped or up to date."
         ),
         domain_records=session.scalar(select(func.count()).select_from(Coop)) or 0,
+        tracks_total=tracks_total,
+        tracks_routed=tracks_routed,
+        tracks_awaiting_route=tracks_total - tracks_routed,
         sources=sources,
     )

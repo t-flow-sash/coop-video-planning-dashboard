@@ -18,6 +18,9 @@ describe("operativer Importstatus", () => {
           semanticStatus: async () => ({
             as_of: "2026-10-21T11:00:00Z",
             domain_records: 21,
+            tracks_total: 21,
+            tracks_routed: 0,
+            tracks_awaiting_route: 21,
             coverage_verified: false,
             coverage_note: "Message revisions are not business tracks",
             sources: [
@@ -62,6 +65,13 @@ describe("operativer Importstatus", () => {
     expect(panel).toHaveTextContent("Threads entdeckt 900");
     expect(panel).toHaveTextContent("mit exakter Route 12");
     expect(panel).toHaveTextContent("ohne Route 888");
+    expect(panel).toHaveTextContent(
+      "Portfolio-Abdeckung: 0 von 21 Kooperationen mit exakter Route",
+    );
+    expect(panel).toHaveTextContent("ohne Route 21");
+    expect(panel).toHaveTextContent(
+      "Eine exakte Route ist keine inhaltliche Übereinstimmung",
+    );
     expect(panel).toHaveTextContent("Coverage nicht verifiziert");
     expect(panel).toHaveTextContent(
       "Message revisions are not business tracks",

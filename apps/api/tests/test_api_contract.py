@@ -25,6 +25,9 @@ SEMANTIC_STATUS_FIELDS = {
     "coverage_verified",
     "coverage_note",
     "domain_records",
+    "tracks_total",
+    "tracks_routed",
+    "tracks_awaiting_route",
     "sources",
 }
 SEMANTIC_SOURCE_FIELDS = {

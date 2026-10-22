@@ -313,4 +313,7 @@ class SemanticStatus(BaseModel):
     coverage_verified: bool
     coverage_note: str
     domain_records: int
+    tracks_total: int
+    tracks_routed: int
+    tracks_awaiting_route: int
     sources: list[SemanticSourceStatus]
