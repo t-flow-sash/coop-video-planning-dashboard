@@ -1,15 +1,16 @@
 name: CI
 on:
   push:
-  pull_request:
+    branches:
+      - "**"
+      - "!dependabot/**"
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, repo-coop-video-planning-dashboard]
     # A stalled step must fail loudly instead of holding a runner indefinitely.
     timeout-minutes: 45
     services:
@@ -19,14 +20,15 @@ jobs:
           POSTGRES_DB: coop_test
           POSTGRES_USER: coop
           POSTGRES_PASSWORD: coop
-        ports: ["5432:5432"]
+          PGPORT: "55435"
+        ports: ["127.0.0.1:55435:55435"]
         options: >-
-          --health-cmd "pg_isready -U coop -d coop_test"
+          --health-cmd "pg_isready -U coop -d coop_test -p 55435"
           --health-interval 3s --health-timeout 3s --health-retries 20
     env:
-      DATABASE_URL: postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test
-      COLLECTOR_DATABASE_URL: postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:5432/coop_test
-      SEMANTIC_DATABASE_URL: postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:5432/coop_test
+      DATABASE_URL: postgresql+psycopg://coop:coop@127.0.0.1:55435/coop_test
+      COLLECTOR_DATABASE_URL: postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:55435/coop_test
+      SEMANTIC_DATABASE_URL: postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:55435/coop_test
       NEXT_PUBLIC_API_URL: /api/v1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -42,6 +44,8 @@ jobs:
       - uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
         with:
           scandir: ./scripts
+      - name: Remove stale Gitleaks installer artifact
+        run: rm -f -- /tmp/gitleaks.tmp
       - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -128,9 +132,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           image_database='coop_image_migration_test'
-          image_database_url="postgresql+psycopg://coop:coop@127.0.0.1:5432/$image_database"
-          image_collector_url="postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:5432/$image_database"
-          image_semantic_url="postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:5432/$image_database"
+          image_database_url="postgresql+psycopg://coop:coop@127.0.0.1:55435/$image_database"
+          image_collector_url="postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:55435/$image_database"
+          image_semantic_url="postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:55435/$image_database"
           test -n "$POSTGRES_SERVICE_ID"
           docker exec "$POSTGRES_SERVICE_ID" psql -v ON_ERROR_STOP=1 -U coop -d postgres \
             -c "DROP DATABASE IF EXISTS $image_database"
@@ -158,14 +162,16 @@ jobs:
       - name: Render and schema-check GitOps manifests
         run: |
           set -Eeuo pipefail
+          archive="$RUNNER_TEMP/kubeconform.tar.gz"
+          kubeconform="$RUNNER_TEMP/kubeconform"
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
-            -o /tmp/kubeconform.tar.gz
-          echo 'c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3  /tmp/kubeconform.tar.gz' \
+            -o "$archive"
+          printf '%s  %s\n' 'c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3' "$archive" \
             | sha256sum --check --strict
-          tar -xzf /tmp/kubeconform.tar.gz kubeconform
+          tar -xzf "$archive" -C "$RUNNER_TEMP" kubeconform
           schema_catalog='https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
           for dir in infrastructure/storage infrastructure/database infrastructure/migration infrastructure/import infrastructure/semantic infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
-            output="/tmp/$(echo "$dir" | tr / -).yaml"
+            output="$RUNNER_TEMP/$(echo "$dir" | tr / -).yaml"
             # Flux removes top-level SOPS metadata before apply. Strip only that
             # metadata block here; encrypted Secret values remain schema-checked.
             kubectl kustomize "$dir" | awk '
@@ -197,12 +203,15 @@ jobs:
                 "$output" clusters/production/flux-kustomizations.yaml \
                 infrastructure/semantic/kustomization.yaml
             fi
-            ./kubeconform -strict -summary -skip CustomResourceDefinition \
+            "$kubeconform" -strict -summary -skip CustomResourceDefinition \
               -schema-location default -schema-location "$schema_catalog" "$output"
           done
       - name: Validate shell syntax
         run: bash -n scripts/*.sh
-      - run: pnpm exec playwright install --with-deps chrome
+      - name: Verify pre-provisioned Chrome
+        run: |
+          command -v google-chrome
+          google-chrome --version
       - run: |
           set -Eeuo pipefail
 
@@ -259,7 +268,7 @@ jobs:
           gateway_pid=$!
 
           ready=false
-          for i in {1..30}; do
+          for _ in {1..30}; do
             if curl -fsS http://127.0.0.1:3001/_gateway/health \
               && curl -fsS http://127.0.0.1:3001/api/v1/health/ready \
               && curl -fsS http://127.0.0.1:3001/coops; then

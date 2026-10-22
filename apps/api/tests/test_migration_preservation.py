@@ -12,7 +12,9 @@ from sqlalchemy import create_engine, text
 
 from app.test_safety import assert_safe_test_connection
 
-BASE_DATABASE_URL = "postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test"
+BASE_DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test"
+)
 EXPECTED_SERVER_ADDRESS = os.environ.get("TEST_DATABASE_EXPECTED_SERVER_ADDRESS")
 API_ROOT = Path(__file__).resolve().parents[1]
 

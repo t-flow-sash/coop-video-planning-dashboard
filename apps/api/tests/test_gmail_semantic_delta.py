@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
 from uuid import UUID, uuid4
 
@@ -131,11 +132,13 @@ def sample() -> list[ParsedMessage]:
 def test_constrained_writer_create_update_and_replay(test_engine: Engine) -> None:
     """Exercise the actual least-privilege login, not the fixture's admin role."""
     admin = test_engine.url.render_as_string(hide_password=False)
-    restricted = (
-        "postgresql+psycopg://coop_semantic_writer:semantic-test-only@127.0.0.1:5432/coop_test"
+    restricted = os.environ.get(
+        "SEMANTIC_DATABASE_URL",
+        "postgresql+psycopg://coop_semantic_writer:semantic-test-only@127.0.0.1:5432/coop_test",
     )
-    collector = (
-        "postgresql+psycopg://coop_evidence_collector:collector-test-only@127.0.0.1:5432/coop_test"
+    collector = os.environ.get(
+        "COLLECTOR_DATABASE_URL",
+        "postgresql+psycopg://coop_evidence_collector:collector-test-only@127.0.0.1:5432/coop_test",
     )
     semantic_database_access.provision(admin, restricted, collector)
     database_access.reconcile_collector_access(admin)
@@ -157,11 +160,13 @@ def test_constrained_writer_create_update_and_replay(test_engine: Engine) -> Non
 
 def test_constrained_writer_existing_update_and_replay(test_engine: Engine) -> None:
     admin = test_engine.url.render_as_string(hide_password=False)
-    restricted = (
-        "postgresql+psycopg://coop_semantic_writer:semantic-test-only@127.0.0.1:5432/coop_test"
+    restricted = os.environ.get(
+        "SEMANTIC_DATABASE_URL",
+        "postgresql+psycopg://coop_semantic_writer:semantic-test-only@127.0.0.1:5432/coop_test",
     )
-    collector = (
-        "postgresql+psycopg://coop_evidence_collector:collector-test-only@127.0.0.1:5432/coop_test"
+    collector = os.environ.get(
+        "COLLECTOR_DATABASE_URL",
+        "postgresql+psycopg://coop_evidence_collector:collector-test-only@127.0.0.1:5432/coop_test",
     )
     semantic_database_access.provision(admin, restricted, collector)
     database_access.reconcile_collector_access(admin)
