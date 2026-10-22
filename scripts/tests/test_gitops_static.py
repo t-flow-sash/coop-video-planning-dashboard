@@ -827,7 +827,13 @@ class RenderedSecurityContractTests(unittest.TestCase):
         # without schema, digest-pin and dormancy validation.
         self.assertIn("infrastructure/semantic", render_loop.group(1))
         self.assertIn('"$dir" == infrastructure/semantic', workflow)
-        self.assertIn("SEMANTIC_WORKER_ARMED", workflow)
+        # The arm-flag proof now lives in the validator the CI invokes; assert
+        # both the invocation and the flag so a silent removal is still caught.
+        self.assertIn("scripts/validate_semantic_dormant.py", workflow)
+        validator = (ROOT / "scripts/validate_semantic_dormant.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("SEMANTIC_WORKER_ARMED", validator)
         # Promotion stays untouched while the slice is dormant.
         promotion = (ROOT / "scripts/build-and-push-images.sh").read_text(
             encoding="utf-8"
@@ -1216,8 +1222,9 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Prove migrations from production API image", workflow)
         self.assertIn("coop_image_migration_test", workflow)
+        self.assertIn('-e COLLECTOR_DATABASE_URL="$image_collector_url"', workflow)
         self.assertIn(
-            'COLLECTOR_DATABASE_URL="$image_collector_url" coop-api:ci', workflow
+            '-e SEMANTIC_DATABASE_URL="$image_semantic_url" coop-api:ci)', workflow
         )
         self.assertIn(
             '"${image_run[@]}" python -m app.database_access provision', workflow
@@ -1226,7 +1233,22 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         self.assertIn(
             '"${image_run[@]}" python -m app.database_access reconcile', workflow
         )
-        self.assertIn("import app.database_access", workflow)
+        # The semantic writer attestation depends on the database-wide invariants
+        # the collector reconcile establishes, so pin the ordered chain: a later
+        # reorder would only surface as a red run ~30 minutes in.
+        self.assertLess(
+            workflow.index('"${image_run[@]}" python -m app.database_access reconcile'),
+            workflow.index(
+                '"${image_run[@]}" python -m app.semantic_database_access reconcile'
+            ),
+        )
+        self.assertIn(
+            '"${image_run[@]}" python -m app.semantic_database_access provision',
+            workflow,
+        )
+        # The promoted image must actually ship the semantic runner and writer ACL.
+        self.assertIn("import app.ingestion.gmail_semantic_queue", workflow)
+        self.assertRegex(workflow, r"import app\.database_access(;|\b)")
         self.assertIn("SELECT version_num FROM alembic_version", workflow)
         self.assertIn('source == ("gmail-open-coops-v1", "GMAIL", True)', workflow)
         heads = alembic_heads()

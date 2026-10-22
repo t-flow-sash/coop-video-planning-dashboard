@@ -19,12 +19,17 @@ class CollectorIsolationStaticTests(unittest.TestCase):
 
     def test_migration_reconciles_collector_acl_after_every_upgrade(self) -> None:
         manifest = (ROOT / "infrastructure/migration/migration-job.yaml").read_text()
+        # Order is part of the contract: the semantic writer attestation depends on the
+        # database-wide routine/schema invariants that the collector reconcile sets up.
         self.assertIn(
-            "python -m app.database_access provision && alembic upgrade head && "
-            "python -m app.database_access reconcile",
+            'args: ["python -m app.database_access provision && alembic upgrade head && '
+            "python -m app.database_access reconcile && "
+            'python -m app.semantic_database_access reconcile-dormant"]',
             manifest,
         )
         self.assertIn("COLLECTOR_DATABASE_URL", manifest)
+        # The dormant writer must never receive a credential through the migration Job.
+        self.assertNotIn("SEMANTIC_DATABASE_URL", manifest)
 
 
 if __name__ == "__main__":

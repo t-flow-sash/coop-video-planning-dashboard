@@ -153,6 +153,63 @@ def test_semantic_reconcile_fails_closed_on_owned_object(test_engine: Engine) ->
         writer.reconcile(admin)
 
 
+@pytest.mark.integration
+def test_reconcile_dormant_matches_production_migration_job_first_run(
+    test_engine: Engine,
+) -> None:
+    """The production migration Job reconciles the ACL of a NOLOGIN, passwordless role.
+
+    The role is cluster-global, so a prior ``provision`` that set ``LOGIN`` must be
+    reset to reproduce the real first-run state; otherwise the dormant path is never
+    actually exercised. The ordered chain mirrors the Job args and CI steps:
+    ``database_access reconcile`` (database-wide invariants) must run before the
+    semantic writer's reconcile-dormant attestation.
+    """
+    admin, restricted, collector = _urls(test_engine)
+    writer.provision(admin, restricted, collector)
+    with test_engine.begin() as connection:
+        connection.exec_driver_sql(f"ALTER ROLE {writer.ROLE} NOLOGIN PASSWORD NULL")
+    engine = create_engine(restricted)
+    try:
+        with pytest.raises(DBAPIError), engine.connect():
+            pass
+        database_access.reconcile_collector_access(admin)
+        writer.reconcile(admin, login=False)
+        with test_engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text("SELECT rolcanlogin FROM pg_roles WHERE rolname=:r"),
+                    {"r": writer.ROLE},
+                )
+                is False
+            )
+            assert connection.scalar(
+                text("SELECT has_table_privilege(:r,'coop','INSERT')"), {"r": writer.ROLE}
+            )
+            assert connection.scalar(
+                text("SELECT has_table_privilege(:r,'semantic_queue_cursor','UPDATE')"),
+                {"r": writer.ROLE},
+            )
+            assert connection.scalar(
+                text("SELECT has_database_privilege(:r,current_database(),'CONNECT')"),
+                {"r": writer.ROLE},
+            )
+            assert not connection.scalar(
+                text("SELECT has_database_privilege(:r,current_database(),'TEMPORARY')"),
+                {"r": writer.ROLE},
+            )
+            assert not connection.scalar(
+                text("SELECT has_table_privilege('coop_evidence_collector','coop','INSERT')")
+            )
+        # A live reconcile must fail closed while the role still cannot log in.
+        with pytest.raises(RuntimeError, match="unsafe"):
+            writer.reconcile(admin)
+    finally:
+        engine.dispose()
+        writer.provision(admin, restricted, collector)
+        writer.reconcile(admin)
+
+
 def test_semantic_url_validation_is_fail_closed(test_engine: Engine) -> None:
     admin, restricted, collector = _urls(test_engine)
     assert (

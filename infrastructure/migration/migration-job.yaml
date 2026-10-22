@@ -31,7 +31,9 @@ spec:
           image: 127.0.0.1:5000/coop-api:git-000000000000@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-ec"]
-          args: ["python -m app.database_access provision && alembic upgrade head && python -m app.database_access reconcile"]
+          # The semantic writer stays NOLOGIN with no writer Secret mounted here; only its
+          # dormant ACL is reconciled so activation needs no later schema change.
+          args: ["python -m app.database_access provision && alembic upgrade head && python -m app.database_access reconcile && python -m app.semantic_database_access reconcile-dormant"]
           env:
             - name: DATABASE_URL
               valueFrom:

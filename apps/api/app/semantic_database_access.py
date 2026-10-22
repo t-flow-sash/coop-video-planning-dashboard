@@ -123,14 +123,15 @@ def provision(admin_url: str, writer_url: str, collector_url: str) -> None:
         )
 
 
-def reconcile(admin_url: str) -> None:
-    """Revoke drift before narrowly granting, then attest effective permissions.
+def reconcile(admin_url: str, *, login: bool = True) -> None:
+    """Revoke drift and attest effective rights, including a dormant NOLOGIN role.
 
-    Failure rolls the entire transaction back; caller must block the writer until
-    reconciliation succeeds. PUBLIC/membership/ownership bypasses fail closed.
+    The migration uses login=False: granting rights to a NOLOGIN role does not
+    create a runnable writer. Activation still needs separate credential
+    provisioning, login=True reconciliation and real-login privilege probes.
     """
     with psycopg.connect(_psycopg_url(admin_url)) as connection, connection.cursor() as cursor:
-        _check_role(cursor, login=True)
+        _check_role(cursor, login=login)
         cursor.execute("SELECT current_schema(), current_database()")
         schema, database = _required_row(cursor)
         cursor.execute(
@@ -209,6 +210,13 @@ def reconcile(admin_url: str) -> None:
             sql.SQL("REVOKE ALL ON DATABASE {} FROM {}").format(
                 sql.Identifier(database), sql.Identifier(ROLE)
             )
+        )
+        # PostgreSQL grants TEMPORARY to PUBLIC by default and there is no
+        # role-level DENY, so remove that ambient privilege before attesting it.
+        # Without this, a fresh database (where no collector reconcile has run
+        # yet) fails the database ACL attestation below.
+        cursor.execute(
+            sql.SQL("REVOKE TEMPORARY ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database))
         )
         cursor.execute(
             sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
@@ -313,7 +321,7 @@ def reconcile(admin_url: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("provision", "reconcile"))
+    parser.add_argument("action", choices=("provision", "reconcile", "reconcile-dormant"))
     args = parser.parse_args()
     admin_url = os.environ.get("DATABASE_URL", "")
     if args.action == "provision":
@@ -323,7 +331,7 @@ def main() -> int:
             os.environ.get("COLLECTOR_DATABASE_URL", ""),
         )
     else:
-        reconcile(admin_url)
+        reconcile(admin_url, login=args.action == "reconcile")
     return 0
 
 
