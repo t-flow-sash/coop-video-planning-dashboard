@@ -1,6 +1,7 @@
 name: CI
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -9,7 +10,10 @@ permissions:
 
 jobs:
   quality:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.actor == github.repository_owner &&
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: [self-hosted, linux, x64, repo-coop-video-planning-dashboard]
     # A stalled step must fail loudly instead of holding a runner indefinitely.
     timeout-minutes: 45
