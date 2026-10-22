@@ -178,9 +178,10 @@ job.write_text(updated)
 
 semantic = staged("infrastructure/semantic/semantic-cronjob.yaml")
 text = semantic.read_text()
+promoted_api = f"127.0.0.1:5000/coop-api:{tag}@{api_digest}"
 updated, semantic_count = re.subn(
-    r'(?m)^(\s+image: ")127\.0\.0\.1:5000/coop-api:git-[0-9a-f]{12}@sha256:[0-9a-f]{64}("$)',
-    rf"\g<1>{api_image}:{tag}@{api_digest}\g<2>",
+    r'(?m)^(\s+image: "?)127\.0\.0\.1:5000/coop-api:git-[0-9a-f]{12}@sha256:[0-9a-f]{64}("?)$',
+    lambda match: f"{match.group(1)}{promoted_api}{match.group(2)}",
     text,
 )
 if semantic_count != 1:

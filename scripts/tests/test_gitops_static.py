@@ -696,7 +696,7 @@ class RenderedSecurityContractTests(unittest.TestCase):
             image,
         )
 
-    def test_semantic_worker_is_dormant_hardened_and_exactly_staged(self) -> None:
+    def test_semantic_worker_is_armed_hardened_and_exactly_staged(self) -> None:
         objects = self.by_kind_name("infrastructure/semantic")
         cronjobs = {
             name: item for (kind, name), item in objects.items() if kind == "CronJob"
@@ -704,9 +704,9 @@ class RenderedSecurityContractTests(unittest.TestCase):
         self.assertEqual(set(cronjobs), {"gmail-semantic-worker"})
         cronjob = cronjobs["gmail-semantic-worker"]
         spec = cronjob["spec"]
-        # The whole semantic slice stays dormant until a separately reviewed
-        # activation change; a suspended scheduler is not an armed one.
-        self.assertIs(spec["suspend"], True)
+        # Activation: the scheduler runs with a promoted digest and an explicit
+        # arm flag; the dormant pair (suspend true + armed false) was the gate.
+        self.assertIs(spec["suspend"], False)
         self.assertEqual(spec["concurrencyPolicy"], "Forbid")
         self.assertEqual(spec["jobTemplate"]["spec"]["backoffLimit"], 0)
         self.assertEqual(spec["jobTemplate"]["spec"]["activeDeadlineSeconds"], 900)
@@ -729,7 +729,7 @@ class RenderedSecurityContractTests(unittest.TestCase):
             container["securityContext"]["capabilities"], {"drop": ["ALL"]}
         )
         env = {item["name"]: item for item in container["env"]}
-        self.assertEqual(env["SEMANTIC_WORKER_ARMED"]["value"], "false")
+        self.assertEqual(env["SEMANTIC_WORKER_ARMED"]["value"], "true")
         self.assertEqual(env["HTTPS_PROXY"]["value"], "http://gmail-egress-proxy:10000")
         self.assertEqual(env["HTTP_PROXY"]["value"], "http://gmail-egress-proxy:10000")
         # The semantic writer must never borrow the collector or runtime credential.
@@ -806,7 +806,10 @@ class RenderedSecurityContractTests(unittest.TestCase):
         }
         semantic_sync = syncs["coop-semantic"]
         self.assertEqual(semantic_sync["spec"]["path"], "./infrastructure/semantic")
-        self.assertIs(semantic_sync["spec"]["suspend"], True)
+        # Activation: the semantic sync is unsuspended and waits for database,
+        # migration and import so the release migration Job provisions the writer
+        # credential before the scheduler may run.
+        self.assertIs(semantic_sync["spec"]["suspend"], False)
         self.assertEqual(
             semantic_sync["spec"]["dependsOn"],
             [
@@ -829,8 +832,8 @@ class RenderedSecurityContractTests(unittest.TestCase):
         self.assertIn('"$dir" == infrastructure/semantic', workflow)
         # The arm-flag proof now lives in the validator the CI invokes; assert
         # both the invocation and the flag so a silent removal is still caught.
-        self.assertIn("scripts/validate_semantic_dormant.py", workflow)
-        validator = (ROOT / "scripts/validate_semantic_dormant.py").read_text(
+        self.assertIn("scripts/validate_semantic_activation.py", workflow)
+        validator = (ROOT / "scripts/validate_semantic_activation.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("SEMANTIC_WORKER_ARMED", validator)

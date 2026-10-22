@@ -73,7 +73,7 @@ metadata:
   name: coop-semantic
   namespace: flux-system
 spec:
-  suspend: true
+  suspend: false
   dependsOn: [{name: coop-database}, {name: coop-migration}, {name: coop-import}]
   interval: 10m
   retryInterval: 1m

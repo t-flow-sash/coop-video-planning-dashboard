@@ -4,5 +4,6 @@ namespace: coop-prod
 resources:
   - semantic-cronjob.yaml
   - network-policy.yaml
-# Intentionally no image transformer or Secret until verified image/runner and
-# separately encrypted dedicated writer credential are reviewed together.
+# The writer's dedicated Secret is provisioned with the release migration Job in
+# infrastructure/migration (it sets the coop_semantic_writer credential before the
+# scheduler may run); the worker image travels with the release digest.

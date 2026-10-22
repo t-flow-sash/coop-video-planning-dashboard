@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: coop-migration-690e3fe1c367
+  name: coop-migration-b52081c6726b
   labels:
     app.kubernetes.io/name: coop-migration
     app.kubernetes.io/part-of: coop-video-planning
@@ -31,9 +31,10 @@ spec:
           image: 127.0.0.1:5000/coop-api:git-000000000000@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-ec"]
-          # The semantic writer stays NOLOGIN with no writer Secret mounted here; only its
-          # dormant ACL is reconciled so activation needs no later schema change.
-          args: ["python -m app.database_access provision && alembic upgrade head && python -m app.database_access reconcile && python -m app.semantic_database_access reconcile-dormant"]
+          # The dedicated writer Secret is mounted here so the release Job can set
+          # the coop_semantic_writer credential and then enable LOGIN with the
+          # enforced ACL before the semantic scheduler is allowed to run.
+          args: ["python -m app.database_access provision && alembic upgrade head && python -m app.database_access reconcile && python -m app.semantic_database_access provision && python -m app.semantic_database_access reconcile"]
           env:
             - name: DATABASE_URL
               valueFrom:
@@ -41,6 +42,9 @@ spec:
             - name: COLLECTOR_DATABASE_URL
               valueFrom:
                 secretKeyRef: {name: coop-runtime, key: COLLECTOR_DATABASE_URL}
+            - name: SEMANTIC_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: gmail-semantic-db, key: SEMANTIC_DATABASE_URL}
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {cpu: 500m, memory: 512Mi}
