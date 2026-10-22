@@ -4,8 +4,8 @@ metadata:
   name: gmail-full-pilot-admission-params
   namespace: coop-prod
 data:
-  image: "127.0.0.1:5000/coop-api:git-102dac5b0838@sha256:ba8fe83c37e5dbd485b8439279a128522b7c550ae855929d4bf087ff3fbb50d3"
-  imageSourceRevision: "102dac5b08381934910041151979f41298a3fcb7"
+  image: "127.0.0.1:5000/coop-api:git-42969e626881@sha256:fea37298b7785aaee32584f05a34f4246cafa862c042e0a21b5b9c0cc7defddf"
+  imageSourceRevision: "42969e626881763cd462a890149465d80109168f"
   query: "in:anywhere -in:chats after:2026/01/01 {label:Legal to:legal@tsh-social.com from:legal@tsh-social.com}"
   querySha256: "e362825c8b3be3c500d6da685c7e0b2043641fa2136fd801acf57395154f967d"
   accountSha256: "d260486537baa3f006b0e0e3168df3ba58b784b56f0846e150690af7457b14bb"
