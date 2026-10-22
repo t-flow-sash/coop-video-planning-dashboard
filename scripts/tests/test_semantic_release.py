@@ -60,7 +60,9 @@ class SemanticReleaseContracts(unittest.TestCase):
             container = spec['jobTemplate']['spec']['template']['spec']['containers'][0]
             candidate_flux = json.loads(json.dumps(flux))
             if broken == 'unarmed':
-                container['env'][0]['value'] = 'false'
+                next(e for e in container['env'] if e['name'] == 'SEMANTIC_WORKER_ARMED')[
+                    'value'
+                ] = 'false'
             elif broken == 'suspended':
                 spec['suspend'] = True
             elif broken == 'sentinel-image':
@@ -72,7 +74,9 @@ class SemanticReleaseContracts(unittest.TestCase):
                     if item.get('metadata', {}).get('name') == 'coop-semantic':
                         item['spec']['suspend'] = True
             else:
-                container['env'][4]['valueFrom']['secretKeyRef']['name'] = 'coop-runtime'
+                next(e for e in container['env'] if e['name'] == 'DATABASE_URL')[
+                    'valueFrom'
+                ]['secretKeyRef']['name'] = 'coop-runtime'
             with self.subTest(broken=broken), self.assertRaises(AssertionError):
                 validate(candidate, candidate_flux, definition)
 

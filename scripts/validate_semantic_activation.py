@@ -46,8 +46,19 @@ def validate(render: list[dict], flux: list[dict], source: dict) -> None:
         'DATABASE_URL', 'GMAIL_CLIENT_ID', 'GMAIL_CLIENT_SECRET',
         'GMAIL_REFRESH_TOKEN', 'GMAIL_ACCOUNT',
     }
-    assert all(entry['valueFrom']['secretKeyRef']['name'] == 'gmail-oauth'
-               for name, entry in env.items() if name.startswith('GMAIL_'))
+    assert all(
+        entry['valueFrom']['secretKeyRef']['name'] == 'gmail-oauth'
+        for name, entry in env.items()
+        if name.startswith('GMAIL_') and entry.get('valueFrom')
+    )
+    # The provider contract requires the pinned account fingerprint; without it the
+    # runner fails closed with a retryable configuration error at every run.
+    module_source = Path('apps/api/app/ingestion/gmail.py').read_text()
+    fingerprint = re.search(r'EXPECTED_ACCOUNT_SHA256 = "([0-9a-f]{64})"', module_source)
+    assert fingerprint is not None, 'expected account fingerprint constant missing'
+    assert env.get('GMAIL_ACCOUNT_SHA256', {}).get('value') == fingerprint.group(1), (
+        'semantic worker must pin the same Gmail account fingerprint as the collector'
+    )
     policy = next(item for item in render if item['kind'] == 'NetworkPolicy')
     assert policy['spec']['podSelector']['matchLabels'] == {
         'coop.example.com/semantic-worker': 'true'
