@@ -429,3 +429,46 @@ def test_full_get_and_identity_validation():
         client.fetch("m2")
     with pytest.raises(SemanticInputError, match="invalid_message_id"):
         client.fetch("../../something")
+
+
+def test_decide_matches_own_address_among_multiple_recipients():
+    """Real mail carries several To/Cc recipients; own must be found in all."""
+    inbound = msg(
+        "m1",
+        "Collaboration offer: fee 500 EUR, deadline 2026-12-01",
+        sender="partner@example.net",
+        labels=["INBOX"],
+    )
+    inbound["payload"]["headers"][1] = {
+        "name": "To",
+        "value": "other@example.org, me@example.net",
+    }
+    outbound = msg(
+        "m2",
+        "We accept fee 500 EUR and deadline 2026-12-01",
+        sender="me@example.net",
+        labels=["SENT"],
+    )
+    outbound["payload"]["headers"][1] = {
+        "name": "To",
+        "value": "partner@example.net, colleague@example.org",
+    }
+    messages = [parse_message(raw) for raw in (inbound, outbound)]
+    # The regression is the participant gate: multi-recipient mail must reach the
+    # decision layer instead of failing closed with participants_invalid.
+    decision = decide(messages, own_address="me@example.net", existing_track=False)
+    assert decision.lead.verdict == Verdict.ACCEPT
+    assert decision.fee.verdict is not None
+    assert decision.deadline.verdict is not None
+    assert all(
+        getattr(decision, name).verdict in {Verdict.ACCEPT, Verdict.REVIEW, Verdict.NO_CHANGE}
+        for name in ("lead", "fee", "deadline", "status")
+    )
+
+
+def test_decide_still_rejects_messages_that_do_not_include_own_address():
+    raw = msg("m1", "Collaboration offer: fee 500 EUR", sender="partner@example.net")
+    raw["payload"]["headers"][1] = {"name": "To", "value": "third@example.org"}
+    messages = [parse_message(raw)]
+    with pytest.raises(SemanticInputError, match="participants_invalid"):
+        decide(messages, own_address="me@example.net", existing_track=False)

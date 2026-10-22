@@ -15,7 +15,7 @@ import re
 import urllib.parse
 from dataclasses import dataclass
 from datetime import date
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 from enum import StrEnum
 from html.parser import HTMLParser
 from typing import Any
@@ -479,6 +479,23 @@ def _decide_term(
     return FieldDecision(Verdict.ACCEPT, value, refs)
 
 
+def _address_list(value: str) -> list[str]:
+    """All parseable addresses of a header value (handles comma-separated lists)."""
+    return [address for _, address in getaddresses([value]) if address]
+
+
+def _address_set(message: ParsedMessage) -> set[str]:
+    """Every address on the message (sender plus all To/Cc/Bcc recipients)."""
+    found = {
+        address.casefold()
+        for address in _address_list(message.recipient) + _address_list(message.sender)
+    }
+    sender = parseaddr(message.sender)[1]
+    if sender:
+        found.add(sender.casefold())
+    return found
+
+
 def decide(
     messages: list[ParsedMessage], *, own_address: str, existing_track: bool
 ) -> SemanticDecision:
@@ -490,17 +507,19 @@ def decide(
         or len({m.message_id for m in messages}) != len(messages)
     ):
         raise SemanticInputError("scope_invalid")
+    own = own_address.casefold()
     if any(
         not parseaddr(m.sender)[1]
-        or not parseaddr(m.recipient)[1]
-        or own_address.casefold()
-        not in {parseaddr(m.sender)[1].casefold(), parseaddr(m.recipient)[1].casefold()}
+        or not _address_list(m.recipient)
+        # Real mail frequently carries several To/Cc/Bcc recipients; the own
+        # address must be matched among all of them, not only the first.
+        or own not in _address_set(m)
         or (
-            parseaddr(m.sender)[1].casefold() == own_address.casefold()
+            parseaddr(m.sender)[1].casefold() == own
             and "DRAFT" not in m.labels
             and ("SENT" not in m.labels or "INBOX" in m.labels)
         )
-        or (parseaddr(m.sender)[1].casefold() != own_address.casefold() and "SENT" in m.labels)
+        or (parseaddr(m.sender)[1].casefold() != own and "SENT" in m.labels)
         for m in messages
     ):
         raise SemanticInputError("participants_invalid")
