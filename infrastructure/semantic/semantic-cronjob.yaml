@@ -44,6 +44,7 @@ spec:
               args: ["--max-batch", "25"]
               env:
                 - {name: SEMANTIC_WORKER_ARMED, value: "true"}
+                - {name: GMAIL_ACCOUNT_SHA256, value: "d260486537baa3f006b0e0e3168df3ba58b784b56f0846e150690af7457b14bb"}
                 - {name: HTTPS_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: HTTP_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: NO_PROXY, value: "postgres,postgres.coop-prod.svc,gmail-egress-proxy,127.0.0.1,localhost"}
