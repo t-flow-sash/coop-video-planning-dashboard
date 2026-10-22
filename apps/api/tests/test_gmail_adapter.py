@@ -598,6 +598,23 @@ def test_full_scan_rejects_repeated_page_cursor() -> None:
 
 
 @pytest.mark.no_db
+def test_empty_search_result_is_not_a_transport_failure() -> None:
+    # Gmail answers a query that matches nothing with 204/empty rather than 200. A
+    # query without hits is a legitimate empty result and must never fail an import
+    # or discovery run with messages_list_failed.
+    responses = authorized_responses()
+    responses["users/me/messages?"] = [(204, {})]
+    responses["gmail.googleapis.com/gmail/v1/users/me/profile"] = [
+        (200, {"emailAddress": "legal@example.com", "historyId": "100"}),
+        (200, {"emailAddress": "legal@example.com", "historyId": "100"}),
+    ]
+
+    snapshot = GmailClient(config(), FakeTransport(responses)).full_snapshot("exact query")
+
+    assert snapshot.messages == ()
+
+
+@pytest.mark.no_db
 @pytest.mark.parametrize(
     ("status", "expected_code", "retryable"),
     [

@@ -516,6 +516,11 @@ class GmailClient:
             if page_token is not None:
                 params["pageToken"] = page_token
             status, payload = self._get("messages", params, token)
+            # Gmail answers "no matching messages" with 204/empty, not 200. That is a
+            # legitimate empty result, never a transport failure: a query without hits
+            # must not fail an import/discovery run.
+            if status == 204:
+                return message_ids
             if status == 429 or status >= 500:
                 raise GmailHttpError("messages_unavailable")
             if status != 200:
