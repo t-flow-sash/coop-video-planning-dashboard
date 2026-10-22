@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import cast
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -13,6 +13,7 @@ from app.models import (
     IngestionRun,
     IngestionSource,
     SemanticMessageState,
+    SemanticTrackRoute,
     SourceRecord,
     SourceRecordRevision,
 )
@@ -79,6 +80,35 @@ def snapshot(session: Session) -> SemanticStatus:
                     oldest is None or observed < oldest
                 ):
                     oldest = observed
+        # Routing coverage: collected threads versus exact operator-provisioned routes.
+        # Both sides are evidence-derived; they cannot prove the mailbox is complete.
+        awaiting_rows = session.execute(
+            select(SourceRecord.created_at).where(
+                SourceRecord.source_id == source.id,
+                SourceRecord.record_type == "GMAIL_THREAD",
+                ~exists(
+                    select(SemanticTrackRoute.thread_record_id).where(
+                        SemanticTrackRoute.thread_record_id == SourceRecord.id
+                    )
+                ),
+            )
+        ).all()
+        threads_awaiting = len(awaiting_rows)
+        threads_discovered = (
+            session.scalar(
+                select(func.count())
+                .select_from(SourceRecord)
+                .where(
+                    SourceRecord.source_id == source.id,
+                    SourceRecord.record_type == "GMAIL_THREAD",
+                )
+            )
+            or 0
+        )
+        oldest_awaiting = min(
+            (row[0] for row in awaiting_rows if row[0] is not None),
+            default=None,
+        )
         sources.append(
             SemanticSourceStatus(
                 enabled=source.enabled,
@@ -108,6 +138,10 @@ def snapshot(session: Session) -> SemanticStatus:
                     if run and run.finished_at and run.status == "SUCCEEDED"
                     else None
                 ),
+                threads_discovered=threads_discovered,
+                threads_routed=threads_discovered - threads_awaiting,
+                threads_awaiting_route=threads_awaiting,
+                oldest_awaiting_route_at=oldest_awaiting,
             )
         )
     return SemanticStatus(
@@ -115,7 +149,9 @@ def snapshot(session: Session) -> SemanticStatus:
         coverage_verified=False,
         coverage_note=(
             "Message revisions are not business tracks; collection and processing counts "
-            "cannot verify portfolio completeness or scheduler state."
+            "cannot verify portfolio completeness or scheduler state. Routed and awaiting "
+            "thread counts only compare already-collected threads with exact provisioned "
+            "routes and cannot prove the mailbox was read in full."
         ),
         domain_records=session.scalar(select(func.count()).select_from(Coop)) or 0,
         sources=sources,

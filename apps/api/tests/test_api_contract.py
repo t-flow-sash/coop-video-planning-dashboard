@@ -42,6 +42,10 @@ SEMANTIC_SOURCE_FIELDS = {
     "last_semantic_activity",
     "collector_age_seconds",
     "last_collector_run",
+    "threads_discovered",
+    "threads_routed",
+    "threads_awaiting_route",
+    "oldest_awaiting_route_at",
 }
 SEMANTIC_COLLECTOR_RUN_FIELDS = {"mode", "status", "started_at", "finished_at"}
 
@@ -109,6 +113,7 @@ def test_semantic_status_contract_declares_exactly_the_documented_fields() -> No
         "last_semantic_activity",
         "collector_age_seconds",
         "last_collector_run",
+        "oldest_awaiting_route_at",
     }
     for field in sorted(nullable):
         declared = components["SemanticSourceStatus"]["properties"][field]

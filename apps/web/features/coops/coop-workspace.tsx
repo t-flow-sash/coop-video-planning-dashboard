@@ -480,10 +480,8 @@ export function CoopWorkspace({
               ) : (
                 <>
                   <p>
-                    <strong>Coverage nicht verifiziert.</strong> Nachrichten
-                    sind keine Kooperationen; die Zähler belegen keine
-                    Vollständigkeit des Portfolios oder einen laufenden
-                    Scheduler.
+                    <strong>Coverage nicht verifiziert.</strong>{" "}
+                    {semanticStatus.coverage_note}
                   </p>
                   <p>
                     Stand der Datenbank:{" "}
@@ -538,9 +536,22 @@ export function CoopWorkspace({
                           : `${source.collector_age_seconds} Sekunden`}
                         . Collector-Erfolg ist keine semantische Verarbeitung.
                       </p>
+                      <p>
+                        Threads entdeckt {source.threads_discovered} · mit
+                        exakter Route {source.threads_routed} · ohne Route{" "}
+                        {source.threads_awaiting_route}
+                        {source.oldest_awaiting_route_at
+                          ? ` · ältester Thread ohne Route: ${new Date(
+                              source.oldest_awaiting_route_at,
+                            ).toLocaleString("de-DE")}`
+                          : ""}
+                        . Threads ohne Route bleiben Review; Zuordnung nie
+                        allein über Name, Betreff oder Thread.
+                      </p>
                       {(source.review > 0 ||
                         source.retry > 0 ||
-                        source.backlog > 0) && (
+                        source.backlog > 0 ||
+                        source.threads_awaiting_route > 0) && (
                         <p>
                           Unklare Fälle und ausstehende Belege bleiben offen;
                           keine automatische Freigabe oder Hochrechnung auf

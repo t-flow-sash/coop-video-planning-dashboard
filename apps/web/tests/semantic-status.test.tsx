@@ -41,6 +41,10 @@ describe("operativer Importstatus", () => {
                   started_at: "2026-10-21T09:59:00Z",
                   finished_at: "2026-10-21T10:00:00Z",
                 },
+                threads_discovered: 900,
+                threads_routed: 12,
+                threads_awaiting_route: 888,
+                oldest_awaiting_route_at: "2026-10-12T11:00:00Z",
               },
             ],
           }),
@@ -55,7 +59,13 @@ describe("operativer Importstatus", () => {
     expect(panel).toHaveTextContent("CREATE 2");
     expect(panel).toHaveTextContent("UPDATE 3");
     expect(panel).toHaveTextContent("Review 4");
+    expect(panel).toHaveTextContent("Threads entdeckt 900");
+    expect(panel).toHaveTextContent("mit exakter Route 12");
+    expect(panel).toHaveTextContent("ohne Route 888");
     expect(panel).toHaveTextContent("Coverage nicht verifiziert");
+    expect(panel).toHaveTextContent(
+      "Message revisions are not business tracks",
+    );
     expect(panel).toHaveTextContent(
       "Collector-Erfolg ist keine semantische Verarbeitung",
     );

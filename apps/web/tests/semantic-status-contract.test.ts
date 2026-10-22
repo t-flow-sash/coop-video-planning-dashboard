@@ -72,6 +72,7 @@ describe("semantischer API-Vertrag", () => {
       "last_semantic_activity",
       "collector_age_seconds",
       "last_collector_run",
+      "oldest_awaiting_route_at",
     ]) {
       expect(fields.get(name), name).toContain("null");
     }

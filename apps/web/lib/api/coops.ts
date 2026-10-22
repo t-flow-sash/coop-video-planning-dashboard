@@ -105,6 +105,10 @@ export interface SemanticSourceStatus {
   last_semantic_activity: string | null;
   collector_age_seconds: number | null;
   last_collector_run: SemanticCollectorRun | null;
+  threads_discovered: number;
+  threads_routed: number;
+  threads_awaiting_route: number;
+  oldest_awaiting_route_at: string | null;
 }
 
 export interface SemanticStatus {

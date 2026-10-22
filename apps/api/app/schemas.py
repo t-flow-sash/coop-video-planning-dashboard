@@ -298,6 +298,10 @@ class SemanticSourceStatus(BaseModel):
     last_semantic_activity: datetime | None
     collector_age_seconds: int | None
     last_collector_run: SemanticCollectorRun | None
+    threads_discovered: int
+    threads_routed: int
+    threads_awaiting_route: int
+    oldest_awaiting_route_at: datetime | None
 
 
 class SemanticStatus(BaseModel):

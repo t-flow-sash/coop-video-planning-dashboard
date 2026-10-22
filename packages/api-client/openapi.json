@@ -2453,6 +2453,30 @@
                 "type": "null"
               }
             ]
+          },
+          "threads_discovered": {
+            "type": "integer",
+            "title": "Threads Discovered"
+          },
+          "threads_routed": {
+            "type": "integer",
+            "title": "Threads Routed"
+          },
+          "threads_awaiting_route": {
+            "type": "integer",
+            "title": "Threads Awaiting Route"
+          },
+          "oldest_awaiting_route_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Awaiting Route At"
           }
         },
         "additionalProperties": false,
@@ -2471,7 +2495,11 @@
           "latest_evidence_at",
           "last_semantic_activity",
           "collector_age_seconds",
-          "last_collector_run"
+          "last_collector_run",
+          "threads_discovered",
+          "threads_routed",
+          "threads_awaiting_route",
+          "oldest_awaiting_route_at"
         ],
         "title": "SemanticSourceStatus",
         "description": "Per-source semantic progress. Counts are latest-revision counts, never coverage proof."

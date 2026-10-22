@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -13,6 +13,7 @@ from app.models import (
     IngestionRun,
     IngestionSource,
     SemanticMessageState,
+    SemanticTrackRoute,
     SourceRecord,
     SourceRecordRevision,
 )
@@ -167,3 +168,78 @@ def test_empty_status_is_unknown_not_complete(test_engine: Engine) -> None:
     assert response.status_code == 200
     assert response.json()["sources"] == []
     assert response.json()["coverage_verified"] is False
+
+
+def test_route_coverage_separates_routed_from_unrouted_threads(test_engine: Engine) -> None:
+    """Routing backlog is derived from collected threads vs exact provisioned routes."""
+    now = datetime.now(UTC)
+    with Session(test_engine) as session, session.begin():
+        source = IngestionSource(source_key="synthetic", kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        threads = {}
+        for key in ("thread-routed", "thread-open-recent", "thread-open-old"):
+            thread = SourceRecord(source_id=source.id, record_type="GMAIL_THREAD", external_id=key)
+            session.add(thread)
+            session.flush()
+            threads[key] = thread.id
+        session.execute(
+            text("UPDATE source_record SET created_at = :ts WHERE id = :identifier"),
+            {"ts": now - timedelta(days=9), "identifier": threads["thread-open-old"]},
+        )
+        session.add(
+            SemanticTrackRoute(
+                source_id=source.id,
+                thread_record_id=threads["thread-routed"],
+                track_key="synthetic-track",
+                record_key="synthetic-record",
+                title="Synthetic track",
+                expected_coop_id=None,
+            )
+        )
+    with TestClient(
+        create_app(
+            Settings(
+                app_env="test",
+                auth_mode="basic",
+                auth_username="operator",
+                auth_password="synthetic-password",
+            ),
+            test_engine,
+        )
+    ) as client:
+        response = client.get("/api/v1/semantic/status", auth=("operator", "synthetic-password"))
+    assert response.status_code == 200
+    status = response.json()["sources"][0]
+    assert status["threads_discovered"] == 3
+    assert status["threads_routed"] == 1
+    assert status["threads_awaiting_route"] == 2
+    age = now - datetime.fromisoformat(status["oldest_awaiting_route_at"])
+    assert abs(age - timedelta(days=9)) < timedelta(minutes=1)
+    # Thread counts never upgrade the snapshot into a portfolio-coverage claim.
+    assert response.json()["coverage_verified"] is False
+    assert "synthetic" not in str(response.json())
+
+
+def test_route_coverage_is_zero_for_a_source_without_collected_threads(
+    test_engine: Engine,
+) -> None:
+    with Session(test_engine) as session, session.begin():
+        session.add(IngestionSource(source_key="synthetic", kind="GMAIL", enabled=True))
+    with TestClient(
+        create_app(
+            Settings(
+                app_env="test",
+                auth_mode="basic",
+                auth_username="operator",
+                auth_password="synthetic-password",
+            ),
+            test_engine,
+        )
+    ) as client:
+        response = client.get("/api/v1/semantic/status", auth=("operator", "synthetic-password"))
+    status = response.json()["sources"][0]
+    assert status["threads_discovered"] == 0
+    assert status["threads_routed"] == 0
+    assert status["threads_awaiting_route"] == 0
+    assert status["oldest_awaiting_route_at"] is None
