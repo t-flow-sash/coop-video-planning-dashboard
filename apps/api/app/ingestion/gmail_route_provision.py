@@ -2,22 +2,39 @@
 
 Run only from an independently authorized provisioning context, NOT the collector or
 semantic writer. The caller supplies a separately established exact track identity;
-subject, sender, name and thread are not acceptable identity attestations. No CLI or
-scheduler is wired to this module.
+subject, sender, name and thread are not acceptable identity attestations alone.
+
+The operator surface `discover` prints only hashed thread references, participant
+domains, message counts and window dates (never bodies, subjects or raw provider
+IDs); `apply` consumes an explicit operator map and re-verifies complete evidence,
+message fingerprints, target version/snapshot and route occupancy before one
+atomic insert. Every entry point requires SEMANTIC_PROVISION_ARMED=true.
 """
 
 from __future__ import annotations
 
+import argparse
+import hashlib
+import json
+import os
 import re
+import sys
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import NoReturn
+from typing import Any, NoReturn
 from uuid import UUID
 
 from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session
 
-from app.ingestion.gmail_semantic import Verdict, decide
-from app.ingestion.gmail_semantic_delta import FullFetcher, _current_pairs, _message_fingerprint
+from app.db import engine as default_engine
+from app.ingestion.gmail import SOURCE_KEY, GmailConfig
+from app.ingestion.gmail_semantic import FullMessageClient, Verdict, decide
+from app.ingestion.gmail_semantic_delta import (
+    FullFetcher,
+    _current_pairs,
+    _message_fingerprint,
+)
 from app.manual_coop_import import _snapshot
 from app.models import (
     Coop,
@@ -27,6 +44,9 @@ from app.models import (
     SemanticTrackRoute,
     SourceRecord,
 )
+
+ARM_FLAG = "SEMANTIC_PROVISION_ARMED"
+MAX_DISCOVERY = 200
 
 
 class RouteReview(ValueError):
@@ -226,3 +246,214 @@ def provision_route(
         )
         session.flush()
         return "PROVISIONED"
+
+
+def _thread_ref(thread_id: str) -> str:
+    return hashlib.sha256(thread_id.encode()).hexdigest()[:16]
+
+
+def _domains(values: Iterable[str]) -> list[str]:
+    found = set()
+    for value in values:
+        for domain in re.findall(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})", value or ""):
+            found.add(domain.lower())
+    return sorted(found)
+
+
+def _decision_summary(decision: Any) -> dict[str, str]:
+    return {
+        name: getattr(decision, name).verdict.name for name in ("lead", "fee", "deadline", "status")
+    }
+
+
+def _is_provisionable(decision: Any) -> bool:
+    if any(
+        getattr(decision, name).verdict == Verdict.REVIEW
+        for name in ("lead", "fee", "deadline", "status")
+    ):
+        return False
+    return decision.lead.verdict == Verdict.ACCEPT and any(
+        getattr(decision, name).verdict == Verdict.ACCEPT for name in ("fee", "deadline")
+    )
+
+
+def _source_id(session: Session, source_key: str) -> UUID:
+    source_id = session.scalar(
+        select(IngestionSource.id).where(
+            IngestionSource.source_key == source_key,
+            IngestionSource.kind == "GMAIL",
+            IngestionSource.enabled.is_(True),
+        )
+    )
+    if source_id is None:
+        _review("source_unavailable")
+    return source_id
+
+
+def discover(
+    engine: Engine,
+    client: FullFetcher,
+    own_address: str,
+    *,
+    source_id: UUID,
+    limit: int = MAX_DISCOVERY,
+) -> list[dict[str, Any]]:
+    """Read-only candidate inventory: hashed refs, domains, window, verdicts.
+
+    Emits no message bodies, subjects, raw provider IDs or business keys.
+    """
+    if not 1 <= limit <= MAX_DISCOVERY:
+        _review("limit_invalid")
+    rows: list[dict[str, Any]] = []
+    with Session(engine) as session:
+        routed = set(session.scalars(select(SemanticTrackRoute.thread_record_id)))
+        threads = session.scalars(
+            select(SourceRecord)
+            .where(
+                SourceRecord.source_id == source_id,
+                SourceRecord.record_type == "GMAIL_THREAD",
+            )
+            .order_by(SourceRecord.created_at.desc())
+        ).all()
+        for thread in threads:
+            if len(rows) >= limit:
+                break
+            if thread.id in routed:
+                continue
+            pairs = _current_pairs(session, source_id, thread.external_id)
+            if not pairs or len(pairs) > 100:
+                continue
+            messages = [client.fetch(record.external_id) for record, _ in pairs]
+            if any(message.thread_id != thread.external_id for message in messages):
+                continue
+            dates = sorted(str(message.internal_date) for message in messages)
+            try:
+                decision = decide(messages, own_address=own_address, existing_track=False)
+                verdicts = _decision_summary(decision)
+                provisionable = _is_provisionable(decision)
+            except Exception:
+                verdicts = {"error": "review"}
+                provisionable = False
+            rows.append(
+                {
+                    "thread_ref": _thread_ref(thread.external_id),
+                    "messages": len(messages),
+                    "window": [dates[0], dates[-1]],
+                    "domains": _domains(
+                        [message.sender for message in messages]
+                        + [message.recipient for message in messages]
+                    ),
+                    "verdicts": verdicts,
+                    "provisionable": provisionable,
+                }
+            )
+    return sorted(rows, key=lambda row: row["window"][-1], reverse=True)
+
+
+def _claim_from_map(
+    engine: Engine, entry: dict[str, Any], client: FullFetcher, source_id: UUID
+) -> RouteClaim:
+    required = ("thread_ref", "thread_id", "record_key", "track_key", "title")
+    if any(not isinstance(entry.get(name), str) or not entry[name] for name in required):
+        _review("map_entry_invalid")
+    with Session(engine) as session:
+        pairs = _current_pairs(session, source_id, entry["thread_id"])
+        if not pairs:
+            _review("evidence_changed")
+        messages = [client.fetch(record.external_id) for record, _ in pairs]
+        if {_thread_ref(entry["thread_id"])} != {entry["thread_ref"]}:
+            _review("map_entry_invalid")
+        target = session.scalar(select(Coop).where(Coop.record_key == entry["record_key"]))
+        expected_coop_id = None
+        expected_version = None
+        expected_snapshot = None
+        if entry.get("adopt_existing") is True:
+            if target is None or target.is_synthetic_seed:
+                _review("target_identity_unverified")
+            state = session.get(CoopImportState, target.id)
+            if state is None or state.snapshot_hash != _snapshot(target):
+                _review("target_identity_unverified")
+            expected_coop_id = target.id
+            expected_version = target.version
+            expected_snapshot = state.snapshot_hash
+        return RouteClaim(
+            source_id=source_id,
+            thread_id=entry["thread_id"],
+            evidence=tuple((record.id, revision.id) for record, revision in pairs),
+            track_key=entry["track_key"],
+            record_key=entry["record_key"],
+            title=entry["title"],
+            identity_attestation="reviewed-exact-business-identity",
+            expected_coop_id=expected_coop_id,
+            expected_version=expected_version,
+            expected_snapshot=expected_snapshot,
+            message_fingerprints=tuple(
+                (message.message_id, _message_fingerprint(message)) for message in messages
+            ),
+        )
+
+
+def apply_map(
+    engine: Engine,
+    client: FullFetcher,
+    own_address: str,
+    entries: Sequence[dict[str, Any]],
+    *,
+    source_id: UUID,
+) -> dict[str, int]:
+    """Apply an explicit operator map; every entry is independently re-verified."""
+    if not isinstance(entries, list) or len(entries) > MAX_DISCOVERY:
+        _review("map_invalid")
+    counts = {"PROVISIONED": 0, "UNCHANGED": 0, "REVIEW": 0}
+    for entry in entries:
+        try:
+            claim = _claim_from_map(engine, entry, client, source_id)
+            outcome = provision_route(engine, claim, client, own_address)
+        except RouteReview:
+            counts["REVIEW"] += 1
+        else:
+            counts[outcome] += 1
+    return counts
+
+
+def main() -> int:
+    if os.environ.get(ARM_FLAG) != "true":
+        print(json.dumps({"outcome": "NOT_ARMED"}), file=sys.stderr)
+        return 2
+    parser = argparse.ArgumentParser(
+        description="Operator-only exact route provisioning (discover or apply)"
+    )
+    parser.add_argument("action", choices=("discover", "apply"))
+    parser.add_argument("--map", default="")
+    parser.add_argument("--limit", type=int, default=MAX_DISCOVERY)
+    parser.add_argument("--source-key", default=SOURCE_KEY)
+    args = parser.parse_args()
+    try:
+        config = GmailConfig.from_env()
+        client = FullMessageClient(config)
+        with Session(default_engine) as session:
+            source_id = _source_id(session, args.source_key)
+        if args.action == "discover":
+            rows = discover(
+                default_engine,
+                client,
+                config.account,
+                source_id=source_id,
+                limit=args.limit,
+            )
+            print(json.dumps({"candidates": rows}))
+        else:
+            if not args.map:
+                _review("map_missing")
+            with open(args.map, encoding="utf-8") as handle:
+                entries = json.load(handle)
+            counts = apply_map(default_engine, client, config.account, entries, source_id=source_id)
+            print(json.dumps(counts))
+    except Exception:
+        print(json.dumps({"outcome": "RETRY"}), file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
