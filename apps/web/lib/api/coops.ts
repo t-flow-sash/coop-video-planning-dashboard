@@ -83,6 +83,13 @@ function normalize(raw: ApiCoop): Coop {
   };
 }
 
+export interface SemanticCollectorRun {
+  mode: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+}
+
 export interface SemanticSourceStatus {
   enabled: boolean;
   discovered: number;
@@ -97,12 +104,7 @@ export interface SemanticSourceStatus {
   latest_evidence_at: string | null;
   last_semantic_activity: string | null;
   collector_age_seconds: number | null;
-  last_collector_run: {
-    mode: string;
-    status: string;
-    started_at: string;
-    finished_at: string | null;
-  } | null;
+  last_collector_run: SemanticCollectorRun | null;
 }
 
 export interface SemanticStatus {

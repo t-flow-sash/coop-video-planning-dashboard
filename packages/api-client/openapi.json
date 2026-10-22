@@ -420,6 +420,24 @@
         }
       }
     },
+    "/api/v1/semantic/status": {
+      "get": {
+        "summary": "Get Semantic Status",
+        "operationId": "get_semantic_status_api_v1_semantic_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SemanticStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/coops/{coop_id}": {
       "get": {
         "summary": "Get Coop",
@@ -669,26 +687,6 @@
             }
           }
         }
-      }
-    },
-    "/api/v1/semantic/status": {
-      "get": {
-        "operationId": "get_semantic_status_api_v1_semantic_status_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Get Semantic Status Api V1 Semantic Status Get",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Get Semantic Status"
       }
     }
   },
@@ -2321,6 +2319,201 @@
           "reason"
         ],
         "title": "ReopenRequest"
+      },
+      "SemanticCollectorRun": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "mode",
+          "status",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "SemanticCollectorRun",
+        "description": "Latest collector run per source; a failed run is never hidden by an older success."
+      },
+      "SemanticSourceStatus": {
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "discovered": {
+            "type": "integer",
+            "title": "Discovered"
+          },
+          "processed": {
+            "type": "integer",
+            "title": "Processed"
+          },
+          "created": {
+            "type": "integer",
+            "title": "Created"
+          },
+          "updated": {
+            "type": "integer",
+            "title": "Updated"
+          },
+          "unchanged": {
+            "type": "integer",
+            "title": "Unchanged"
+          },
+          "review": {
+            "type": "integer",
+            "title": "Review"
+          },
+          "retry": {
+            "type": "integer",
+            "title": "Retry"
+          },
+          "backlog": {
+            "type": "integer",
+            "title": "Backlog"
+          },
+          "oldest_backlog_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Backlog At"
+          },
+          "latest_evidence_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Evidence At"
+          },
+          "last_semantic_activity": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Semantic Activity"
+          },
+          "collector_age_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Collector Age Seconds"
+          },
+          "last_collector_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SemanticCollectorRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "enabled",
+          "discovered",
+          "processed",
+          "created",
+          "updated",
+          "unchanged",
+          "review",
+          "retry",
+          "backlog",
+          "oldest_backlog_at",
+          "latest_evidence_at",
+          "last_semantic_activity",
+          "collector_age_seconds",
+          "last_collector_run"
+        ],
+        "title": "SemanticSourceStatus",
+        "description": "Per-source semantic progress. Counts are latest-revision counts, never coverage proof."
+      },
+      "SemanticStatus": {
+        "properties": {
+          "as_of": {
+            "type": "string",
+            "format": "date-time",
+            "title": "As Of"
+          },
+          "coverage_verified": {
+            "type": "boolean",
+            "title": "Coverage Verified"
+          },
+          "coverage_note": {
+            "type": "string",
+            "title": "Coverage Note"
+          },
+          "domain_records": {
+            "type": "integer",
+            "title": "Domain Records"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SemanticSourceStatus"
+            },
+            "type": "array",
+            "title": "Sources"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "as_of",
+          "coverage_verified",
+          "coverage_note",
+          "domain_records",
+          "sources"
+        ],
+        "title": "SemanticStatus",
+        "description": "Read-only operational snapshot. `extra=\"forbid\"` fails closed instead of leaking fields."
       },
       "TransitionRequest": {
         "properties": {

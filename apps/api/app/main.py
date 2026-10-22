@@ -39,6 +39,7 @@ from app.schemas import (
     OrganizationCreate,
     OrganizationRead,
     ReopenRequest,
+    SemanticStatus,
     TransitionRequest,
 )
 from app.semantic_status import snapshot as semantic_snapshot
@@ -230,8 +231,8 @@ def get_coops(
     }
 
 
-@app.get("/api/v1/semantic/status")
-def get_semantic_status(session: Session = Depends(get_session)) -> dict[str, Any]:
+@app.get("/api/v1/semantic/status", response_model=SemanticStatus)
+def get_semantic_status(session: Session = Depends(get_session)) -> SemanticStatus:
     return semantic_snapshot(session)
 
 

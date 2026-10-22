@@ -266,3 +266,47 @@ class AuditEventPage(BaseModel):
     items: list[AuditEventRead]
     next_cursor: str | None
     total: int
+
+
+class SemanticCollectorRun(BaseModel):
+    """Latest collector run per source; a failed run is never hidden by an older success."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str
+    status: str
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class SemanticSourceStatus(BaseModel):
+    """Per-source semantic progress. Counts are latest-revision counts, never coverage proof."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    discovered: int
+    processed: int
+    created: int
+    updated: int
+    unchanged: int
+    review: int
+    retry: int
+    backlog: int
+    oldest_backlog_at: datetime | None
+    latest_evidence_at: datetime | None
+    last_semantic_activity: datetime | None
+    collector_age_seconds: int | None
+    last_collector_run: SemanticCollectorRun | None
+
+
+class SemanticStatus(BaseModel):
+    """Read-only operational snapshot. `extra="forbid"` fails closed instead of leaking fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    as_of: datetime
+    coverage_verified: bool
+    coverage_note: str
+    domain_records: int
+    sources: list[SemanticSourceStatus]

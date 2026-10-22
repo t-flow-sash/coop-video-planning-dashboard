@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import cast
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -16,9 +16,10 @@ from app.models import (
     SourceRecord,
     SourceRecordRevision,
 )
+from app.schemas import SemanticCollectorRun, SemanticSourceStatus, SemanticStatus
 
 
-def snapshot(session: Session) -> dict[str, Any]:
+def snapshot(session: Session) -> SemanticStatus:
     """Count only latest revisions per message; never equate collection with coverage."""
     now = datetime.now(UTC)
     latest = (
@@ -38,7 +39,7 @@ def snapshot(session: Session) -> dict[str, Any]:
         .where(SourceRecord.record_type == "GMAIL_MESSAGE")
         .subquery()
     )
-    sources = []
+    sources: list[SemanticSourceStatus] = []
     for source in session.scalars(
         select(IngestionSource).order_by(IngestionSource.created_at, IngestionSource.id)
     ):
@@ -79,41 +80,43 @@ def snapshot(session: Session) -> dict[str, Any]:
                 ):
                     oldest = observed
         sources.append(
-            {
-                "enabled": source.enabled,
-                "discovered": len(rows),
-                "processed": processed,
-                "created": counts["CREATED"],
-                "updated": counts["UPDATED"],
-                "unchanged": counts["UNCHANGED"],
-                "review": counts["REVIEW"],
-                "retry": counts["RETRY"],
-                "backlog": len(rows) - processed,
-                "oldest_backlog_at": oldest,
-                "latest_evidence_at": latest_observed,
-                "last_semantic_activity": activity,
-                "last_collector_run": (
-                    {
-                        "mode": run.mode,
-                        "status": run.status,
-                        "started_at": run.started_at,
-                        "finished_at": run.finished_at,
-                    }
+            SemanticSourceStatus(
+                enabled=source.enabled,
+                discovered=len(rows),
+                processed=processed,
+                created=counts["CREATED"],
+                updated=counts["UPDATED"],
+                unchanged=counts["UNCHANGED"],
+                review=counts["REVIEW"],
+                retry=counts["RETRY"],
+                backlog=len(rows) - processed,
+                oldest_backlog_at=oldest,
+                latest_evidence_at=latest_observed,
+                last_semantic_activity=activity,
+                last_collector_run=(
+                    SemanticCollectorRun(
+                        mode=run.mode,
+                        status=run.status,
+                        started_at=run.started_at,
+                        finished_at=run.finished_at,
+                    )
                     if run
                     else None
                 ),
-                "collector_age_seconds": max(0, int((now - run.finished_at).total_seconds()))
-                if run and run.finished_at and run.status == "SUCCEEDED"
-                else None,
-            }
+                collector_age_seconds=(
+                    max(0, int((now - run.finished_at).total_seconds()))
+                    if run and run.finished_at and run.status == "SUCCEEDED"
+                    else None
+                ),
+            )
         )
-    return {
-        "as_of": now,
-        "coverage_verified": False,
-        "coverage_note": (
+    return SemanticStatus(
+        as_of=now,
+        coverage_verified=False,
+        coverage_note=(
             "Message revisions are not business tracks; collection and processing counts "
             "cannot verify portfolio completeness or scheduler state."
         ),
-        "domain_records": session.scalar(select(func.count()).select_from(Coop)) or 0,
-        "sources": sources,
-    }
+        domain_records=session.scalar(select(func.count()).select_from(Coop)) or 0,
+        sources=sources,
+    )
