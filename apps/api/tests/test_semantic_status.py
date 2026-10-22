@@ -243,3 +243,80 @@ def test_route_coverage_is_zero_for_a_source_without_collected_threads(
     assert status["threads_routed"] == 0
     assert status["threads_awaiting_route"] == 0
     assert status["oldest_awaiting_route_at"] is None
+
+
+def test_portfolio_coverage_counts_live_tracks_with_an_exact_route(test_engine: Engine) -> None:
+    """Portfolio coverage joins live business tracks to exact operator-provisioned routes.
+
+    Both route linkage paths count (business ``record_key`` and the explicit
+    ``expected_coop_id`` adoption FK), synthetic seed rows never count as portfolio,
+    and unrouted tracks stay visible instead of being folded into a coverage claim.
+    """
+    with Session(test_engine) as session, session.begin():
+        source = IngestionSource(source_key="synthetic", kind="GMAIL", enabled=True)
+        session.add(source)
+        session.flush()
+        first = SourceRecord(source_id=source.id, record_type="GMAIL_THREAD", external_id="t1")
+        second = SourceRecord(source_id=source.id, record_type="GMAIL_THREAD", external_id="t2")
+        session.add_all([first, second])
+        session.flush()
+        routed_by_key = Coop(
+            record_key="brand-a", title="Brand A", priority="P1", status="NEW", needs_review=False
+        )
+        routed_by_link = Coop(
+            record_key="brand-b", title="Brand B", priority="P1", status="NEW", needs_review=False
+        )
+        unrouted = Coop(
+            record_key="brand-c", title="Brand C", priority="P2", status="NEW", needs_review=False
+        )
+        synthetic = Coop(
+            record_key="brand-seed",
+            title="Synthetic seed",
+            priority="P2",
+            status="NEW",
+            needs_review=False,
+            is_synthetic_seed=True,
+        )
+        session.add_all([routed_by_key, routed_by_link, unrouted, synthetic])
+        session.flush()
+        session.add_all(
+            [
+                SemanticTrackRoute(
+                    source_id=source.id,
+                    thread_record_id=first.id,
+                    track_key="track-a",
+                    record_key="brand-a",
+                    title="Track A",
+                    expected_coop_id=None,
+                ),
+                SemanticTrackRoute(
+                    source_id=source.id,
+                    thread_record_id=second.id,
+                    track_key="track-b",
+                    record_key="brand-b",
+                    title="Track B",
+                    expected_coop_id=routed_by_link.id,
+                ),
+            ]
+        )
+    with TestClient(
+        create_app(
+            Settings(
+                app_env="test",
+                auth_mode="basic",
+                auth_username="operator",
+                auth_password="synthetic-password",
+            ),
+            test_engine,
+        )
+    ) as client:
+        response = client.get("/api/v1/semantic/status", auth=("operator", "synthetic-password"))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["domain_records"] == 4
+    assert data["tracks_total"] == 3
+    assert data["tracks_routed"] == 2
+    assert data["tracks_awaiting_route"] == 1
+    # A partial route count never upgrades the snapshot into a portfolio-coverage claim.
+    assert data["coverage_verified"] is False
+    assert "synthetic" not in str(data)

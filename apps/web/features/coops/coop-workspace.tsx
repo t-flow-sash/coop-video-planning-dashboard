@@ -491,6 +491,12 @@ export function CoopWorkspace({
                     · {semanticStatus.domain_records} Kooperationen im führenden
                     Datenbestand.
                   </p>
+                  <p>
+                    Portfolio-Abdeckung: {semanticStatus.tracks_routed} von{" "}
+                    {semanticStatus.tracks_total} Kooperationen mit exakter
+                    Route · ohne Route {semanticStatus.tracks_awaiting_route}.
+                    Eine exakte Route ist keine inhaltliche Übereinstimmung.
+                  </p>
                   {semanticStatus.sources.length === 0 && (
                     <p>Keine Quelle erfasst. Importzustand unbekannt.</p>
                   )}

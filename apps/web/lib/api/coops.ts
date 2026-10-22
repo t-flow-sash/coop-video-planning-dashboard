@@ -116,6 +116,9 @@ export interface SemanticStatus {
   coverage_verified: boolean;
   coverage_note: string;
   domain_records: number;
+  tracks_total: number;
+  tracks_routed: number;
+  tracks_awaiting_route: number;
   sources: SemanticSourceStatus[];
 }
 
