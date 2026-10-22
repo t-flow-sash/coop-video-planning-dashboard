@@ -834,11 +834,16 @@ class RenderedSecurityContractTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("SEMANTIC_WORKER_ARMED", validator)
-        # Promotion stays untouched while the slice is dormant.
+        # Activation promotes the semantic scheduler with a real digest; the
+        # sentinel exception in CI covers only the dormant render.
         promotion = (ROOT / "scripts/build-and-push-images.sh").read_text(
             encoding="utf-8"
         )
-        self.assertNotIn("infrastructure/semantic", promotion)
+        self.assertIn("infrastructure/semantic/semantic-cronjob.yaml", promotion)
+        semantic_manifest = (
+            ROOT / "infrastructure/semantic/semantic-cronjob.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("SEMANTIC_WORKER_ARMED", semantic_manifest)
 
     def test_completed_operational_bootstrap_job_is_removed_from_desired_state(
         self,

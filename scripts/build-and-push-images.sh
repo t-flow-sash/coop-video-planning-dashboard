@@ -28,6 +28,7 @@ promotion_targets=(
   infrastructure/import/gmail-recurring-cronjobs.yaml
   infrastructure/import/gmail-full-pilot-admission.yaml
   infrastructure/migration/migration-job.yaml
+  infrastructure/semantic/semantic-cronjob.yaml
 )
 transaction_dir="$(git rev-parse --git-path coop-image-promotion-transaction)"
 [[ "$transaction_dir" == /* ]] || transaction_dir="${ROOT}/${transaction_dir}"
@@ -174,9 +175,23 @@ updated, count = re.subn(
 if count != 1:
     raise SystemExit(f"expected exactly one migration release name, got {count}")
 job.write_text(updated)
+
+semantic = staged("infrastructure/semantic/semantic-cronjob.yaml")
+text = semantic.read_text()
+updated, semantic_count = re.subn(
+    r'(?m)^(\s+image: ")127\.0\.0\.1:5000/coop-api:git-[0-9a-f]{12}@sha256:[0-9a-f]{64}("$)',
+    rf"\g<1>{api_image}:{tag}@{api_digest}\g<2>",
+    text,
+)
+if semantic_count != 1:
+    raise SystemExit(
+        f"expected exactly one semantic worker image in "
+        f"infrastructure/semantic/semantic-cronjob.yaml, got {semantic_count}"
+    )
+semantic.write_text(updated)
 PY
 
-for dir in infrastructure/apps infrastructure/migration infrastructure/import; do
+for dir in infrastructure/apps infrastructure/migration infrastructure/import infrastructure/semantic; do
   staged_dir="${transaction_dir}/staged/${dir}"
   if command -v kustomize >/dev/null; then
     kustomize build "$staged_dir" >/dev/null
