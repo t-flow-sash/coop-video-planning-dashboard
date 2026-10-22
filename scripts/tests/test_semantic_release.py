@@ -10,7 +10,7 @@ from pathlib import Path
 
 import yaml
 
-from scripts.validate_semantic_dormant import validate
+from scripts.validate_semantic_activation import validate
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -47,27 +47,34 @@ class SemanticReleaseContracts(unittest.TestCase):
         self.assertNotIn('Traceback', invoked.stderr)
         self.assertNotIn('gmail-semantic-db.secret', source[0]['resources'])
 
-    def test_manifest_sentinel_and_flag_cannot_be_silently_promoted(self) -> None:
+    def test_manifest_activation_contract_cannot_be_silently_reverted(self) -> None:
         source = ROOT / 'infrastructure/semantic/semantic-cronjob.yaml'
         cronjob = yaml.safe_load(source.read_text())
         flux = [d for d in yaml.safe_load_all((ROOT / 'clusters/production/flux-kustomizations.yaml').read_text()) if d]
         definition = yaml.safe_load((ROOT / 'infrastructure/semantic/kustomization.yaml').read_text())
         policy = yaml.safe_load((ROOT / 'infrastructure/semantic/network-policy.yaml').read_text())
         resources = [cronjob, policy]
-        for broken in ('armed', 'unsuspended', 'promoted-image', 'secret-reuse'):
+        for broken in ('unarmed', 'suspended', 'sentinel-image', 'flux-suspended', 'secret-reuse'):
             candidate = json.loads(json.dumps(resources))
             spec = candidate[0]['spec']
             container = spec['jobTemplate']['spec']['template']['spec']['containers'][0]
-            if broken == 'armed':
-                container['env'][0]['value'] = 'true'
-            elif broken == 'unsuspended':
-                spec['suspend'] = False
-            elif broken == 'promoted-image':
-                container['image'] = '127.0.0.1:5000/coop-api:git-abc@sha256:' + 'a' * 64
+            candidate_flux = json.loads(json.dumps(flux))
+            if broken == 'unarmed':
+                container['env'][0]['value'] = 'false'
+            elif broken == 'suspended':
+                spec['suspend'] = True
+            elif broken == 'sentinel-image':
+                container['image'] = (
+                    '127.0.0.1:5000/coop-api:git-000000000000@sha256:' + '0' * 64
+                )
+            elif broken == 'flux-suspended':
+                for item in candidate_flux:
+                    if item.get('metadata', {}).get('name') == 'coop-semantic':
+                        item['spec']['suspend'] = True
             else:
                 container['env'][4]['valueFrom']['secretKeyRef']['name'] = 'coop-runtime'
             with self.subTest(broken=broken), self.assertRaises(AssertionError):
-                validate(candidate, flux, definition)
+                validate(candidate, candidate_flux, definition)
 
 
 if __name__ == '__main__':

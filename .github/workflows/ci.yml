@@ -187,12 +187,11 @@ jobs:
           ' "$output"
             fi
             if [[ "$dir" == infrastructure/semantic ]]; then
-              # The semantic writer slice is non-deployable by construction: exact
-              # resource inventory, pinned sentinel image, suspended owner and
-              # CronJob, unarmed flag and dedicated secretRefs. Keep the check
-              # unconditional so a promotion that replaces the sentinel is caught
-              # rather than exempted by the sentinel grep above.
-              uv run --with pyyaml==6.0.3 -- python3 scripts/validate_semantic_dormant.py \
+              # Activated writer slice: exact resource inventory, promoted digest,
+              # unsuspended owner and CronJob, explicit arm flag and dedicated
+              # secretRefs. Keep the check unconditional so neither a reverted
+              # promotion nor a silently re-dormanted scheduler escapes review.
+              uv run --with pyyaml==6.0.3 -- python3 scripts/validate_semantic_activation.py \
                 "$output" clusters/production/flux-kustomizations.yaml \
                 infrastructure/semantic/kustomization.yaml
             fi

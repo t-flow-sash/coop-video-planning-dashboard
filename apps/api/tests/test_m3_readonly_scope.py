@@ -307,7 +307,12 @@ def readonly_scope_violations(root: Path) -> list[str]:
             kind = _kind(document)
             if kind not in {"Job", "CronJob"} or INGESTION_CONTEXT.search(document) is None:
                 continue
-            workload = (path.relative_to(root).as_posix(), kind, _metadata_name(document))
+            name = _metadata_name(document) or ""
+            if kind == "Job" and re.fullmatch(r"coop-migration-[0-9a-f]{12}", name):
+                # Release-coupled migration Job: it provisions schema and roles and
+                # never imports mailbox evidence; the name tracks the promoted image.
+                continue
+            workload = (path.relative_to(root).as_posix(), kind, name)
             if workload not in allowed_gmail_workloads:
                 violations.append(f"unexpected repository Gmail/import workload: {workload}")
     return violations

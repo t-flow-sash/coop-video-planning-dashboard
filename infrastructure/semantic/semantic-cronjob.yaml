@@ -1,6 +1,6 @@
-# Deliberately non-runnable until the queue runner is merged, image promoted,
-# dedicated encrypted Secret installed, ACLs/live probes attested, and a separate
-# activation change is reviewed. NEVER reuse gmail-collector-db or coop-runtime.
+# Activated scheduler: queue runner merged, image promoted, dedicated encrypted
+# Secret installed, ACLs reconciled by the release migration Job. NEVER reuse
+# gmail-collector-db or coop-runtime.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -11,7 +11,7 @@ metadata:
     coop.example.com/semantic-worker: "true"
     coop.example.com/postgres-client: "true"
 spec:
-  suspend: true
+  suspend: false
   schedule: "29 * * * *"
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 300
@@ -38,12 +38,12 @@ spec:
             seccompProfile: {type: RuntimeDefault}
           containers:
             - name: semantic-worker
-              image: 127.0.0.1:5000/coop-api:git-000000000000@sha256:0000000000000000000000000000000000000000000000000000000000000000
+              image: 127.0.0.1:5000/coop-api:git-b52081c6726b@sha256:0832dec47249647d90c7aa81c59289107d762604c3113309f8b177111ddcff70
               imagePullPolicy: IfNotPresent
               command: ["python", "-m", "app.ingestion.gmail_semantic_queue"]
               args: ["--max-batch", "25"]
               env:
-                - {name: SEMANTIC_WORKER_ARMED, value: "false"}
+                - {name: SEMANTIC_WORKER_ARMED, value: "true"}
                 - {name: HTTPS_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: HTTP_PROXY, value: "http://gmail-egress-proxy:10000"}
                 - {name: NO_PROXY, value: "postgres,postgres.coop-prod.svc,gmail-egress-proxy,127.0.0.1,localhost"}
