@@ -3,7 +3,7 @@ kind: CronJob
 metadata:
   name: gmail-import-full
   annotations:
-    coop.example.com/image-source-revision: "15a0ae1693ec6ef27ab8f90528bb5947584c4988"
+    coop.example.com/image-source-revision: "0d8c963dd44427465d9f4f480863f8a1102e4269"
   labels: &full-labels
     app.kubernetes.io/name: gmail-import-full
     app.kubernetes.io/part-of: coop-video-planning
