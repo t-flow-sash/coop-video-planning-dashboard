@@ -7,5 +7,5 @@ resources:
   - gmail-semantic-db.secret.sops.yaml
 images:
   - name: 127.0.0.1:5000/coop-api
-    newTag: git-102dac5b0838
-    digest: sha256:ba8fe83c37e5dbd485b8439279a128522b7c550ae855929d4bf087ff3fbb50d3
+    newTag: git-42969e626881
+    digest: sha256:fea37298b7785aaee32584f05a34f4246cafa862c042e0a21b5b9c0cc7defddf
