@@ -202,3 +202,16 @@ def test_cli_refuses_without_arm_flag(
     assert json.loads(captured.err) == {"outcome": "RETRY"}
     assert captured.out == ""
     assert not list(tmp_path.iterdir())
+
+
+class _FailingClient(Client):
+    def fetch(self, message_id: str):  # type: ignore[override]
+        raise RuntimeError("provider unavailable")
+
+
+def test_discover_fails_closed_when_every_thread_is_unfetchable(test_engine: Engine) -> None:
+    setup(test_engine)
+    with Session(test_engine) as session, session.begin():
+        session.delete(session.scalar(select(SemanticTrackRoute)))
+    with pytest.raises(RouteReview, match="provider_unavailable"):
+        discover(test_engine, _FailingClient(sample()), OWN, source_id=_source(test_engine))

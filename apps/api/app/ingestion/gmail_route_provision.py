@@ -305,6 +305,7 @@ def discover(
     if not 1 <= limit <= MAX_DISCOVERY:
         _review("limit_invalid")
     rows: list[dict[str, Any]] = []
+    failures = 0
     with Session(engine) as session:
         routed = set(session.scalars(select(SemanticTrackRoute.thread_record_id)))
         threads = session.scalars(
@@ -323,7 +324,13 @@ def discover(
             pairs = _current_pairs(session, source_id, thread.external_id)
             if not pairs or len(pairs) > 100:
                 continue
-            messages = [client.fetch(record.external_id) for record, _ in pairs]
+            # A single unfetchable thread must not abort the whole inventory; a
+            # systemic provider failure still surfaces as an empty RETRY result.
+            try:
+                messages = [client.fetch(record.external_id) for record, _ in pairs]
+            except Exception:
+                failures += 1
+                continue
             if any(message.thread_id != thread.external_id for message in messages):
                 continue
             dates = sorted(str(message.internal_date) for message in messages)
@@ -347,6 +354,10 @@ def discover(
                     "provisionable": provisionable,
                 }
             )
+    if not rows and failures:
+        _review("provider_unavailable")
+    if failures:
+        print(json.dumps({"discovery_skipped": failures}), file=sys.stderr)
     return sorted(rows, key=lambda row: row["window"][-1], reverse=True)
 
 
