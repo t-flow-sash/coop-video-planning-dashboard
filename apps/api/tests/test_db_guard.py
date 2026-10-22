@@ -70,6 +70,11 @@ def test_guard_allows_explicit_local_test_database(host: str) -> None:
     assert_safe_test_database(url, "test")
 
 
+def test_guard_allows_dedicated_self_hosted_runner_port() -> None:
+    url = "postgresql+psycopg://coop:coop@127.0.0.1:55435/coop_test"
+    assert_safe_test_database(url, "test")
+
+
 def test_guard_rejects_engine_bound_before_environment_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

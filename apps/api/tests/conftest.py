@@ -7,7 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 
-TEST_DATABASE_URL = "postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test"
+TEST_DATABASE_URL = os.environ.get(
+    "DATABASE_URL", "postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test"
+)
 EXPECTED_SERVER_ADDRESS = os.environ.get("TEST_DATABASE_EXPECTED_SERVER_ADDRESS")
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 os.environ["APP_ENV"] = "test"

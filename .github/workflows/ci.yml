@@ -9,7 +9,8 @@ permissions:
 
 jobs:
   quality:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, repo-coop-video-planning-dashboard]
     # A stalled step must fail loudly instead of holding a runner indefinitely.
     timeout-minutes: 45
     services:
@@ -19,14 +20,15 @@ jobs:
           POSTGRES_DB: coop_test
           POSTGRES_USER: coop
           POSTGRES_PASSWORD: coop
-        ports: ["5432:5432"]
+          PGPORT: "55435"
+        ports: ["55435:55435"]
         options: >-
-          --health-cmd "pg_isready -U coop -d coop_test"
+          --health-cmd "pg_isready -U coop -d coop_test -p 55435"
           --health-interval 3s --health-timeout 3s --health-retries 20
     env:
-      DATABASE_URL: postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test
-      COLLECTOR_DATABASE_URL: postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:5432/coop_test
-      SEMANTIC_DATABASE_URL: postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:5432/coop_test
+      DATABASE_URL: postgresql+psycopg://coop:coop@127.0.0.1:55435/coop_test
+      COLLECTOR_DATABASE_URL: postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:55435/coop_test
+      SEMANTIC_DATABASE_URL: postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:55435/coop_test
       NEXT_PUBLIC_API_URL: /api/v1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -128,9 +130,9 @@ jobs:
         run: |
           set -Eeuo pipefail
           image_database='coop_image_migration_test'
-          image_database_url="postgresql+psycopg://coop:coop@127.0.0.1:5432/$image_database"
-          image_collector_url="postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:5432/$image_database"
-          image_semantic_url="postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:5432/$image_database"
+          image_database_url="postgresql+psycopg://coop:coop@127.0.0.1:55435/$image_database"
+          image_collector_url="postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:55435/$image_database"
+          image_semantic_url="postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:55435/$image_database"
           test -n "$POSTGRES_SERVICE_ID"
           docker exec "$POSTGRES_SERVICE_ID" psql -v ON_ERROR_STOP=1 -U coop -d postgres \
             -c "DROP DATABASE IF EXISTS $image_database"
@@ -259,7 +261,7 @@ jobs:
           gateway_pid=$!
 
           ready=false
-          for i in {1..30}; do
+          for _ in {1..30}; do
             if curl -fsS http://127.0.0.1:3001/_gateway/health \
               && curl -fsS http://127.0.0.1:3001/api/v1/health/ready \
               && curl -fsS http://127.0.0.1:3001/coops; then

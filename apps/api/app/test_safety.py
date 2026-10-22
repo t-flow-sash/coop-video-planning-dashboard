@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import Connection, make_url
 
+SAFE_TEST_PORTS = {5432, 55435}
+
 
 def assert_safe_test_database(database_url: str, app_env: str) -> None:
     """Fail closed before any destructive test fixture touches a database."""
@@ -31,13 +33,13 @@ def assert_safe_test_database(database_url: str, app_env: str) -> None:
         or parsed.username != "coop"
         or not parsed.password
         or not local
-        or port != 5432
+        or port not in SAFE_TEST_PORTS
         or "/" in database
         or not database.endswith("_test")
     ):
         raise RuntimeError(
             "Refusing destructive test cleanup: APP_ENV=test and an unambiguous "
-            "postgresql+psycopg URL for coop on loopback:5432 with an explicit "
+            "postgresql+psycopg URL for coop on an approved loopback test port with an explicit "
             "*_test database and no query parameters are required"
         )
 
