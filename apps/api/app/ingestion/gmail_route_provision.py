@@ -179,26 +179,22 @@ def provision_route(
             raise
         except Exception:
             _review("evidence_changed")
-        # Positive CREATE rule: explicit accepted lead AND mutually accepted terms.
-        # A thread with ambiguous terms, withdrawal or attachments stays REVIEW.
+        # Positive rule: mutually accepted terms in every case, plus an explicit
+        # accepted lead offer only for a NEW track. An entry that adopts an existing
+        # business track has no new lead to accept; requiring one made every
+        # adoption of an already running cooperation impossible while the worker's
+        # own UPDATE path never asked for it. Ambiguous terms, withdrawals and
+        # attachments stay REVIEW in both cases.
+        existing_track = claim.expected_coop_id is not None
         try:
-            decision = decide(messages, own_address=own_address, existing_track=False)
+            decision = decide(messages, own_address=own_address, existing_track=existing_track)
         except SemanticInputError:
             # Evidence the semantic gate cannot decide is a permanent, per-entry
             # review condition, not a transient transport failure. Classify it as
             # REVIEW so one unusable entry cannot escape `apply_map` and abort the
             # whole operator map with a top-level RETRY, discarding every later entry.
             _review("semantic_input_invalid")
-        if (
-            any(
-                getattr(decision, name).verdict == Verdict.REVIEW
-                for name in ("lead", "fee", "deadline", "status")
-            )
-            or decision.lead.verdict != Verdict.ACCEPT
-            or not any(
-                getattr(decision, name).verdict == Verdict.ACCEPT for name in ("fee", "deadline")
-            )
-        ):
+        if not _is_provisionable(decision, existing_track=existing_track):
             _review("terms_unverified")
         occupied = session.scalar(
             select(SemanticTrackRoute).where(SemanticTrackRoute.thread_record_id == thread.id)
@@ -293,15 +289,26 @@ def _decision_summary(decision: Any) -> dict[str, str]:
     }
 
 
-def _is_provisionable(decision: Any) -> bool:
+def _is_provisionable(decision: Any, *, existing_track: bool) -> bool:
+    """Positive evidence rule for one reviewed route.
+
+    Every term must be decided (no ``REVIEW``) and at least one payment or date term
+    must be mutually accepted. A new track additionally needs an explicit accepted
+    lead offer, because the caller may only CREATE from an evidenced new
+    cooperation. Adopting an *existing* track has no lead to accept: the business
+    relationship already exists, so its thread legitimately carries accepted terms
+    without any new offer sentence. That is exactly the evidence the semantic
+    worker's own UPDATE path requires, so the provisioning gate never demands more
+    than the write it guards.
+    """
     if any(
         getattr(decision, name).verdict == Verdict.REVIEW
         for name in ("lead", "fee", "deadline", "status")
     ):
         return False
-    return decision.lead.verdict == Verdict.ACCEPT and any(
-        getattr(decision, name).verdict == Verdict.ACCEPT for name in ("fee", "deadline")
-    )
+    if not any(getattr(decision, name).verdict == Verdict.ACCEPT for name in ("fee", "deadline")):
+        return False
+    return existing_track or decision.lead.verdict == Verdict.ACCEPT
 
 
 def _source_id(session: Session, source_key: str) -> UUID:
@@ -365,7 +372,9 @@ def discover(
             try:
                 decision = decide(messages, own_address=own_address, existing_track=False)
                 verdicts = _decision_summary(decision)
-                provisionable = _is_provisionable(decision)
+                # Discovery surfaces candidates for a NEW track only; adoption of an
+                # existing track is a separate, explicitly identified operator entry.
+                provisionable = _is_provisionable(decision, existing_track=False)
             except Exception as error:
                 # Sanitized allowlisted code only: never provider text, addresses,
                 # business keys or an unexpected exception's message.
