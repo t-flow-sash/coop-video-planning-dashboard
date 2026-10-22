@@ -24,7 +24,7 @@ import {
   type ReleaseFilter,
   type SortKey,
 } from "@/features/coops/domain";
-import { type CoopRepository } from "@/lib/api/coops";
+import { type CoopRepository, type SemanticStatus } from "@/lib/api/coops";
 
 const SYNC_LABELS = {
   local: "Lokal",
@@ -158,6 +158,25 @@ export function CoopWorkspace({
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailRequest, setDetailRequest] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [semanticStatus, setSemanticStatus] = useState<SemanticStatus | null>(
+    null,
+  );
+  const [semanticError, setSemanticError] = useState(false);
+  useEffect(() => {
+    if (!repository.semanticStatus || demoMode) return;
+    let active = true;
+    repository.semanticStatus().then(
+      (status) => {
+        if (active) setSemanticStatus(status);
+      },
+      () => {
+        if (active) setSemanticError(true);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [repository, demoMode]);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{
     tone: "success" | "error";
@@ -444,6 +463,108 @@ export function CoopWorkspace({
             </button>
           )}
         </div>
+
+        {!demoMode && repository.semanticStatus && (
+          <section
+            className="environment-note"
+            role="region"
+            aria-label="Import und Coverage"
+            aria-live="polite"
+          >
+            <div>
+              <h2>Import und Coverage</h2>
+              {semanticError ? (
+                <p>Status nicht verfügbar – Importfortschritt unbekannt.</p>
+              ) : !semanticStatus ? (
+                <p>Status wird geladen …</p>
+              ) : (
+                <>
+                  <p>
+                    <strong>Coverage nicht verifiziert.</strong>{" "}
+                    {semanticStatus.coverage_note}
+                  </p>
+                  <p>
+                    Stand der Datenbank:{" "}
+                    <time dateTime={semanticStatus.as_of}>
+                      {new Date(semanticStatus.as_of).toLocaleString("de-DE")}
+                    </time>{" "}
+                    · {semanticStatus.domain_records} Kooperationen im führenden
+                    Datenbestand.
+                  </p>
+                  {semanticStatus.sources.length === 0 && (
+                    <p>Keine Quelle erfasst. Importzustand unbekannt.</p>
+                  )}
+                  {semanticStatus.sources.map((source, index) => (
+                    <div key={index}>
+                      <p>
+                        Quelle {index + 1}:{" "}
+                        {source.enabled ? "aktiv konfiguriert" : "deaktiviert"}{" "}
+                        · entdeckt {source.discovered} · verarbeitet{" "}
+                        {source.processed} · CREATE {source.created} · UPDATE{" "}
+                        {source.updated} · unverändert {source.unchanged} ·
+                        Review {source.review} · Retry {source.retry} · Backlog{" "}
+                        {source.backlog}
+                      </p>
+                      <p>
+                        Ältester offener Beleg:{" "}
+                        {source.oldest_backlog_at
+                          ? new Date(source.oldest_backlog_at).toLocaleString(
+                              "de-DE",
+                            )
+                          : "keiner / unbekannt"}{" "}
+                        · letzter Beleg:{" "}
+                        {source.latest_evidence_at
+                          ? new Date(source.latest_evidence_at).toLocaleString(
+                              "de-DE",
+                            )
+                          : "unbekannt"}{" "}
+                        · letzte semantische Aktivität:{" "}
+                        {source.last_semantic_activity
+                          ? new Date(
+                              source.last_semantic_activity,
+                            ).toLocaleString("de-DE")
+                          : "keine"}
+                      </p>
+                      <p>
+                        Letzter Collector-Lauf:{" "}
+                        {source.last_collector_run
+                          ? `${source.last_collector_run.mode} ${source.last_collector_run.status}`
+                          : "keiner"}{" "}
+                        · Alter des erfolgreichen Collector-Laufs:{" "}
+                        {source.collector_age_seconds === null
+                          ? "unbekannt"
+                          : `${source.collector_age_seconds} Sekunden`}
+                        . Collector-Erfolg ist keine semantische Verarbeitung.
+                      </p>
+                      <p>
+                        Threads entdeckt {source.threads_discovered} · mit
+                        exakter Route {source.threads_routed} · ohne Route{" "}
+                        {source.threads_awaiting_route}
+                        {source.oldest_awaiting_route_at
+                          ? ` · ältester Thread ohne Route: ${new Date(
+                              source.oldest_awaiting_route_at,
+                            ).toLocaleString("de-DE")}`
+                          : ""}
+                        . Threads ohne Route bleiben Review; Zuordnung nie
+                        allein über Name, Betreff oder Thread.
+                      </p>
+                      {(source.review > 0 ||
+                        source.retry > 0 ||
+                        source.backlog > 0 ||
+                        source.threads_awaiting_route > 0) && (
+                        <p>
+                          Unklare Fälle und ausstehende Belege bleiben offen;
+                          keine automatische Freigabe oder Hochrechnung auf
+                          Business-Tracks.
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </section>
+        )}
 
         <nav className="observations" aria-label="Beobachtungen">
           {observations.map((item) => (

@@ -10,7 +10,14 @@ from pathlib import Path
 import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-ALLOWED_INGESTION_MODULES = {"__init__.py", "gmail.py"}
+ALLOWED_INGESTION_MODULES = {
+    "__init__.py",
+    "gmail.py",
+    "gmail_semantic.py",
+    "gmail_route_provision.py",
+    "gmail_semantic_delta.py",
+    "gmail_semantic_queue.py",
+}
 ALLOWED_IMPORT_RESOURCES = {
     "gmail-collector-db.secret.sops.yaml",
     "gmail-egress-proxy.yaml",
@@ -28,6 +35,7 @@ ALLOWED_API_ROUTES = {
     ("POST", "/api/v1/contacts"),
     ("POST", "/api/v1/coops"),
     ("GET", "/api/v1/coops"),
+    ("GET", "/api/v1/semantic/status"),
     ("GET", "/api/v1/coops/{coop_id}"),
     ("PATCH", "/api/v1/coops/{coop_id}"),
     ("POST", "/api/v1/coops/{coop_id}/transitions"),
@@ -103,7 +111,13 @@ def _python_route_inventory(path: Path) -> tuple[set[tuple[str, str]], list[str]
                 if isinstance(node, ast.Import)
                 else [node.module or ""]
             )
-            if any(module.startswith("app.ingestion") for module in modules):
+            if any(module.startswith("app.ingestion") for module in modules) and path.name not in {
+                "gmail_semantic.py",
+                "gmail_semantic_delta.py",
+                "gmail_semantic_queue.py",
+                # Operator-only route provisioning; no CLI, scheduler or API import.
+                "gmail_route_provision.py",
+            }:
                 violations.append(f"API/service imports ingestion runtime: {path}")
         if (
             isinstance(node, ast.Call)
@@ -134,6 +148,14 @@ def _python_ingestion_mutation_surfaces(path: Path, root: Path) -> list[str]:
     if relative in {
         "apps/api/app/ingestion/gmail.py",
         "apps/api/app/manual_coop_import.py",
+        # Separate CLI-only reviewed business path; never an ingestion runtime entry point.
+        "apps/api/app/reviewed_domain_import.py",
+        # Explicit semantic worker is separate from the metadata collector.
+        # Provisioning is separately authorized, not imported by the collector or API.
+        "apps/api/app/ingestion/gmail_route_provision.py",
+        "apps/api/app/ingestion/gmail_semantic_delta.py",
+        # Manual, bounded semantic catch-up uses the separately authorized worker.
+        "apps/api/app/ingestion/gmail_semantic_queue.py",
     }:
         return []
     source = path.read_text(encoding="utf-8")
@@ -275,6 +297,7 @@ def readonly_scope_violations(root: Path) -> list[str]:
             "gmail-import-bootstrap",
         ),
         ("infrastructure/import/gmail-recurring-cronjobs.yaml", "CronJob", "gmail-import-delta"),
+        ("infrastructure/semantic/semantic-cronjob.yaml", "CronJob", "gmail-semantic-worker"),
     }
     for path in _operational_files(root):
         violations.extend(_semantic_surface_violations(path, root))

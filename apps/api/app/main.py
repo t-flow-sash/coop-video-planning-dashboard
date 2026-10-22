@@ -39,8 +39,10 @@ from app.schemas import (
     OrganizationCreate,
     OrganizationRead,
     ReopenRequest,
+    SemanticStatus,
     TransitionRequest,
 )
+from app.semantic_status import snapshot as semantic_snapshot
 from app.services.coops import (
     coop_filters,
     create_contact,
@@ -227,6 +229,11 @@ def get_coops(
         "next_cursor": next_cursor,
         "total": total,
     }
+
+
+@app.get("/api/v1/semantic/status", response_model=SemanticStatus)
+def get_semantic_status(session: Session = Depends(get_session)) -> SemanticStatus:
+    return semantic_snapshot(session)
 
 
 @app.get("/api/v1/coops/{coop_id}", response_model=CoopDetail)

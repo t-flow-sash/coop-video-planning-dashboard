@@ -24,6 +24,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+psycopg://coop:coop@127.0.0.1:5432/coop_test
       COLLECTOR_DATABASE_URL: postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:5432/coop_test
+      SEMANTIC_DATABASE_URL: postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:5432/coop_test
       NEXT_PUBLIC_API_URL: /api/v1
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -47,6 +48,10 @@ jobs:
       - run: uv run --project apps/api python -m app.database_access provision
       - run: uv run --project apps/api alembic upgrade head
       - run: uv run --project apps/api python -m app.database_access reconcile
+      # The semantic writer's attestation requires the database-wide routine and
+      # schema invariants that the collector reconcile establishes first.
+      - run: uv run --project apps/api python -m app.semantic_database_access provision
+      - run: uv run --project apps/api python -m app.semantic_database_access reconcile
       - run: uv run --project apps/api python -m app.seed
       - run: cd apps/api && uv run ruff format --check app tests alembic
       - run: cd apps/api && uv run ruff check app tests alembic
@@ -74,7 +79,7 @@ jobs:
       - run: pnpm --filter web typecheck
       - run: pnpm --filter web test
       - run: node --test scripts/tests/*.test.mjs
-      - run: uv run --with pyyaml==6.0.3 -- python3 -m unittest scripts.tests.test_gitops_static scripts.tests.test_operational_scripts scripts.tests.test_collector_isolation_static scripts.tests.test_gmail_egress_proxy scripts.tests.test_gmail_full_pilot
+      - run: uv run --with pyyaml==6.0.3 -- python3 -m unittest scripts.tests.test_gitops_static scripts.tests.test_operational_scripts scripts.tests.test_collector_isolation_static scripts.tests.test_gmail_egress_proxy scripts.tests.test_gmail_full_pilot scripts.tests.test_semantic_release
       - run: node --check scripts/e2e-gateway.mjs
       - run: pnpm --filter web build
       - name: Build and smoke-test production images
@@ -123,6 +128,7 @@ jobs:
           image_database='coop_image_migration_test'
           image_database_url="postgresql+psycopg://coop:coop@127.0.0.1:5432/$image_database"
           image_collector_url="postgresql+psycopg://coop_evidence_collector:collector-ci-only@127.0.0.1:5432/$image_database"
+          image_semantic_url="postgresql+psycopg://coop_semantic_writer:semantic-ci-only@127.0.0.1:5432/$image_database"
           test -n "$POSTGRES_SERVICE_ID"
           docker exec "$POSTGRES_SERVICE_ID" psql -v ON_ERROR_STOP=1 -U coop -d postgres \
             -c "DROP DATABASE IF EXISTS $image_database"
@@ -130,12 +136,17 @@ jobs:
             -c "CREATE DATABASE $image_database"
           image_run=(docker run --rm --network host --read-only --tmpfs /tmp \
             -e DATABASE_URL="$image_database_url" \
-            -e COLLECTOR_DATABASE_URL="$image_collector_url" coop-api:ci)
+            -e COLLECTOR_DATABASE_URL="$image_collector_url" \
+            -e SEMANTIC_DATABASE_URL="$image_semantic_url" coop-api:ci)
           "${image_run[@]}" python -m app.database_access provision
           "${image_run[@]}" alembic upgrade head
           "${image_run[@]}" python -m app.database_access reconcile
+          "${image_run[@]}" python -m app.semantic_database_access provision
+          "${image_run[@]}" python -m app.semantic_database_access reconcile
+          # The promoted image must ship the semantic runner, writer ACL and CLI.
+          "${image_run[@]}" python -c 'import app.ingestion.gmail_semantic_queue; import app.ingestion.gmail_semantic_delta; import app.semantic_database_access'
           "${image_run[@]}" python -c \
-            'import app.database_access; import os; import psycopg; from sqlalchemy.engine import make_url; url=make_url(os.environ["DATABASE_URL"]).set(drivername="postgresql").render_as_string(hide_password=False); connection=psycopg.connect(url); version=connection.execute("SELECT version_num FROM alembic_version").fetchone(); source=connection.execute("SELECT source_key, kind, enabled FROM ingestion_source WHERE source_key = %s", ("gmail-open-coops-v1",)).fetchone(); connection.close(); assert version == ("f9b2d4e6a801",), version; assert source == ("gmail-open-coops-v1", "GMAIL", True), source'
+            'import app.database_access; import os; import psycopg; from sqlalchemy.engine import make_url; url=make_url(os.environ["DATABASE_URL"]).set(drivername="postgresql").render_as_string(hide_password=False); connection=psycopg.connect(url); version=connection.execute("SELECT version_num FROM alembic_version").fetchone(); source=connection.execute("SELECT source_key, kind, enabled FROM ingestion_source WHERE source_key = %s", ("gmail-open-coops-v1",)).fetchone(); connection.close(); assert version == ("6a8d1e42c907",), version; assert source == ("gmail-open-coops-v1", "GMAIL", True), source'
       - name: Validate API Dockerfile
         uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with: { dockerfile: apps/api/Dockerfile }
@@ -151,7 +162,7 @@ jobs:
             | sha256sum --check --strict
           tar -xzf /tmp/kubeconform.tar.gz kubeconform
           schema_catalog='https://raw.githubusercontent.com/datreeio/CRDs-catalog/63669a570e231d4f1f8396d229a1de512bcf0a34/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
-          for dir in infrastructure/storage infrastructure/database infrastructure/migration infrastructure/import infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
+          for dir in infrastructure/storage infrastructure/database infrastructure/migration infrastructure/import infrastructure/semantic infrastructure/apps infrastructure/ingress infrastructure/backup clusters/production; do
             output="/tmp/$(echo "$dir" | tr / -).yaml"
             # Flux removes top-level SOPS metadata before apply. Strip only that
             # metadata block here; encrypted Secret values remain schema-checked.
@@ -161,7 +172,7 @@ jobs:
               !skip { print }
             ' > "$output"
             uv run --with pyyaml==6.0.3 -- python3 scripts/validate-rendered-images.py < "$output"
-            if [[ "$dir" != infrastructure/import ]] && grep -Eq 'git-0{12}|sha256:0{64}' "$output"; then
+            if [[ "$dir" != infrastructure/import && "$dir" != infrastructure/semantic ]] && grep -Eq 'git-0{12}|sha256:0{64}' "$output"; then
               echo "Unpromoted image sentinel remains in deployable render: $dir" >&2
               exit 1
             fi
@@ -174,6 +185,16 @@ jobs:
           jobs = [doc for doc in docs if doc.get("kind") == "CronJob"]
           assert len(jobs) == 3 and all(job["spec"].get("suspend") is True for job in jobs)
           ' "$output"
+            fi
+            if [[ "$dir" == infrastructure/semantic ]]; then
+              # The semantic writer slice is non-deployable by construction: exact
+              # resource inventory, pinned sentinel image, suspended owner and
+              # CronJob, unarmed flag and dedicated secretRefs. Keep the check
+              # unconditional so a promotion that replaces the sentinel is caught
+              # rather than exempted by the sentinel grep above.
+              uv run --with pyyaml==6.0.3 -- python3 scripts/validate_semantic_dormant.py \
+                "$output" clusters/production/flux-kustomizations.yaml \
+                infrastructure/semantic/kustomization.yaml
             fi
             ./kubeconform -strict -summary -skip CustomResourceDefinition \
               -schema-location default -schema-location "$schema_catalog" "$output"

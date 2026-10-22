@@ -32,6 +32,27 @@ def document(relative_path: str) -> dict[str, Any]:
     return parsed[0]
 
 
+ALEMBIC_VERSIONS = ROOT / "apps/api/alembic/versions"
+
+
+def alembic_heads() -> list[str]:
+    """Resolve the migration graph head(s) without importing Alembic."""
+    revisions: set[str] = set()
+    parents: set[str] = set()
+    for path in sorted(ALEMBIC_VERSIONS.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        revision = re.search(r'^revision: str = "(\w+)"$', source, re.MULTILINE)
+        if revision is None:
+            raise AssertionError(f"missing revision in {path.name}")
+        revisions.add(revision.group(1))
+        parent = re.search(
+            r'^down_revision: str \| None = "(\w+)"$', source, re.MULTILINE
+        )
+        if parent is not None:
+            parents.add(parent.group(1))
+    return sorted(revisions - parents)
+
+
 def rendered_documents(relative_path: str) -> list[dict[str, Any]]:
     rendered = subprocess.run(
         ["kubectl", "kustomize", str(ROOT / relative_path)],
@@ -228,6 +249,7 @@ class ImmutableImageTests(unittest.TestCase):
             "infrastructure/database",
             "infrastructure/migration",
             "infrastructure/import",
+            "infrastructure/semantic",
             "infrastructure/apps",
             "infrastructure/ingress",
             "infrastructure/backup",
@@ -674,6 +696,150 @@ class RenderedSecurityContractTests(unittest.TestCase):
             image,
         )
 
+    def test_semantic_worker_is_dormant_hardened_and_exactly_staged(self) -> None:
+        objects = self.by_kind_name("infrastructure/semantic")
+        cronjobs = {
+            name: item for (kind, name), item in objects.items() if kind == "CronJob"
+        }
+        self.assertEqual(set(cronjobs), {"gmail-semantic-worker"})
+        cronjob = cronjobs["gmail-semantic-worker"]
+        spec = cronjob["spec"]
+        # The whole semantic slice stays dormant until a separately reviewed
+        # activation change; a suspended scheduler is not an armed one.
+        self.assertIs(spec["suspend"], True)
+        self.assertEqual(spec["concurrencyPolicy"], "Forbid")
+        self.assertEqual(spec["jobTemplate"]["spec"]["backoffLimit"], 0)
+        self.assertEqual(spec["jobTemplate"]["spec"]["activeDeadlineSeconds"], 900)
+        self.assertIn("startingDeadlineSeconds", spec)
+        pod = spec["jobTemplate"]["spec"]["template"]["spec"]
+        self.assertFalse(pod["automountServiceAccountToken"])
+        self.assertTrue(pod["securityContext"]["runAsNonRoot"])
+        self.assertEqual(
+            pod["securityContext"]["seccompProfile"], {"type": "RuntimeDefault"}
+        )
+        container = pod["containers"][0]
+        self.assertEqual(
+            container["command"],
+            ["python", "-m", "app.ingestion.gmail_semantic_queue"],
+        )
+        self.assertEqual(container["args"], ["--max-batch", "25"])
+        self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])
+        self.assertFalse(container["securityContext"]["allowPrivilegeEscalation"])
+        self.assertEqual(
+            container["securityContext"]["capabilities"], {"drop": ["ALL"]}
+        )
+        env = {item["name"]: item for item in container["env"]}
+        self.assertEqual(env["SEMANTIC_WORKER_ARMED"]["value"], "false")
+        self.assertEqual(env["HTTPS_PROXY"]["value"], "http://gmail-egress-proxy:10000")
+        self.assertEqual(env["HTTP_PROXY"]["value"], "http://gmail-egress-proxy:10000")
+        # The semantic writer must never borrow the collector or runtime credential.
+        self.assertEqual(
+            env["DATABASE_URL"]["valueFrom"]["secretKeyRef"],
+            {"name": "gmail-semantic-db", "key": "SEMANTIC_DATABASE_URL"},
+        )
+        rendered = json.dumps(cronjob)
+        self.assertNotIn("gmail-collector-db", rendered)
+        self.assertNotIn("coop-runtime", rendered)
+        sentinel = (
+            "127.0.0.1:5000/coop-api:git-000000000000@"
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        )
+        self.assertTrue(
+            container["image"] == sentinel
+            or re.fullmatch(
+                r"127\.0\.0\.1:5000/coop-api:git-[0-9a-f]{12}@sha256:[0-9a-f]{64}",
+                container["image"],
+            ),
+            container["image"],
+        )
+
+    def test_semantic_egress_is_only_dns_postgres_and_controlled_proxy(self) -> None:
+        objects = self.by_kind_name("infrastructure/semantic")
+        policies = {
+            name: item
+            for (kind, name), item in objects.items()
+            if kind == "NetworkPolicy"
+        }
+        self.assertEqual(set(policies), {"gmail-semantic-worker-egress"})
+        policy = policies["gmail-semantic-worker-egress"]
+        self.assertEqual(
+            policy["spec"]["podSelector"]["matchLabels"],
+            {"coop.example.com/semantic-worker": "true"},
+        )
+        self.assertEqual(policy["spec"]["policyTypes"], ["Egress"])
+        egress = policy["spec"]["egress"]
+        self.assertNotIn({}, egress)
+        ports = {
+            (port.get("protocol", "TCP"), port["port"])
+            for rule in egress
+            for port in rule.get("ports", [])
+        }
+        self.assertEqual(
+            ports, {("UDP", 53), ("TCP", 53), ("TCP", 5432), ("TCP", 10000)}
+        )
+        targets = {
+            (
+                target.get("namespaceSelector", {})
+                .get("matchLabels", {})
+                .get("kubernetes.io/metadata.name"),
+                target.get("podSelector", {})
+                .get("matchLabels", {})
+                .get("app.kubernetes.io/name"),
+                target.get("podSelector", {}).get("matchLabels", {}).get("k8s-app"),
+            )
+            for rule in egress
+            for target in rule.get("to", [])
+        }
+        self.assertEqual(
+            targets,
+            {
+                (None, "gmail-egress-proxy", None),
+                (None, "postgres", None),
+                ("kube-system", None, "kube-dns"),
+            },
+        )
+
+    def test_semantic_flux_wiring_and_ci_render_are_integrated(self) -> None:
+        syncs = {
+            item["metadata"]["name"]: item
+            for item in documents("clusters/production/flux-kustomizations.yaml")
+        }
+        semantic_sync = syncs["coop-semantic"]
+        self.assertEqual(semantic_sync["spec"]["path"], "./infrastructure/semantic")
+        self.assertIs(semantic_sync["spec"]["suspend"], True)
+        self.assertEqual(
+            semantic_sync["spec"]["dependsOn"],
+            [
+                {"name": "coop-database"},
+                {"name": "coop-migration"},
+                {"name": "coop-import"},
+            ],
+        )
+        self.assertEqual(
+            semantic_sync["spec"]["decryption"],
+            {"provider": "sops", "secretRef": {"name": "sops-age"}},
+        )
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        render_loop = re.search(r"for dir in ([^;]+); do", workflow)
+        self.assertIsNotNone(render_loop)
+        assert render_loop is not None
+        # Without this render step the dormant semantic manifests would ship
+        # without schema, digest-pin and dormancy validation.
+        self.assertIn("infrastructure/semantic", render_loop.group(1))
+        self.assertIn('"$dir" == infrastructure/semantic', workflow)
+        # The arm-flag proof now lives in the validator the CI invokes; assert
+        # both the invocation and the flag so a silent removal is still caught.
+        self.assertIn("scripts/validate_semantic_dormant.py", workflow)
+        validator = (ROOT / "scripts/validate_semantic_dormant.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("SEMANTIC_WORKER_ARMED", validator)
+        # Promotion stays untouched while the slice is dormant.
+        promotion = (ROOT / "scripts/build-and-push-images.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("infrastructure/semantic", promotion)
+
     def test_completed_operational_bootstrap_job_is_removed_from_desired_state(
         self,
     ) -> None:
@@ -1056,8 +1222,9 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Prove migrations from production API image", workflow)
         self.assertIn("coop_image_migration_test", workflow)
+        self.assertIn('-e COLLECTOR_DATABASE_URL="$image_collector_url"', workflow)
         self.assertIn(
-            'COLLECTOR_DATABASE_URL="$image_collector_url" coop-api:ci', workflow
+            '-e SEMANTIC_DATABASE_URL="$image_semantic_url" coop-api:ci)', workflow
         )
         self.assertIn(
             '"${image_run[@]}" python -m app.database_access provision', workflow
@@ -1066,10 +1233,30 @@ class ContinuousIntegrationContractTests(unittest.TestCase):
         self.assertIn(
             '"${image_run[@]}" python -m app.database_access reconcile', workflow
         )
-        self.assertIn("import app.database_access", workflow)
+        # The semantic writer attestation depends on the database-wide invariants
+        # the collector reconcile establishes, so pin the ordered chain: a later
+        # reorder would only surface as a red run ~30 minutes in.
+        self.assertLess(
+            workflow.index('"${image_run[@]}" python -m app.database_access reconcile'),
+            workflow.index(
+                '"${image_run[@]}" python -m app.semantic_database_access reconcile'
+            ),
+        )
+        self.assertIn(
+            '"${image_run[@]}" python -m app.semantic_database_access provision',
+            workflow,
+        )
+        # The promoted image must actually ship the semantic runner and writer ACL.
+        self.assertIn("import app.ingestion.gmail_semantic_queue", workflow)
+        self.assertRegex(workflow, r"import app\.database_access(;|\b)")
         self.assertIn("SELECT version_num FROM alembic_version", workflow)
         self.assertIn('source == ("gmail-open-coops-v1", "GMAIL", True)', workflow)
-        self.assertIn("f9b2d4e6a801", workflow)
+        heads = alembic_heads()
+        # A single linear head keeps the production-image proof unambiguous.
+        self.assertEqual(len(heads), 1, heads)
+        # The image must ship the reviewed head; a stale literal here silently
+        # proves the wrong revision, so it is derived from the migration graph.
+        self.assertIn(f'assert version == ("{heads[0]}",)', workflow)
         self.assertIn("assert len(jobs) == 3", workflow)
 
     def test_global_render_image_gate_rejects_any_unpinned_image(self) -> None:

@@ -24,6 +24,7 @@ from app.models import (
     CoopImportState,
     ManualImportBatch,
     Organization,
+    ReviewedDomainTrack,
 )
 from app.redaction import redact_internal_references
 from app.synthetic_seeds import SYNTHETIC_SEED_COOP_IDS, SYNTHETIC_SEED_KEYS
@@ -266,6 +267,14 @@ def apply_manifest(session: Session, raw: dict[str, Any]) -> dict[str, Any]:
         if existing_batch is not None and coop is None:
             raise ManualImportError(f"missing managed record for {record.record_key}")
         state = session.get(CoopImportState, coop.id) if coop else None
+        if (
+            coop is not None
+            and session.scalar(
+                select(ReviewedDomainTrack.track_key).where(ReviewedDomainTrack.coop_id == coop.id)
+            )
+            is not None
+        ):
+            raise ManualImportError(f"reviewed-owned record conflict for {record.record_key}")
         action = "create"
         if coop is not None:
             if state is None:

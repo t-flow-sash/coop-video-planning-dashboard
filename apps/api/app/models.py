@@ -330,6 +330,9 @@ class SourceRecordRevision(Base):
     __table_args__ = (
         UniqueConstraint("source_record_id", "content_hash", name="uq_source_record_revision_hash"),
         UniqueConstraint("source_id", "id", name="uq_source_record_revision_source_id"),
+        # Required by the reviewed-domain composite FK; declared here so the
+        # schema-drift gate (`alembic check`) is clean.
+        UniqueConstraint("source_record_id", "id", name="uq_source_revision_record_pair"),
         ForeignKeyConstraint(
             ["source_id", "source_record_id"],
             ["source_record.source_id", "source_record.id"],
@@ -388,6 +391,126 @@ class SourceRecordObservation(Base):
     observed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class SemanticTrackRoute(Base):
+    """Operator-provisioned exact route; never inferred from mailbox similarity."""
+
+    __tablename__ = "semantic_track_route"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_id", "thread_record_id"], ["source_record.source_id", "source_record.id"]
+        ),
+    )
+    thread_record_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingestion_source.id"))
+    track_key: Mapped[str] = mapped_column(String(160), unique=True)
+    record_key: Mapped[str] = mapped_column(String(160), unique=True)
+    title: Mapped[str] = mapped_column(String(240))
+    expected_coop_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("coop.id"))
+
+
+class SemanticQueueCursor(Base):
+    """Queue progress separate from the collector checkpoint and semantic decisions."""
+
+    __tablename__ = "semantic_queue_cursor"
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("ingestion_source.id"), primary_key=True
+    )
+    revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    positions: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+
+
+class SemanticMessageState(Base):
+    """Semantic completion independent of ingestion_checkpoint; no MIME stored."""
+
+    __tablename__ = "semantic_message_state"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_id", "source_record_id"], ["source_record.source_id", "source_record.id"]
+        ),
+        ForeignKeyConstraint(
+            ["source_record_id", "revision_id"],
+            ["source_record_revision.source_record_id", "source_record_revision.id"],
+        ),
+        CheckConstraint(
+            "outcome IN ('RETRY','REVIEW','CREATED','UPDATED','UNCHANGED')",
+            name="ck_semantic_message_outcome",
+        ),
+    )
+    revision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    source_record_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("ingestion_source.id"))
+    outcome: Mapped[str] = mapped_column(String(20))
+    reason_code: Mapped[str] = mapped_column(String(60))
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReviewedDomainBatch(Base):
+    __tablename__ = "reviewed_domain_batch"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    manifest_id: Mapped[str] = mapped_column(String(160))
+    manifest_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    summary: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReviewedDomainTrack(Base):
+    __tablename__ = "reviewed_domain_track"
+    __table_args__ = (CheckConstraint("track_revision >= 1", name="ck_reviewed_track_revision"),)
+
+    track_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    coop_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("coop.id", ondelete="RESTRICT"), unique=True
+    )
+    track_revision: Mapped[int] = mapped_column(Integer)
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    field_baselines: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reviewed_domain_batch.id"))
+
+
+class ReviewedDomainEvidence(Base):
+    __tablename__ = "reviewed_domain_evidence"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["source_id", "source_record_id"], ["source_record.source_id", "source_record.id"]
+        ),
+        ForeignKeyConstraint(
+            ["source_id", "revision_id"],
+            ["source_record_revision.source_id", "source_record_revision.id"],
+        ),
+        ForeignKeyConstraint(
+            ["source_record_id", "revision_id"],
+            ["source_record_revision.source_record_id", "source_record_revision.id"],
+            name="fk_reviewed_evidence_exact_revision",
+        ),
+    )
+
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reviewed_domain_batch.id"), primary_key=True
+    )
+    track_key: Mapped[str] = mapped_column(
+        ForeignKey("reviewed_domain_track.track_key"), primary_key=True
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    source_record_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    revision_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+
+
+class ReviewedDomainItem(Base):
+    __tablename__ = "reviewed_domain_item"
+
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("reviewed_domain_batch.id"), primary_key=True
+    )
+    track_key: Mapped[str] = mapped_column(
+        ForeignKey("reviewed_domain_track.track_key"), primary_key=True
+    )
+    outcome: Mapped[str] = mapped_column(String(20))
+    conflict_fields: Mapped[list[str]] = mapped_column(JSONB)
 
 
 class ManualImportBatch(Base):

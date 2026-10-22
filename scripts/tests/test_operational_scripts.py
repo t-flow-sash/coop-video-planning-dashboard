@@ -24,6 +24,7 @@ class RestoreScriptTests(unittest.TestCase):
         "kustomization/coop-database",
         "kustomization/coop-migration",
         "kustomization/coop-import",
+        "kustomization/coop-semantic",
         "kustomization/coop-apps",
         "kustomization/coop-ingress",
         "kustomization/coop-backup",
@@ -46,6 +47,7 @@ class RestoreScriptTests(unittest.TestCase):
         import_reconcile_polls: int = 0,
         ignore_delta_quarantine_patch: bool = False,
         lose_delta_quarantine_on_import_resume: bool = False,
+        ignore_semantic_quarantine_patch: bool = False,
         suspension_ack_polls: int = 1,
         api_termination_stuck: bool = False,
         lock_create_readback_mismatch: bool = False,
@@ -67,6 +69,7 @@ class RestoreScriptTests(unittest.TestCase):
                 "cronjob/gmail-import-full": False,
                 "cronjob/gmail-import-bootstrap": False,
                 "cronjob/gmail-import-delta": False,
+                "cronjob/gmail-semantic-worker": False,
             }
             state_file.write_text(
                 json.dumps(
@@ -186,6 +189,13 @@ class RestoreScriptTests(unittest.TestCase):
                         if (
                             resource == "cronjob/gmail-import-delta"
                             and os.environ.get("MOCK_IGNORE_DELTA_QUARANTINE_PATCH") == "1"
+                        ):
+                            state["annotations"][resource].pop(
+                                "kustomize.toolkit.fluxcd.io/reconcile", None
+                            )
+                        if (
+                            resource == "cronjob/gmail-semantic-worker"
+                            and os.environ.get("MOCK_IGNORE_SEMANTIC_QUARANTINE_PATCH") == "1"
                         ):
                             state["annotations"][resource].pop(
                                 "kustomize.toolkit.fluxcd.io/reconcile", None
@@ -907,9 +917,17 @@ class RestoreScriptTests(unittest.TestCase):
             "gmail-import-full",
             "gmail-import-bootstrap",
             "gmail-import-delta",
+            "gmail-semantic-worker",
         ):
             self.assertTrue(state["suspended"].pop(f"cronjob/{cronjob}"))
-        self.assertFalse(any(state["suspended"].values()))
+        self.assertFalse(
+            any(
+                suspended
+                for resource, suspended in state["suspended"].items()
+                if not resource.startswith("cronjob/") and resource != "kustomization/coop-semantic"
+            )
+        )
+        self.assertTrue(state["suspended"]["kustomization/coop-semantic"])
         self.assertEqual(state["replicas"], 2)
 
     def test_matching_generation_and_ready_with_stale_marker_does_not_resume_api(self) -> None:
