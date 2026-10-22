@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from app.db import engine as default_engine
 from app.ingestion.gmail import SOURCE_KEY, GmailConfig
-from app.ingestion.gmail_semantic import FullMessageClient, Verdict, decide
+from app.ingestion.gmail_semantic import FullMessageClient, SemanticInputError, Verdict, decide
 from app.ingestion.gmail_semantic_delta import (
     FullFetcher,
     _current_pairs,
@@ -47,6 +47,26 @@ from app.models import (
 
 ARM_FLAG = "SEMANTIC_PROVISION_ARMED"
 MAX_DISCOVERY = 200
+# Single non-identifying literal for anything that is not an allowlisted input code, so
+# an unexpected exception's message (which may embed provider or business text) can
+# never reach the discovery inventory.
+UNEXPECTED_REASON = "unexpected"
+_REASON_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _undecided_reason(error: Exception) -> str:
+    """Sanitized, allowlisted reason for a thread the semantic gate cannot decide.
+
+    `SemanticInputError` carries a fixed machine code as its first argument. A bare
+    exception class name cannot separate an identity/spoofing rejection from a
+    malformed number, an oversized body or an unexpected programming error, so an
+    operator sees one indistinguishable reason for every undecidable thread.
+    """
+    if isinstance(error, SemanticInputError) and error.args:
+        code = error.args[0]
+        if isinstance(code, str) and _REASON_CODE.fullmatch(code):
+            return code
+    return UNEXPECTED_REASON
 
 
 class RouteReview(ValueError):
@@ -161,7 +181,14 @@ def provision_route(
             _review("evidence_changed")
         # Positive CREATE rule: explicit accepted lead AND mutually accepted terms.
         # A thread with ambiguous terms, withdrawal or attachments stays REVIEW.
-        decision = decide(messages, own_address=own_address, existing_track=False)
+        try:
+            decision = decide(messages, own_address=own_address, existing_track=False)
+        except SemanticInputError:
+            # Evidence the semantic gate cannot decide is a permanent, per-entry
+            # review condition, not a transient transport failure. Classify it as
+            # REVIEW so one unusable entry cannot escape `apply_map` and abort the
+            # whole operator map with a top-level RETRY, discarding every later entry.
+            _review("semantic_input_invalid")
         if (
             any(
                 getattr(decision, name).verdict == Verdict.REVIEW
@@ -306,6 +333,7 @@ def discover(
         _review("limit_invalid")
     rows: list[dict[str, Any]] = []
     failures = 0
+    undecided: dict[str, int] = {}
     with Session(engine) as session:
         routed = set(session.scalars(select(SemanticTrackRoute.thread_record_id)))
         threads = session.scalars(
@@ -339,9 +367,12 @@ def discover(
                 verdicts = _decision_summary(decision)
                 provisionable = _is_provisionable(decision)
             except Exception as error:
-                # Class name only: never provider text, addresses or business keys.
-                verdicts = {"error": type(error).__name__}
+                # Sanitized allowlisted code only: never provider text, addresses,
+                # business keys or an unexpected exception's message.
+                code = _undecided_reason(error)
+                verdicts = {"error": code}
                 provisionable = False
+                undecided[code] = undecided.get(code, 0) + 1
             rows.append(
                 {
                     "thread_ref": _thread_ref(thread.external_id),
@@ -359,6 +390,10 @@ def discover(
         _review("provider_unavailable")
     if failures:
         print(json.dumps({"discovery_skipped": failures}), file=sys.stderr)
+    if undecided:
+        # Aggregate so an operator sees *why* nothing is provisionable without
+        # scanning every row; keys are allowlisted codes only.
+        print(json.dumps({"discovery_undecided": undecided}), file=sys.stderr)
     return sorted(rows, key=lambda row: row["window"][-1], reverse=True)
 
 
