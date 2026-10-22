@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from urllib.parse import quote
@@ -23,8 +24,11 @@ def _run_alembic(database_url: str, revision: str) -> None:
         "AUTH_MODE": "disabled",
         "DATABASE_URL": database_url,
     }
+    # Invoke alembic through the interpreter already running the suite instead of
+    # `uv run`, whose environment lock is held by an outer `uv run pytest` on CI and
+    # stalls the migration tests indefinitely.
     subprocess.run(
-        ["uv", "run", "alembic", "upgrade", revision],
+        [sys.executable, "-m", "alembic", "upgrade", revision],
         cwd=API_ROOT,
         env=environment,
         check=True,
@@ -41,7 +45,7 @@ def _downgrade_alembic(database_url: str, revision: str) -> None:
         "DATABASE_URL": database_url,
     }
     subprocess.run(
-        ["uv", "run", "alembic", "downgrade", revision],
+        [sys.executable, "-m", "alembic", "downgrade", revision],
         cwd=API_ROOT,
         env=environment,
         check=True,
