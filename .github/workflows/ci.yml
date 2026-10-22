@@ -207,7 +207,9 @@ jobs:
           done
       - name: Validate shell syntax
         run: bash -n scripts/*.sh
-      - run: pnpm exec playwright install --with-deps chrome
+      - name: Install Playwright browser
+        # OS libraries are provisioned once on the unprivileged runner host.
+        run: pnpm exec playwright install chrome
       - run: |
           set -Eeuo pipefail
 
