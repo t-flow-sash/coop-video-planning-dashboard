@@ -207,9 +207,10 @@ jobs:
           done
       - name: Validate shell syntax
         run: bash -n scripts/*.sh
-      - name: Install Playwright browser
-        # OS libraries are provisioned once on the unprivileged runner host.
-        run: pnpm exec playwright install chrome
+      - name: Verify pre-provisioned Chrome
+        run: |
+          command -v google-chrome
+          google-chrome --version
       - run: |
           set -Eeuo pipefail
 
