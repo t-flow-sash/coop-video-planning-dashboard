@@ -25,7 +25,7 @@ jobs:
           POSTGRES_USER: coop
           POSTGRES_PASSWORD: coop
           PGPORT: "55435"
-        ports: ["55435:55435"]
+        ports: ["127.0.0.1:55435:55435"]
         options: >-
           --health-cmd "pg_isready -U coop -d coop_test -p 55435"
           --health-interval 3s --health-timeout 3s --health-retries 20
