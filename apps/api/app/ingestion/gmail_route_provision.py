@@ -338,8 +338,9 @@ def discover(
                 decision = decide(messages, own_address=own_address, existing_track=False)
                 verdicts = _decision_summary(decision)
                 provisionable = _is_provisionable(decision)
-            except Exception:
-                verdicts = {"error": "review"}
+            except Exception as error:
+                # Class name only: never provider text, addresses or business keys.
+                verdicts = {"error": type(error).__name__}
                 provisionable = False
             rows.append(
                 {
