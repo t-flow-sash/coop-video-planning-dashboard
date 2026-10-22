@@ -6,8 +6,8 @@ resources:
   - web.yaml
 images:
   - name: 127.0.0.1:5000/coop-api
-    newTag: git-0e3b18895a51
-    digest: sha256:7e7f900000eab6ac31516ee3c09b5d17fd6a55d5f6a504950033030b866b69e6
+    newTag: git-102dac5b0838
+    digest: sha256:ba8fe83c37e5dbd485b8439279a128522b7c550ae855929d4bf087ff3fbb50d3
   - name: 127.0.0.1:5000/coop-web
-    newTag: git-0e3b18895a51
-    digest: sha256:de574f35e65861e228e213fc21a1b4681dfaad90b4df02f1a9c8883a5af42e3e
+    newTag: git-102dac5b0838
+    digest: sha256:94f95a69c974b087ce8cafd8875e4c695040c2d46956502de6d43798b56dc736
