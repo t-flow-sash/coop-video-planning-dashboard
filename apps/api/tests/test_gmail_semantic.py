@@ -490,3 +490,35 @@ def test_decide_rejects_unparseable_participants_and_ambiguous_sides():
     )
     with pytest.raises(SemanticInputError, match="participants_invalid"):
         decide([parse_message(ambiguous)], own_address="me@example.net", existing_track=False)
+
+
+def test_decide_accepts_bcc_inbound_with_undisclosed_recipients():
+    # BCC'd inbound mail hides its recipients behind "undisclosed-recipients:;";
+    # the thread must reach the decision layer instead of failing closed. Only our
+    # own SENT side needs a named recipient.
+    inbound = msg(
+        "m1",
+        "Collaboration offer: fee 500 EUR",
+        sender="partner@example.net",
+        labels=["INBOX"],
+    )
+    inbound["payload"]["headers"][1] = {"name": "To", "value": "undisclosed-recipients:;"}
+    decision = decide([parse_message(inbound)], own_address="me@example.net", existing_track=False)
+    assert decision.lead.verdict.name in {"ACCEPT", "REVIEW"}
+    assert all(
+        getattr(decision, name).verdict in {Verdict.ACCEPT, Verdict.REVIEW, Verdict.NO_CHANGE}
+        for name in ("lead", "fee", "deadline", "status")
+    )
+
+
+def test_decide_rejects_undisclosed_recipient_on_our_sent_side():
+    # An outbound message with no named recipient cannot be acted on safely.
+    outbound = msg(
+        "m1",
+        "Collaboration offer: fee 500 EUR",
+        sender="me@example.net",
+        labels=["SENT"],
+    )
+    outbound["payload"]["headers"][1] = {"name": "To", "value": "undisclosed-recipients:;"}
+    with pytest.raises(SemanticInputError, match="participants_invalid"):
+        decide([parse_message(outbound)], own_address="me@example.net", existing_track=False)

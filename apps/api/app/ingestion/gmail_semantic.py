@@ -522,12 +522,19 @@ def decide(
         or len({m.message_id for m in messages}) != len(messages)
     ):
         raise SemanticInputError("scope_invalid")
+    # An outbound message must name a usable recipient; an inbound message must
+    # name a usable sender. BCC'd inbound mail legitimately hides its recipients
+    # behind "undisclosed-recipients:;", so a recipient address is required only
+    # on our own (SENT) side — never failing a whole thread closed for it.
     if any(
         not _looks_like_address(parseaddr(m.sender)[1])
-        or not any(_looks_like_address(a) for a in _address_list(m.recipient))
         # A message that is both in the inbox and marked as sent is an anomaly
         # that cannot be assigned to a side.
         or ("SENT" in m.labels and "INBOX" in m.labels)
+        or (
+            "SENT" in m.labels
+            and not any(_looks_like_address(a) for a in _address_list(m.recipient))
+        )
         for m in messages
     ):
         raise SemanticInputError("participants_invalid")
