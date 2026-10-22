@@ -10,6 +10,8 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    # A stalled step must fail loudly instead of holding a runner indefinitely.
+    timeout-minutes: 45
     services:
       postgres:
         image: docker.io/library/postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
