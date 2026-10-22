@@ -197,3 +197,52 @@ def test_fail_closed_sanitized_and_bounds(queue_engine, monkeypatch, capsys):
     assert "private mail body" not in str(output)
     assert output.err.strip() == '{"outcome": "RETRY"}'
     assert output.out == ""
+
+
+def _drive_main(
+    monkeypatch: pytest.MonkeyPatch,
+    queue_engine: Engine,
+    client: Client,
+    summary: dict,
+) -> int:
+    """Run the real CLI body with a stubbed queue result and synthetic source."""
+    monkeypatch.setattr(queue, "default_engine", queue_engine)
+    monkeypatch.setenv("SEMANTIC_WORKER_ARMED", "true")
+    monkeypatch.setattr(queue, "run_queue", lambda *args, **kwargs: summary)
+    monkeypatch.setattr(queue, "FullMessageClient", lambda _: client)
+    monkeypatch.setattr(
+        queue.GmailConfig, "from_env", lambda: type("Config", (), {"account": OWN})()
+    )
+    monkeypatch.setattr(
+        "sys.argv", ["queue", "--source-key", "synthetic-semantic", "--max-batch", "25"]
+    )
+    return queue.main()
+
+
+def test_completed_review_only_run_exits_zero(queue_engine, monkeypatch, capsys):
+    # The steady state of this queue is "revisions examined, all need review".
+    # That is a completed run, not a failed one: the armed hourly CronJob must not
+    # render a red Failed job on every healthy interval.
+    setup(queue_engine)
+    summary = {
+        "processed": 25,
+        "counts": {"CREATED": 0, "UPDATED": 0, "UNCHANGED": 0, "RETRY": 0, "REVIEW": 25},
+        "limit_reached": True,
+    }
+    assert _drive_main(monkeypatch, queue_engine, Client(sample()), summary) == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == summary
+    assert output.err == ""
+
+
+def test_transient_retry_run_stays_nonzero(queue_engine, monkeypatch, capsys):
+    # Unresolved transient work must still fail the Job so a real outage is not
+    # masked by the relaxed review convention.
+    setup(queue_engine)
+    summary = {
+        "processed": 1,
+        "counts": {"CREATED": 0, "UPDATED": 0, "UNCHANGED": 0, "RETRY": 1, "REVIEW": 0},
+        "limit_reached": False,
+    }
+    assert _drive_main(monkeypatch, queue_engine, Client(sample()), summary) == 2
+    capsys.readouterr()

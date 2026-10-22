@@ -178,6 +178,23 @@ def run_queue(
     return {"processed": processed, "counts": counts, "limit_reached": processed == max_batch}
 
 
+def exit_code(summary: QueueSummary) -> int:
+    """Scheduler exit policy for a *completed* queue run.
+
+    A completed run whose remaining work is human review is a successful run:
+    the ``REVIEW`` count is published in the printed summary and by the
+    authenticated semantic status endpoint, so the truth is never hidden. The
+    armed hourly CronJob ran with ``review > 0`` in its steady state, so
+    returning nonzero for ``REVIEW`` painted a red ``Failed`` job on every
+    healthy interval and eroded the badge that must signal a real outage.
+
+    Only unresolved transient ``RETRY`` work is nonzero here; hard failures
+    (arming, configuration, provider, database) are handled separately in
+    ``main`` and remain nonzero.
+    """
+    return 0 if summary["counts"]["RETRY"] == 0 else 2
+
+
 def main() -> int:
     if os.environ.get("SEMANTIC_WORKER_ARMED") != "true":
         print(json.dumps({"outcome": "NOT_ARMED"}), file=sys.stderr)
@@ -214,7 +231,7 @@ def main() -> int:
         print(json.dumps({"outcome": "RETRY"}), file=sys.stderr)
         return 2
     print(json.dumps(summary))
-    return 0 if not summary["counts"]["RETRY"] and not summary["counts"]["REVIEW"] else 2
+    return exit_code(summary)
 
 
 if __name__ == "__main__":
