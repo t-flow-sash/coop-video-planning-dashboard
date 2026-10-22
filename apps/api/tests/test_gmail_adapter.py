@@ -182,7 +182,7 @@ def test_httpx_transport_rejects_redirects_without_forwarding_authorization(
             pass
 
     target_server = ThreadingHTTPServer(("127.0.0.1", 0), TargetHandler)
-    target_thread = threading.Thread(target=target_server.serve_forever)
+    target_thread = threading.Thread(target=target_server.serve_forever, daemon=True)
     target_thread.start()
     target_url = f"http://127.0.0.1:{target_server.server_port}/oauth-target"
 
@@ -204,7 +204,7 @@ def test_httpx_transport_rejects_redirects_without_forwarding_authorization(
             pass
 
     redirect_server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
-    redirect_thread = threading.Thread(target=redirect_server.serve_forever)
+    redirect_thread = threading.Thread(target=redirect_server.serve_forever, daemon=True)
     redirect_thread.start()
     try:
         with pytest.raises(GmailHttpError, match="redirect_rejected"):
@@ -217,8 +217,8 @@ def test_httpx_transport_rejects_redirects_without_forwarding_authorization(
     finally:
         redirect_server.shutdown()
         target_server.shutdown()
-        redirect_thread.join()
-        target_thread.join()
+        redirect_thread.join(timeout=15)
+        target_thread.join(timeout=15)
 
 
 @pytest.mark.no_db
@@ -231,6 +231,10 @@ def test_production_transport_uses_http_11_for_https_proxy_connect(
     connect_lines: list[str] = []
 
     class ProxyHandler(socketserver.StreamRequestHandler):
+        # A blocking readline() on a client that keeps the connection open would
+        # stall the single-threaded server (and its shutdown()) forever on CI.
+        timeout = 5
+
         def handle(self) -> None:
             connect_lines.append(self.rfile.readline().decode("ascii").strip())
             while self.rfile.readline() not in (b"\r\n", b"\n", b""):
@@ -238,7 +242,7 @@ def test_production_transport_uses_http_11_for_https_proxy_connect(
             self.wfile.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
 
     proxy = socketserver.TCPServer(("127.0.0.1", 0), ProxyHandler)
-    proxy_thread = threading.Thread(target=proxy.serve_forever)
+    proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
     proxy_thread.start()
     proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
     monkeypatch.setenv("HTTPS_PROXY", proxy_url)
@@ -251,7 +255,7 @@ def test_production_transport_uses_http_11_for_https_proxy_connect(
     finally:
         proxy.shutdown()
         proxy.server_close()
-        proxy_thread.join()
+        proxy_thread.join(timeout=15)
 
     assert connect_lines == ["CONNECT oauth2.googleapis.com:443 HTTP/1.1"]
 
